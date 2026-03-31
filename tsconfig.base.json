@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "verbatimModuleSyntax": true,
+    "baseUrl": ".",
+    "types": ["node"],
+    "paths": {
+      "@localhub/shared-contracts": ["packages/shared-contracts/src/index.ts"],
+      "@localhub/shared-contracts/foundation-common": ["packages/shared-contracts/src/common.ts"],
+      "@localhub/shared-contracts/foundation-config": ["packages/shared-contracts/src/config.ts"],
+      "@localhub/shared-contracts/foundation-events": ["packages/shared-contracts/src/events.ts"],
+      "@localhub/shared-contracts/foundation-models": ["packages/shared-contracts/src/models.ts"],
+      "@localhub/shared-contracts/foundation-openai": ["packages/shared-contracts/src/openai.ts"],
+      "@localhub/shared-contracts/foundation-persistence": [
+        "packages/shared-contracts/src/persistence.ts"
+      ],
+      "@localhub/shared-contracts/foundation-request-tracing": [
+        "packages/shared-contracts/src/request-tracing.ts"
+      ],
+      "@localhub/shared-contracts/foundation-runtime": ["packages/shared-contracts/src/runtime.ts"],
+      "@localhub/platform": ["packages/platform/src/index.ts"],
+      "@localhub/db": ["packages/db/src/index.ts"],
+      "@localhub/engine-core": ["packages/engine-core/src/index.ts"],
+      "@localhub/engine-llama": ["packages/engine-llama/src/index.ts"],
+      "@localhub/ui": ["packages/ui/src/index.ts"]
+    }
+  }
+}

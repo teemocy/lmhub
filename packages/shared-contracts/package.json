@@ -1,0 +1,28 @@
+{
+  "name": "@localhub/shared-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "exports": {
+    ".": "./dist/index.js",
+    "./foundation-common": "./dist/common.js",
+    "./foundation-config": "./dist/config.js",
+    "./foundation-events": "./dist/events.js",
+    "./foundation-models": "./dist/models.js",
+    "./foundation-openai": "./dist/openai.js",
+    "./foundation-persistence": "./dist/persistence.js",
+    "./foundation-request-tracing": "./dist/request-tracing.js",
+    "./foundation-runtime": "./dist/runtime.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
+}

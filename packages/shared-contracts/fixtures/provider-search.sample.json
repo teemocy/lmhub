@@ -1,0 +1,42 @@
+{
+  "items": [
+    {
+      "provider": "huggingface",
+      "providerModelId": "example-org/Example-8B-Instruct-GGUF",
+      "title": "Example 8B Instruct GGUF",
+      "author": "example-org",
+      "repositoryUrl": "https://huggingface.co/example-org/Example-8B-Instruct-GGUF",
+      "tags": ["gguf", "chat", "instruct"],
+      "formats": ["gguf"],
+      "artifacts": [
+        {
+          "artifactId": "example-8b-instruct-q4km",
+          "fileName": "example-8b-instruct-q4_k_m.gguf",
+          "format": "gguf",
+          "sizeBytes": 4861222912,
+          "architecture": "llama",
+          "quantization": "Q4_K_M",
+          "checksum": {
+            "algorithm": "sha256",
+            "value": "7d536aaf03c18ed6f745a3890dc7c53ee0f2b865ef719bfa0b11111111111111",
+            "source": "provider",
+            "status": "unknown"
+          },
+          "downloadUrl": "https://huggingface.co/example-org/Example-8B-Instruct-GGUF/resolve/main/example-8b-instruct-q4_k_m.gguf",
+          "metadata": {
+            "architecture": "llama",
+            "quantization": "Q4_K_M",
+            "contextLength": 8192
+          }
+        }
+      ],
+      "license": "apache-2.0",
+      "downloads": 4200,
+      "likes": 180,
+      "updatedAt": "2026-03-29T09:30:00.000Z",
+      "description": "Fixture provider result for contract testing."
+    }
+  ],
+  "warnings": [],
+  "sourceLatencyMs": 87
+}

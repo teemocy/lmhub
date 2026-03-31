@@ -1,0 +1,27 @@
+{
+  "command": "/usr/bin/node",
+  "args": [
+    "--input-type=module",
+    "--eval",
+    "<fake-worker-program>"
+  ],
+  "cwd": "/tmp/localhub/engines/llama.cpp/runtime/localhub-qwen2.5-7b-instruct-q4km__llama.cpp__chat__cfg-stage1",
+  "env": {
+    "LOCALHUB_FAKE_HOST": "127.0.0.1",
+    "LOCALHUB_FAKE_PORT": "46001",
+    "LOCALHUB_RUNTIME_KEY": "localhub-qwen2.5-7b-instruct-q4km__llama.cpp__chat__cfg-stage1",
+    "LOCALHUB_MODEL_ID": "localhub/qwen2.5-7b-instruct-q4km",
+    "LOCALHUB_MODEL_PATH": "/tmp/localhub/models/qwen2.5-7b-instruct-q4_k_m.gguf",
+    "LOCALHUB_HEALTH_FILE": "/tmp/localhub/engines/llama.cpp/runtime/localhub-qwen2.5-7b-instruct-q4km__llama.cpp__chat__cfg-stage1/health.json",
+    "LOCALHUB_FAKE_STARTUP_DELAY_MS": "60"
+  },
+  "healthUrl": "file:///tmp/localhub/engines/llama.cpp/runtime/localhub-qwen2.5-7b-instruct-q4km__llama.cpp__chat__cfg-stage1/health.json",
+  "managedBy": "fake-worker",
+  "runtimeDir": "/tmp/localhub/engines/llama.cpp/runtime/localhub-qwen2.5-7b-instruct-q4km__llama.cpp__chat__cfg-stage1",
+  "transport": "filesystem",
+  "versionTag": "stage1-fixture",
+  "notes": [
+    "Using the Stage 1 fake llama.cpp worker harness.",
+    "The harness writes readiness state to /tmp/localhub/engines/llama.cpp/runtime/localhub-qwen2.5-7b-instruct-q4km__llama.cpp__chat__cfg-stage1/health.json."
+  ]
+}

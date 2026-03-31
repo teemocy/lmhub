@@ -1,0 +1,18 @@
+{
+  "family": "llama.cpp",
+  "supported": true,
+  "installedVersions": [
+    {
+      "family": "llama.cpp",
+      "version": "b3119",
+      "installRoot": "/Users/example/Library/Application Support/LocalLLMHub/engines/llama.cpp/b3119",
+      "binaryPath": "/Users/example/Library/Application Support/LocalLLMHub/engines/llama.cpp/b3119/llama-server",
+      "active": true,
+      "source": "fixture",
+      "installedAt": "2026-03-31T12:00:00.000Z",
+      "notes": ["Fixture only, not a real installation."]
+    }
+  ],
+  "defaultVersion": "b3119",
+  "warnings": []
+}

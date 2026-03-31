@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "../shared-contracts"
+    }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "src/**/*.test.ts"]
+}

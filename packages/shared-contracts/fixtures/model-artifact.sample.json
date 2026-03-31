@@ -1,0 +1,147 @@
+{
+  "artifact": {
+    "id": "artifact-example-8b-q4km",
+    "provider": "local",
+    "sourceUri": "file:///models/example-8b-instruct-q4_k_m.gguf",
+    "fileName": "example-8b-instruct-q4_k_m.gguf",
+    "format": "gguf",
+    "mediaType": "application/gguf",
+    "sizeBytes": 4861222912,
+    "localPath": "/Users/example/Library/Application Support/LocalLLMHub/models/example-8b-instruct-q4_k_m.gguf",
+    "checksum": {
+      "algorithm": "sha256",
+      "value": "7d536aaf03c18ed6f745a3890dc7c53ee0f2b865ef719bfa0b11111111111111",
+      "source": "computed",
+      "status": "verified",
+      "verifiedAt": "2026-03-31T12:15:00.000Z"
+    },
+    "gguf": {
+      "header": {
+        "format": "gguf",
+        "version": 3,
+        "tensorCount": 291,
+        "metadataEntryCount": 12,
+        "alignmentBytes": 32
+      },
+      "architecture": {
+        "architecture": "llama",
+        "quantization": "Q4_K_M",
+        "parameterCount": 8030261248,
+        "contextLength": 8192,
+        "embeddingLength": 4096,
+        "blockCount": 32,
+        "headCount": 32,
+        "headCountKv": 8,
+        "tokenizerModel": "gpt2",
+        "chatTemplate": "chatml"
+      },
+      "kv": [
+        {
+          "key": "general.name",
+          "valueType": "string",
+          "value": "Example-8B-Instruct"
+        }
+      ],
+      "source": "fixture",
+      "warnings": []
+    },
+    "tags": ["chat", "instruct"],
+    "state": "ready",
+    "createdAt": "2026-03-31T12:10:00.000Z",
+    "updatedAt": "2026-03-31T12:15:00.000Z"
+  },
+  "profile": {
+    "id": "profile-example-8b-default",
+    "artifactId": "artifact-example-8b-q4km",
+    "displayName": "Example 8B Instruct",
+    "engineFamily": "llama.cpp",
+    "capabilities": {
+      "runtime": {
+        "chat": true,
+        "embeddings": false,
+        "toolCalls": true,
+        "vision": false,
+        "audioTranscription": false,
+        "audioSpeech": false,
+        "rerank": false,
+        "promptCache": true,
+        "streaming": true
+      },
+      "execution": {
+        "cpu": true,
+        "metal": true,
+        "cuda": false,
+        "vulkan": false,
+        "gpuOffload": true,
+        "multiGpu": false,
+        "mmap": true,
+        "mlock": false
+      },
+      "limits": {
+        "maxContextTokens": 8192,
+        "maxBatchTokens": 2048,
+        "maxGpuLayers": 99
+      },
+      "metadata": {
+        "engineFamily": "llama.cpp",
+        "transport": "openai-compatible",
+        "experimentalFlags": []
+      }
+    },
+    "defaults": {
+      "contextLength": 8192,
+      "gpuLayers": 99,
+      "ttlMs": 900000
+    },
+    "labels": ["default"]
+  },
+  "runtimeFacingMetadata": {
+    "artifactId": "artifact-example-8b-q4km",
+    "profileId": "profile-example-8b-default",
+    "displayName": "Example 8B Instruct",
+    "engineFamily": "llama.cpp",
+    "provider": "local",
+    "format": "gguf",
+    "sizeBytes": 4861222912,
+    "state": "ready",
+    "localPath": "/Users/example/Library/Application Support/LocalLLMHub/models/example-8b-instruct-q4_k_m.gguf",
+    "quantization": "Q4_K_M",
+    "architecture": "llama",
+    "contextLength": 8192,
+    "embeddingLength": 4096,
+    "checksumStatus": "verified",
+    "capabilities": {
+      "runtime": {
+        "chat": true,
+        "embeddings": false,
+        "toolCalls": true,
+        "vision": false,
+        "audioTranscription": false,
+        "audioSpeech": false,
+        "rerank": false,
+        "promptCache": true,
+        "streaming": true
+      },
+      "execution": {
+        "cpu": true,
+        "metal": true,
+        "cuda": false,
+        "vulkan": false,
+        "gpuOffload": true,
+        "multiGpu": false,
+        "mmap": true,
+        "mlock": false
+      },
+      "limits": {
+        "maxContextTokens": 8192,
+        "maxBatchTokens": 2048,
+        "maxGpuLayers": 99
+      },
+      "metadata": {
+        "engineFamily": "llama.cpp",
+        "transport": "openai-compatible",
+        "experimentalFlags": []
+      }
+    }
+  }
+}

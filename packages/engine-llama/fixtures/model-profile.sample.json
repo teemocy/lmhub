@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "profile:qwen2.5-7b-instruct",
+  "modelId": "localhub/qwen2.5-7b-instruct-q4km",
+  "displayName": "Qwen 2.5 7B Instruct",
+  "engineType": "llama.cpp",
+  "pinned": false,
+  "defaultTtlMs": 900000,
+  "promptCacheKey": "cache-qwen2.5-7b",
+  "role": "chat",
+  "parameterOverrides": {
+    "contextLength": 8192,
+    "gpuLayers": 99
+  },
+  "createdAt": "2026-04-01T00:00:00.000Z",
+  "updatedAt": "2026-04-01T00:00:00.000Z"
+}

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "localhub/qwen2.5-7b-instruct-q4km",
+  "name": "Qwen 2.5 7B Instruct Q4_K_M",
+  "localPath": "/tmp/localhub/models/qwen2.5-7b-instruct-q4_k_m.gguf",
+  "format": "gguf",
+  "sizeBytes": 4861222912,
+  "architecture": "qwen2",
+  "quantization": "Q4_K_M",
+  "createdAt": "2026-04-01T00:00:00.000Z",
+  "updatedAt": "2026-04-01T00:00:00.000Z",
+  "source": {
+    "kind": "local"
+  },
+  "metadata": {
+    "schemaVersion": 1,
+    "architecture": "qwen2",
+    "quantization": "Q4_K_M",
+    "contextLength": 8192,
+    "parameterCount": 7610000000,
+    "tensorCount": 291,
+    "tokenizer": "qwen2",
+    "metadata": {
+      "general.name": "Qwen 2.5 7B Instruct"
+    }
+  },
+  "capabilities": {
+    "chat": true,
+    "embeddings": false,
+    "tools": true,
+    "streaming": true,
+    "vision": false,
+    "audioTranscription": false,
+    "audioSpeech": false,
+    "rerank": false,
+    "promptCache": true
+  },
+  "tags": ["chat", "instruct", "gguf", "fixture"]
+}

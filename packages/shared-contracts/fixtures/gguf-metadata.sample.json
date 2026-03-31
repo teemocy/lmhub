@@ -1,0 +1,35 @@
+{
+  "header": {
+    "format": "gguf",
+    "version": 3,
+    "tensorCount": 291,
+    "metadataEntryCount": 12,
+    "alignmentBytes": 32
+  },
+  "architecture": {
+    "architecture": "llama",
+    "quantization": "Q4_K_M",
+    "parameterCount": 8030261248,
+    "contextLength": 8192,
+    "embeddingLength": 4096,
+    "blockCount": 32,
+    "headCount": 32,
+    "headCountKv": 8,
+    "tokenizerModel": "gpt2",
+    "chatTemplate": "chatml"
+  },
+  "kv": [
+    {
+      "key": "general.name",
+      "valueType": "string",
+      "value": "Example-8B-Instruct"
+    },
+    {
+      "key": "llama.context_length",
+      "valueType": "number",
+      "value": 8192
+    }
+  ],
+  "source": "fixture",
+  "warnings": []
+}

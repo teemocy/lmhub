@@ -1,0 +1,23 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/shared-contracts"
+    },
+    {
+      "path": "./packages/platform"
+    },
+    {
+      "path": "./packages/db"
+    },
+    {
+      "path": "./packages/engine-core"
+    },
+    {
+      "path": "./packages/engine-llama"
+    },
+    {
+      "path": "./packages/ui"
+    }
+  ]
+}
