@@ -119,7 +119,18 @@ const createTray = (): void => {
 const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.shellGetState, () => gatewayManager.getState());
   ipcMain.handle(IPC_CHANNELS.gatewayListModels, () => gatewayManager.listModels());
+  ipcMain.handle(IPC_CHANNELS.gatewayListModelLibrary, () => gatewayManager.listModelLibrary());
   ipcMain.handle(IPC_CHANNELS.gatewayGetHealth, () => gatewayManager.getHealth());
+  ipcMain.handle(IPC_CHANNELS.gatewayListEngines, () => gatewayManager.listEngines());
+  ipcMain.handle(IPC_CHANNELS.gatewayRegisterLocalModel, (_event, payload) =>
+    gatewayManager.registerLocalModel(payload),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayPreloadModel, (_event, modelId: string) =>
+    gatewayManager.preloadModel(modelId),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayEvictModel, (_event, modelId: string) =>
+    gatewayManager.evictModel(modelId),
+  );
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelDialog, async () => {
     const options = {
@@ -156,7 +167,7 @@ const bootstrap = async (): Promise<void> => {
   registerIpcHandlers();
   await createWindow();
   createTray();
-  void gatewayManager.start();
+  await gatewayManager.start();
 };
 
 app.on("before-quit", () => {

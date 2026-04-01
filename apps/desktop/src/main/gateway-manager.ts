@@ -8,12 +8,20 @@ import process from "node:process";
 import type { Readable } from "node:stream";
 import { readGatewayDiscoveryFile, resolveAppPaths } from "@localhub/platform";
 import {
+  type DesktopEngineList,
+  type DesktopLocalModelImportRequest,
+  type DesktopLocalModelImportResponse,
+  type DesktopModelLibrary,
+  type DesktopModelRecord,
   type DesktopShellState,
   type GatewayDiscoveryFile,
   type GatewayEvent,
   type GatewayHealthSnapshot,
   type PublicModelList,
   type RequestRoute,
+  desktopEngineListSchema,
+  desktopLocalModelImportResponseSchema,
+  desktopModelLibrarySchema,
   desktopShellStateSchema,
   gatewayEventSchema,
   gatewayHealthSnapshotSchema,
@@ -34,33 +42,20 @@ type RawGatewayHealth = {
   activeWebSocketClients: number;
 };
 
-type RawPublicModel = {
-  id: string;
-  object: "model";
-  created: number;
-  owned_by: string;
-};
-
-type RawRuntimeModel = RawPublicModel & {
-  loaded: boolean;
-  state: "Idle" | "Loading" | "Ready" | "Busy" | "Unloading" | "Crashed" | "CoolingDown";
-  capabilities: string[];
-};
+type LegacyWorkerState =
+  | "Idle"
+  | "Loading"
+  | "Ready"
+  | "Busy"
+  | "Unloading"
+  | "Crashed"
+  | "CoolingDown";
 
 type LegacyGatewayEvent = {
   type: "MODEL_STATE_CHANGED" | "LOG_STREAM" | "METRICS_TICK" | "REQUEST_TRACE";
   ts: string;
   traceId?: string;
   payload: Record<string, unknown>;
-};
-
-type RawPublicModelsResponse = {
-  object: "list";
-  data: RawPublicModel[];
-};
-
-type RawRuntimeModelsResponse = {
-  data: RawRuntimeModel[];
 };
 
 export type DesktopSystemPaths = {
@@ -91,27 +86,48 @@ const sleep = async (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
-const toDesktopModelState = (
-  state: RawRuntimeModel["state"],
-): "idle" | "loading" | "ready" | "evicting" | "error" => {
-  switch (state) {
-    case "Loading":
-      return "loading";
-    case "Ready":
-    case "Busy":
-      return "ready";
-    case "Unloading":
-    case "CoolingDown":
-      return "evicting";
-    case "Crashed":
-      return "error";
-    default:
-      return "idle";
+const pickFirstNonEmpty = (...values: Array<string | undefined>): string | undefined => {
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (normalized) {
+      return normalized;
+    }
   }
+
+  return undefined;
 };
 
+export const resolveControlBearerToken = (
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined => {
+  const sharedToken = pickFirstNonEmpty(env.LOCAL_LLM_HUB_AUTH_TOKEN);
+  const publicToken = pickFirstNonEmpty(
+    env.LOCAL_LLM_HUB_GATEWAY_PUBLIC_BEARER_TOKEN,
+    env.GATEWAY_PUBLIC_BEARER_TOKEN,
+    sharedToken,
+  );
+
+  return pickFirstNonEmpty(
+    env.LOCAL_LLM_HUB_GATEWAY_CONTROL_BEARER_TOKEN,
+    env.GATEWAY_CONTROL_BEARER_TOKEN,
+    publicToken,
+    sharedToken,
+  );
+};
+
+export const buildControlHeaders = (
+  controlBearerToken: string | undefined,
+  extraHeaders: Record<string, string> = {},
+): Record<string, string> =>
+  controlBearerToken
+    ? {
+        ...extraHeaders,
+        Authorization: `Bearer ${controlBearerToken}`,
+      }
+    : extraHeaders;
+
 const toLifecycleState = (
-  state: RawRuntimeModel["state"],
+  state: LegacyWorkerState,
 ): "Loading" | "Ready" | "Busy" | "Unloading" | "Crashed" | "CoolingDown" => {
   if (state === "Idle") {
     return "CoolingDown";
@@ -120,21 +136,52 @@ const toLifecycleState = (
   return state;
 };
 
-const prettifyModelName = (modelId: string): string =>
-  modelId
-    .split("/")
-    .at(-1)
-    ?.split("-")
-    .map((segment) =>
-      segment.length === 0 ? segment : `${segment.charAt(0).toUpperCase()}${segment.slice(1)}`,
-    )
-    .join(" ") ?? modelId;
-
 const buildRuntimeKey = (modelId: string) => ({
   modelId,
   engineType: "llama.cpp",
   role: "chat" as const,
   configHash: "stage1-mock",
+});
+
+const formatBytes = (value: number): string => {
+  if (value <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let nextValue = value;
+  let unitIndex = 0;
+
+  while (nextValue >= 1024 && unitIndex < units.length - 1) {
+    nextValue /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${nextValue >= 10 ? nextValue.toFixed(0) : nextValue.toFixed(1)} ${units[unitIndex]}`;
+};
+
+const describeModel = (model: DesktopModelRecord): string => {
+  const facets = [model.role, model.format, model.architecture, model.quantization]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.replace(/-/g, " "));
+
+  if (facets.length === 0) {
+    return "Registered local model.";
+  }
+
+  return facets.join(" • ");
+};
+
+const toModelSummary = (model: DesktopModelRecord): PublicModelList["data"][number] => ({
+  id: model.id,
+  name: model.displayName,
+  engine: model.engineType,
+  state: model.state,
+  sizeLabel: formatBytes(model.sizeBytes),
+  tags: model.tags,
+  ...(model.contextLength !== undefined ? { contextLength: model.contextLength } : {}),
+  description: describeModel(model),
+  ...(model.lastUsedAt ? { lastUsedAt: model.lastUsedAt } : {}),
 });
 
 const isLegacyGatewayEvent = (value: unknown): value is LegacyGatewayEvent => {
@@ -158,6 +205,7 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     case "GET /v1/models":
     case "GET /control/health":
     case "GET /control/models":
+    case "POST /control/models/register-local":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/system/shutdown":
@@ -179,7 +227,7 @@ const toLogLevel = (value: unknown): "debug" | "info" | "warn" | "error" => {
   return "info";
 };
 
-const toRawWorkerState = (value: unknown): RawRuntimeModel["state"] => {
+const toRawWorkerState = (value: unknown): LegacyWorkerState => {
   if (
     value === "Loading" ||
     value === "Ready" ||
@@ -194,11 +242,23 @@ const toRawWorkerState = (value: unknown): RawRuntimeModel["state"] => {
   return "Idle";
 };
 
+const getErrorMessage = (value: unknown, fallback: string): string => {
+  if (!value || typeof value !== "object") {
+    return fallback;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.message === "string" && candidate.message.trim().length > 0
+    ? candidate.message
+    : fallback;
+};
+
 export class GatewayManager extends EventEmitter {
   private child: ChildProcessByStdio<null, Readable, Readable> | undefined;
   private controlSocket: WebSocket | undefined;
   private discovery: GatewayDiscoveryFile | undefined;
   private stopping = false;
+  private readonly controlBearerToken = resolveControlBearerToken();
   private readonly stateValue: DesktopShellState = desktopShellStateSchema.parse({
     phase: "idle",
     progress: 0,
@@ -299,7 +359,7 @@ export class GatewayManager extends EventEmitter {
       this.updateState({
         phase: "connected",
         progress: 100,
-        message: "Desktop shell connected to gateway scaffolding.",
+        message: "Desktop shell connected to the live model runtime.",
         lastError: null,
       });
     } catch (error) {
@@ -314,41 +374,34 @@ export class GatewayManager extends EventEmitter {
   }
 
   async listModels(): Promise<PublicModelList> {
-    const discovery = this.requireDiscovery();
-    const [publicResponse, runtimeResponse] = await Promise.all([
-      fetch(`${discovery.publicBaseUrl}/v1/models`),
-      fetch(`${discovery.controlBaseUrl}/control/models`),
-    ]);
-
-    const publicJson = (await publicResponse.json()) as RawPublicModelsResponse;
-    const runtimeJson = (await runtimeResponse.json()) as RawRuntimeModelsResponse;
-    const runtimeMap = new Map(runtimeJson.data.map((model) => [model.id, model]));
+    const library = await this.listModelLibrary();
 
     return publicModelListSchema.parse({
       object: "list",
-      data: publicJson.data.map((model) => {
-        const runtime = runtimeMap.get(model.id);
-
-        return {
-          id: model.id,
-          name: prettifyModelName(model.id),
-          engine: "llama.cpp",
-          state: runtime ? toDesktopModelState(runtime.state) : "idle",
-          sizeLabel: runtime?.loaded ? "Warm mock worker" : "Mock registry entry",
-          tags: runtime?.capabilities ?? [],
-          description: runtime?.loaded
-            ? "Live placeholder wired through the mocked control plane."
-            : "Available in the mocked runtime registry for Stage 1 shell work.",
-          lastUsedAt: new Date(model.created * 1000).toISOString(),
-        };
-      }),
+      data: library.data.map((model) => toModelSummary(model)),
     });
+  }
+
+  async listModelLibrary(): Promise<DesktopModelLibrary> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/models`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to load the desktop model library.",
+    );
+
+    return desktopModelLibrarySchema.parse(payload);
   }
 
   async getHealth(): Promise<GatewayHealthSnapshot> {
     const discovery = this.requireDiscovery();
-    const response = await fetch(`${discovery.controlBaseUrl}/control/health`);
-    const raw = (await response.json()) as RawGatewayHealth;
+    const raw = (await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/health`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to load gateway health.",
+    )) as RawGatewayHealth;
 
     return gatewayHealthSnapshotSchema.parse({
       state: raw.status === "ok" ? "ready" : "degraded",
@@ -361,6 +414,64 @@ export class GatewayManager extends EventEmitter {
     });
   }
 
+  async listEngines(): Promise<DesktopEngineList> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/engines`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to load installed engine versions.",
+    );
+
+    return desktopEngineListSchema.parse(payload);
+  }
+
+  async registerLocalModel(
+    payload: DesktopLocalModelImportRequest,
+  ): Promise<DesktopLocalModelImportResponse> {
+    const discovery = this.requireDiscovery();
+    const json = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/models/register-local`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify(payload),
+      }),
+      "Unable to register the selected local model.",
+    );
+
+    return desktopLocalModelImportResponseSchema.parse(json);
+  }
+
+  async preloadModel(modelId: string): Promise<void> {
+    const discovery = this.requireDiscovery();
+    await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/models/preload`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ modelId }),
+      }),
+      `Unable to preload ${modelId}.`,
+    );
+  }
+
+  async evictModel(modelId: string): Promise<void> {
+    const discovery = this.requireDiscovery();
+    await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/models/evict`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ modelId }),
+      }),
+      `Unable to evict ${modelId}.`,
+    );
+  }
+
   async stop(): Promise<void> {
     this.stopping = true;
 
@@ -368,6 +479,7 @@ export class GatewayManager extends EventEmitter {
       try {
         await fetch(`${this.discovery.controlBaseUrl}/control/system/shutdown`, {
           method: "POST",
+          headers: this.createControlHeaders(),
         });
       } catch {
         /* noop */
@@ -388,6 +500,26 @@ export class GatewayManager extends EventEmitter {
     }
 
     return this.discovery;
+  }
+
+  private createControlHeaders(
+    extraHeaders: Record<string, string> = {},
+  ): Record<string, string> {
+    return buildControlHeaders(this.controlBearerToken, extraHeaders);
+  }
+
+  private async readJsonResponse(
+    request: Promise<Response>,
+    fallbackMessage: string,
+  ): Promise<unknown> {
+    const response = await request;
+    const payload = (await response.json().catch(() => null)) as unknown;
+
+    if (!response.ok) {
+      throw new Error(getErrorMessage(payload, fallbackMessage));
+    }
+
+    return payload;
   }
 
   private spawnGatewayProcess(): ChildProcessByStdio<null, Readable, Readable> {
@@ -453,7 +585,9 @@ export class GatewayManager extends EventEmitter {
 
   private async connectTelemetry(discovery: GatewayDiscoveryFile): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(discovery.websocketUrl);
+      const socket = new WebSocket(discovery.websocketUrl, {
+        headers: this.createControlHeaders(),
+      });
       let settled = false;
 
       socket.on("open", () => {
