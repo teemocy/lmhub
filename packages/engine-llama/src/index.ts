@@ -26,17 +26,18 @@ import type {
 } from "@localhub/shared-contracts/foundation-models";
 import type { RuntimeKey } from "@localhub/shared-contracts/foundation-runtime";
 
-import {
-  LLAMA_CPP_FIXTURE_ARTIFACT,
-  LLAMA_CPP_FIXTURE_PROFILE,
-  LLAMA_CPP_FIXTURE_RUNTIME_KEY,
-} from "./fixtures.js";
 import { buildFakeLlamaCppWorkerProgram, createLlamaCppHarness } from "./fake-worker.js";
+
+export * from "./fixtures.js";
+export * from "./gguf.js";
+export * from "./model-manager.js";
+export * from "./session.js";
 
 const LLAMA_CPP_ENGINE_TYPE = "llama.cpp";
 const LLAMA_CPP_BINARY_CANDIDATES = ["llama-server", "server"] as const;
 const DEFAULT_FAKE_VERSION_TAG = "stage1-fixture";
 const DEFAULT_FAKE_BASE_PORT = 46_000;
+const PROMPT_CACHE_DIRNAME = "prompt-caches";
 
 interface RuntimePlan {
   command: ResolvedCommand;
@@ -172,7 +173,7 @@ function buildBinaryArgs(
   if (input.profile.promptCacheKey) {
     args.push(
       "--prompt-cache",
-      path.join(input.supportRoot, "prompt-cache", `${input.profile.promptCacheKey}.bin`),
+      path.join(input.supportRoot, PROMPT_CACHE_DIRNAME, `${input.profile.promptCacheKey}.bin`),
     );
   }
 
@@ -204,6 +205,25 @@ function writeManifest(manifestPath: string, manifest: LlamaCppInstallManifest):
 
 function writeRuntimePlan(runtimePlanPath: string, command: ResolvedCommand): void {
   writeFileSync(runtimePlanPath, `${JSON.stringify(command, null, 2)}\n`, "utf8");
+}
+
+async function probeHttpWorker(baseUrl: string): Promise<Response> {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  const candidates = ["/health", "/healthz", "/"];
+
+  for (const candidate of candidates) {
+    try {
+      const response = await fetch(`${normalizedBaseUrl}${candidate}`, {
+        signal: AbortSignal.timeout(750),
+      });
+
+      if (response.ok || response.status === 503) {
+        return response;
+      }
+    } catch {}
+  }
+
+  throw new Error(`Unable to reach llama.cpp worker at ${baseUrl}.`);
 }
 
 export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): EngineAdapter {
@@ -390,7 +410,8 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
       const runtimeDir = path.join(paths.runtimeRoot, runtimeKeyString);
       const runtimePlanPath = path.join(runtimeDir, "launch-plan.json");
       const healthFile = path.join(runtimeDir, "health.json");
-      const healthUrl = `file://${healthFile}`;
+      const fakeWorkerHealthUrl = `file://${healthFile}`;
+      const binaryHealthUrl = `http://${host}:${port}`;
       const activeVersion = await ensureActiveVersion(input);
 
       mkdirSync(runtimeDir, { recursive: true });
@@ -407,7 +428,7 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
             args: buildBinaryArgs(input, host, port),
             cwd: runtimeDir,
             env: {},
-            healthUrl,
+            healthUrl: binaryHealthUrl,
             managedBy: "binary",
             runtimeDir,
             transport: "http",
@@ -430,7 +451,7 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
               LOCALHUB_HEALTH_FILE: healthFile,
               LOCALHUB_FAKE_STARTUP_DELAY_MS: String(options.fakeWorkerStartupDelayMs ?? 60),
             },
-            healthUrl,
+            healthUrl: fakeWorkerHealthUrl,
             managedBy: "fake-worker",
             runtimeDir,
             transport: "filesystem",
@@ -510,9 +531,7 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
       }
 
       try {
-        const response = await fetch(plan.command.healthUrl, {
-          signal: AbortSignal.timeout(750),
-        });
+        const response = await probeHttpWorker(plan.command.healthUrl);
 
         if (response.ok) {
           return {
@@ -564,9 +583,4 @@ export function createLlamaCppAdapterPlaceholder(
   return createLlamaCppAdapter(options);
 }
 
-export {
-  LLAMA_CPP_FIXTURE_ARTIFACT,
-  LLAMA_CPP_FIXTURE_PROFILE,
-  LLAMA_CPP_FIXTURE_RUNTIME_KEY,
-  createLlamaCppHarness,
-};
+export { createLlamaCppHarness };

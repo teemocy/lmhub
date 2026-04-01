@@ -5,18 +5,20 @@ import type { AddressInfo } from "node:net";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { resolveAppPaths, writeGatewayDiscoveryFile } from "@localhub/platform";
+import { desktopLocalModelImportRequestSchema } from "@localhub/shared-contracts";
 import Fastify, { type FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 
 import type { GatewayConfig } from "../config.js";
 import { MockGatewayRuntime } from "../runtime/mockRuntime.js";
-import type { GatewayPlane } from "../types.js";
+import { createRepositoryGatewayRuntime } from "../runtime/repositoryRuntime.js";
+import type { GatewayPlane, GatewayRuntime } from "../types.js";
 import { createBearerAuthHook } from "./auth.js";
 import { createLoopbackOnlyHook, getRequestPath, isOriginAllowed } from "./network.js";
 
 interface BuildGatewayOptions {
   config: GatewayConfig;
-  runtime?: MockGatewayRuntime;
+  runtime?: GatewayRuntime;
   requestShutdown?: () => Promise<void> | void;
 }
 
@@ -25,8 +27,26 @@ export interface StartedGateway {
   controlAddress: string;
   publicApp: FastifyInstance;
   controlApp: FastifyInstance;
-  runtime: MockGatewayRuntime;
+  runtime: GatewayRuntime;
   stop: () => Promise<void>;
+}
+
+interface GatewayStoppables {
+  publicApp: Pick<FastifyInstance, "close">;
+  controlApp: Pick<FastifyInstance, "close">;
+  runtime: Pick<GatewayRuntime, "stop">;
+}
+
+export async function stopGatewayServices(
+  gateway: GatewayStoppables,
+  discoveryFile: string,
+): Promise<void> {
+  await Promise.allSettled([
+    gateway.runtime.stop(),
+    gateway.publicApp.close(),
+    gateway.controlApp.close(),
+  ]);
+  await rm(discoveryFile, { force: true });
 }
 
 function createApp(): FastifyInstance {
@@ -46,7 +66,7 @@ function createApp(): FastifyInstance {
 
 function registerLifecycleHooks(
   app: FastifyInstance,
-  runtime: MockGatewayRuntime,
+  runtime: GatewayRuntime,
   plane: GatewayPlane,
 ): void {
   const requestStartedAt = new Map<string, number>();
@@ -96,10 +116,14 @@ function registerLifecycleHooks(
   });
 }
 
+function isUnknownModelError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("Unknown model:");
+}
+
 async function registerPublicApp(
   app: FastifyInstance,
   config: GatewayConfig,
-  runtime: MockGatewayRuntime,
+  runtime: GatewayRuntime,
 ): Promise<void> {
   registerLifecycleHooks(app, runtime, "public");
 
@@ -131,7 +155,7 @@ async function registerPublicApp(
 async function registerControlApp(
   app: FastifyInstance,
   config: GatewayConfig,
-  runtime: MockGatewayRuntime,
+  runtime: GatewayRuntime,
   requestShutdown?: () => Promise<void> | void,
 ): Promise<void> {
   registerLifecycleHooks(app, runtime, "control");
@@ -153,8 +177,32 @@ async function registerControlApp(
   app.get("/control/health", async () => runtime.getHealthSnapshot("control"));
 
   app.get("/control/models", async () => ({
-    data: runtime.listRuntimeModels(),
+    object: "list",
+    data: await runtime.listDesktopModels(),
   }));
+
+  app.post("/control/models/register-local", async (request, reply) => {
+    const parsed = desktopLocalModelImportRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "validation_error",
+        message: parsed.error.issues[0]?.message ?? "A local GGUF path is required.",
+        requestId: request.id,
+      });
+    }
+
+    try {
+      const result = await runtime.registerLocalModel(parsed.data, request.id);
+      return reply.code(result.created ? 201 : 200).send(result);
+    } catch (error) {
+      return reply.code(400).send({
+        error: "invalid_artifact",
+        message:
+          error instanceof Error ? error.message : "The selected local artifact could not be read.",
+        requestId: request.id,
+      });
+    }
+  });
 
   app.post<{ Body: { modelId?: string } }>("/control/models/preload", async (request, reply) => {
     const modelId = request.body?.modelId?.trim();
@@ -167,16 +215,18 @@ async function registerControlApp(
     }
 
     try {
-      const result = runtime.preloadModel(modelId, request.id);
+      const result = await runtime.preloadModel(modelId, request.id);
       return reply.code(202).send({
         accepted: true,
         alreadyWarm: result.alreadyWarm,
         model: result.model,
       });
     } catch (error) {
-      return reply.code(404).send({
-        error: "model_not_found",
-        message: error instanceof Error ? error.message : "Model not found.",
+      const statusCode = isUnknownModelError(error) ? 404 : 409;
+      return reply.code(statusCode).send({
+        error: statusCode === 404 ? "model_not_found" : "model_load_failed",
+        message:
+          error instanceof Error ? error.message : "The model could not be loaded into memory.",
         requestId: request.id,
       });
     }
@@ -193,16 +243,17 @@ async function registerControlApp(
     }
 
     try {
-      const result = runtime.evictModel(modelId, request.id);
+      const result = await runtime.evictModel(modelId, request.id);
       return reply.code(202).send({
         accepted: true,
         wasLoaded: result.wasLoaded,
         model: result.model,
       });
     } catch (error) {
-      return reply.code(404).send({
-        error: "model_not_found",
-        message: error instanceof Error ? error.message : "Model not found.",
+      const statusCode = isUnknownModelError(error) ? 404 : 409;
+      return reply.code(statusCode).send({
+        error: statusCode === 404 ? "model_not_found" : "model_evict_failed",
+        message: error instanceof Error ? error.message : "The model could not be evicted.",
         requestId: request.id,
       });
     }
@@ -220,6 +271,7 @@ async function registerControlApp(
   );
 
   app.get("/control/engines", async () => ({
+    object: "list",
     data: runtime.listEngines(),
   }));
 
@@ -272,7 +324,7 @@ function getBoundAddress(address: string | AddressInfo | null): string {
 export async function buildGateway(options: BuildGatewayOptions): Promise<{
   publicApp: FastifyInstance;
   controlApp: FastifyInstance;
-  runtime: MockGatewayRuntime;
+  runtime: GatewayRuntime;
 }> {
   const runtime =
     options.runtime ??
@@ -295,7 +347,9 @@ export async function buildGateway(options: BuildGatewayOptions): Promise<{
 
 export async function startGateway(
   config: GatewayConfig,
-  runtime = new MockGatewayRuntime({
+  runtime: GatewayRuntime = createRepositoryGatewayRuntime({
+    cwd: process.cwd(),
+    defaultModelTtlMs: config.defaultModelTtlMs,
     telemetryIntervalMs: config.telemetryIntervalMs,
   }),
 ): Promise<StartedGateway> {
@@ -312,7 +366,7 @@ export async function startGateway(
     },
   });
 
-  gateway.runtime.start();
+  await gateway.runtime.start();
 
   const stop = async (): Promise<void> => {
     if (stopPromise) {
@@ -320,9 +374,7 @@ export async function startGateway(
     }
 
     stopPromise = (async () => {
-      gateway.runtime.stop();
-      await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
-      await rm(appPaths.discoveryFile, { force: true });
+      await stopGatewayServices(gateway, appPaths.discoveryFile);
     })();
 
     return stopPromise;

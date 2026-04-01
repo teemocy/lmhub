@@ -1,13 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { once } from "node:events";
+import type { ResolveCommandInput, EngineAdapter } from "@localhub/engine-core";
 
-import type { EngineAdapter, EngineHealthCheck, ResolveCommandInput, ResolvedCommand } from "@localhub/engine-core";
-
-function sleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, delayMs);
-  });
-}
+import { launchLlamaCppSession, type LiveLlamaCppSession } from "./session.js";
 
 export function buildFakeLlamaCppWorkerProgram(): string {
   return [
@@ -72,90 +65,11 @@ export function buildFakeLlamaCppWorkerProgram(): string {
   ].join("\n");
 }
 
-export interface SpawnedLlamaCppHarness {
-  readonly child: ChildProcessWithoutNullStreams;
-  readonly command: ResolvedCommand;
-  readonly stdout: string[];
-  readonly stderr: string[];
-  waitForReady: (timeoutMs?: number) => Promise<EngineHealthCheck>;
-  stop: (timeoutMs?: number) => Promise<void>;
-}
+export type SpawnedLlamaCppHarness = LiveLlamaCppSession;
 
 export async function createLlamaCppHarness(
   adapter: EngineAdapter,
   input: ResolveCommandInput,
 ): Promise<SpawnedLlamaCppHarness> {
-  const command = await adapter.resolveCommand(input);
-  const child = spawn(command.command, command.args, {
-    cwd: command.cwd,
-    env: {
-      ...process.env,
-      ...command.env,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  const stdout: string[] = [];
-  const stderr: string[] = [];
-
-  child.stdout.on("data", (chunk) => {
-    stdout.push(chunk.toString());
-  });
-
-  child.stderr.on("data", (chunk) => {
-    stderr.push(chunk.toString());
-  });
-
-  return {
-    child,
-    command,
-    stdout,
-    stderr,
-    async waitForReady(timeoutMs = 3_000): Promise<EngineHealthCheck> {
-      const deadline = Date.now() + timeoutMs;
-
-      while (Date.now() < deadline) {
-        const health = await adapter.healthCheck(input.runtimeKey);
-        if (health.ok) {
-          return health;
-        }
-        await sleep(50);
-      }
-
-      throw new Error(
-        `Timed out waiting for fake llama.cpp worker readiness.\n${stdout.join("")}${stderr.join("")}`,
-      );
-    },
-    async stop(timeoutMs = 2_000): Promise<void> {
-      if (child.exitCode !== null) {
-        return;
-      }
-
-      const exitPromise = once(child, "exit").then(() => undefined);
-
-      if (command.healthUrl?.startsWith("http")) {
-        try {
-          await fetch(command.healthUrl.replace("/healthz", "/control/shutdown"), {
-            method: "POST",
-            signal: AbortSignal.timeout(500),
-          });
-        } catch {}
-      }
-
-      if (child.exitCode === null) {
-        child.kill("SIGTERM");
-      }
-
-      await Promise.race([
-        exitPromise,
-        sleep(timeoutMs).then(() => {
-          if (child.exitCode === null) {
-            child.kill("SIGKILL");
-          }
-        }),
-      ]);
-
-      await exitPromise;
-    },
-  };
+  return launchLlamaCppSession(adapter, input);
 }

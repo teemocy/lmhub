@@ -1,9 +1,14 @@
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { type GatewayEvent, gatewayEventSchema } from "@localhub/shared-contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { GatewayConfig } from "../src/config.js";
 import { MockGatewayRuntime } from "../src/runtime/mockRuntime.js";
-import { buildGateway } from "../src/server/app.js";
+import { buildGateway, stopGatewayServices } from "../src/server/app.js";
+import type { GatewayRuntime } from "../src/types.js";
 
 interface TestGateway {
   runtime: MockGatewayRuntime;
@@ -15,6 +20,7 @@ const activeGateways: TestGateway[] = [];
 
 function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
+    defaultModelTtlMs: 1_000,
     publicHost: "127.0.0.1",
     publicPort: 11434,
     controlHost: "127.0.0.1",
@@ -212,5 +218,97 @@ describe("gateway skeleton", () => {
 
     expect(messages.some((event) => event.type === "MODEL_STATE_CHANGED")).toBe(true);
     expect(messages.some((event) => event.type === "REQUEST_TRACE")).toBe(true);
+  });
+
+  it("waits for runtime shutdown before removing discovery state", async () => {
+    const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stop-"));
+    const discoveryFile = path.join(supportRoot, "gateway-discovery.json");
+    const stopDelayMs = 100;
+    let closedApps = 0;
+    const runtime: GatewayRuntime = {
+      start() {},
+      async stop() {
+        await new Promise((resolve) => {
+          setTimeout(resolve, stopDelayMs);
+        });
+      },
+      subscribe() {
+        return () => {};
+      },
+      listModels() {
+        return [];
+      },
+      listRuntimeModels() {
+        return [];
+      },
+      async listDesktopModels() {
+        return [];
+      },
+      listDownloads() {
+        return [];
+      },
+      listEngines() {
+        return [];
+      },
+      getHealthSnapshot(plane) {
+        return {
+          status: "ok",
+          plane,
+          uptimeMs: 0,
+          loadedModelCount: 0,
+          activeWebSocketClients: 0,
+        };
+      },
+      async registerLocalModel() {
+        throw new Error("not implemented");
+      },
+      async preloadModel() {
+        throw new Error("not implemented");
+      },
+      async evictModel() {
+        throw new Error("not implemented");
+      },
+      recordRequestTrace() {},
+    };
+    const gateway = {
+      runtime,
+      publicApp: {
+        async close() {
+          closedApps += 1;
+        },
+      },
+      controlApp: {
+        async close() {
+          closedApps += 1;
+        },
+      },
+    };
+
+    try {
+      await writeFile(discoveryFile, JSON.stringify({ pid: process.pid }), "utf8");
+
+      await expect(access(discoveryFile)).resolves.toBeUndefined();
+
+      let stopResolved = false;
+      const startedAt = Date.now();
+      const stopPromise = stopGatewayServices(gateway, discoveryFile).then(() => {
+        stopResolved = true;
+      });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 25);
+      });
+
+      expect(stopResolved).toBe(false);
+      await expect(access(discoveryFile)).resolves.toBeUndefined();
+
+      await stopPromise;
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(stopDelayMs - 20);
+      expect(closedApps).toBe(2);
+
+      await expect(access(discoveryFile)).rejects.toThrow();
+    } finally {
+      await rm(supportRoot, { recursive: true, force: true });
+    }
   });
 });

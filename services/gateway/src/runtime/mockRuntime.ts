@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
-import { type GatewayEvent, gatewayEventSchema } from "@localhub/shared-contracts";
+import {
+  type DesktopLocalModelImportResponse,
+  type DesktopModelRecord,
+  type DesktopModelRuntimeState,
+  type GatewayEvent,
+  gatewayEventSchema,
+} from "@localhub/shared-contracts";
 
 import type {
   ControlHealthSnapshot,
@@ -36,6 +43,23 @@ const DEFAULT_CONFIG_HASH = "stage1-mock";
 const MOCK_RESIDENT_MEMORY_BYTES = 2_147_483_648;
 const MOCK_GPU_MEMORY_BYTES = 1_073_741_824;
 
+function toDesktopModelState(state: WorkerState): DesktopModelRuntimeState {
+  switch (state) {
+    case "Loading":
+      return "loading";
+    case "Ready":
+    case "Busy":
+      return "ready";
+    case "Unloading":
+    case "CoolingDown":
+      return "evicting";
+    case "Crashed":
+      return "error";
+    default:
+      return "idle";
+  }
+}
+
 function createModel(id: string, created: number, capabilities: string[]): RuntimeModelRecord {
   return {
     id,
@@ -50,6 +74,27 @@ function createModel(id: string, created: number, capabilities: string[]): Runti
 
 function createTraceId(traceId?: string): string {
   return traceId?.trim() || randomUUID();
+}
+
+function prettifyModelName(modelId: string): string {
+  return (
+    modelId
+      .split("/")
+      .at(-1)
+      ?.split("-")
+      .map((segment) =>
+        segment.length === 0 ? segment : `${segment.charAt(0).toUpperCase()}${segment.slice(1)}`,
+      )
+      .join(" ") ?? modelId
+  );
+}
+
+function slugifyFileName(filePath: string): string {
+  return path
+    .basename(filePath, path.extname(filePath))
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 function getModelRole(model: RuntimeModelRecord): RuntimeEventRole {
@@ -121,6 +166,7 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     case "POST /v1/embeddings":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
+    case "POST /control/models/register-local":
     case "POST /control/system/shutdown":
     case "GET /control/downloads":
     case "POST /control/downloads":
@@ -156,13 +202,19 @@ const DEFAULT_DOWNLOADS: DownloadTaskRecord[] = [
 const DEFAULT_ENGINES: EngineRecord[] = [
   {
     id: "llama.cpp",
+    engineType: "llama.cpp",
     version: "mock-0.1.0",
     channel: "stable",
     installed: true,
+    active: true,
+    binaryPath: "/mock/bin/llama-server",
+    compatibilityNotes: "Mock engine record for desktop shell development.",
+    installedAt: new Date(1_717_286_400_000).toISOString(),
   },
 ];
 
 export class MockGatewayRuntime {
+  readonly #modelDetails = new Map<string, DesktopModelRecord>();
   readonly #models = new Map<string, RuntimeModelRecord>();
   readonly #subscribers = new Set<GatewaySubscriber>();
   readonly #telemetryIntervalMs: number;
@@ -177,6 +229,7 @@ export class MockGatewayRuntime {
 
     for (const model of DEFAULT_MODELS) {
       this.#models.set(model.id, structuredClone(model));
+      this.#modelDetails.set(model.id, this.createDesktopModelRecord(model.id));
     }
   }
 
@@ -231,6 +284,10 @@ export class MockGatewayRuntime {
     return Array.from(this.#models.values(), (model) => structuredClone(model));
   }
 
+  listDesktopModels(): DesktopModelRecord[] {
+    return Array.from(this.#models.keys(), (modelId) => this.getDesktopModelRecord(modelId));
+  }
+
   listDownloads(): DownloadTaskRecord[] {
     return structuredClone(this.#downloads);
   }
@@ -246,6 +303,50 @@ export class MockGatewayRuntime {
       uptimeMs: Date.now() - this.#startedAt,
       loadedModelCount: this.getLoadedModelCount(),
       activeWebSocketClients: this.#subscribers.size,
+    };
+  }
+
+  registerLocalModel(
+    input: Parameters<import("../types.js").GatewayRuntime["registerLocalModel"]>[0],
+    traceId?: string,
+  ): DesktopLocalModelImportResponse {
+    const resolvedPath = path.resolve(input.filePath);
+    if (path.extname(resolvedPath).toLowerCase() !== ".gguf") {
+      throw new Error(`Expected a .gguf artifact, received ${resolvedPath}.`);
+    }
+
+    const slug = slugifyFileName(resolvedPath) || `model-${Date.now()}`;
+    const modelId = `localhub/${slug}`;
+    const created = !this.#models.has(modelId);
+
+    if (created) {
+      this.#models.set(modelId, createModel(modelId, Math.floor(Date.now() / 1000), ["chat"]));
+    }
+
+    const detail = {
+      ...this.createDesktopModelRecord(modelId, {
+        displayName: input.displayName?.trim() || undefined,
+        localPath: resolvedPath,
+      }),
+      updatedAt: new Date().toISOString(),
+    };
+    this.#modelDetails.set(modelId, detail);
+
+    const model = this.#models.get(modelId);
+    if (model) {
+      this.publish(this.createModelStateEvent(model, { reason: "Model registered and ready to preload.", traceId }));
+    }
+    this.publishLog(
+      "info",
+      created ? `Registered mock local model ${modelId}` : `Updated mock local model ${modelId}`,
+      traceId,
+      modelId,
+      "desktop",
+    );
+
+    return {
+      created,
+      model: this.getDesktopModelRecord(modelId),
     };
   }
 
@@ -332,6 +433,54 @@ export class MockGatewayRuntime {
     });
   }
 
+  private createDesktopModelRecord(
+    modelId: string,
+    overrides: {
+      displayName?: string | undefined;
+      localPath?: string | undefined;
+    } = {},
+  ): DesktopModelRecord {
+    const model = this.#models.get(modelId);
+    const existing = this.#modelDetails.get(modelId);
+    const defaultName = prettifyModelName(modelId);
+
+    return {
+      id: modelId,
+      name: defaultName,
+      displayName: overrides.displayName ?? existing?.displayName ?? defaultName,
+      engineType: DEFAULT_ENGINE_TYPE,
+      state: toDesktopModelState(model?.state ?? "Idle"),
+      loaded: model?.loaded ?? false,
+      artifactStatus: "available",
+      sizeBytes: existing?.sizeBytes ?? 1_610_612_736,
+      format: "gguf",
+      capabilities: model?.capabilities ?? existing?.capabilities ?? ["chat"],
+      role: getModelRole(model ?? createModel(modelId, Math.floor(Date.now() / 1000), ["chat"])),
+      tags: existing?.tags ?? ["mock"],
+      localPath: overrides.localPath ?? existing?.localPath ?? `/mock/models/${slugifyFileName(modelId)}.gguf`,
+      sourceKind: "local",
+      pinned: existing?.pinned ?? false,
+      defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
+      contextLength: existing?.contextLength ?? 8192,
+      quantization: existing?.quantization ?? "Q4_K_M",
+      architecture: existing?.architecture ?? "llama",
+      tokenizer: existing?.tokenizer ?? "gpt2",
+      checksumSha256: existing?.checksumSha256 ?? "mock-checksum",
+      engineVersion: this.#engines[0]?.version,
+      engineChannel: this.#engines[0]?.channel,
+      lastUsedAt: existing?.lastUsedAt,
+      createdAt: existing?.createdAt ?? new Date((model?.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+      updatedAt: existing?.updatedAt ?? new Date().toISOString(),
+      ...(model?.lastError ? { errorMessage: model.lastError } : {}),
+    };
+  }
+
+  private getDesktopModelRecord(modelId: string): DesktopModelRecord {
+    const updated = this.createDesktopModelRecord(modelId);
+    this.#modelDetails.set(modelId, updated);
+    return updated;
+  }
+
   private getLoadedModelCount(): number {
     return Array.from(this.#models.values()).filter((model) => model.loaded).length;
   }
@@ -350,6 +499,7 @@ export class MockGatewayRuntime {
     const previousState = model.state;
     model.state = state;
     model.loaded = loaded;
+    model.lastError = state === "Crashed" ? reason : undefined;
     this.publish(this.createModelStateEvent(model, { previousState, reason, traceId }));
   }
 

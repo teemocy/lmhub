@@ -1,4 +1,8 @@
 import type {
+  DesktopEngineRecord,
+  DesktopLocalModelImportRequest,
+  DesktopLocalModelImportResponse,
+  DesktopModelRecord,
   RequestRoute,
   RequestTrace,
   RuntimeKey,
@@ -26,6 +30,7 @@ export interface RuntimeModelRecord {
   loaded: boolean;
   state: WorkerState;
   capabilities: string[];
+  lastError?: string | undefined;
 }
 
 export interface DownloadTaskRecord {
@@ -36,12 +41,9 @@ export interface DownloadTaskRecord {
   progress: number;
 }
 
-export interface EngineRecord {
-  id: string;
-  version: string;
-  channel: "stable" | "nightly";
-  installed: boolean;
-}
+export type EngineRecord = DesktopEngineRecord;
+
+export type MaybePromise<T> = T | Promise<T>;
 
 export interface ControlHealthSnapshot {
   status: "ok";
@@ -77,3 +79,22 @@ export type RuntimeEventTrace = RequestTrace;
 export type RuntimeEventKey = RuntimeKey;
 export type RuntimeEventRole = RuntimeRole;
 export type RuntimeLifecycleState = WorkerLifecycleState;
+
+export interface GatewayRuntime {
+  start(): MaybePromise<void>;
+  stop(): MaybePromise<void>;
+  subscribe(subscriber: (event: GatewayEvent) => void, options?: { replay?: boolean }): () => void;
+  listModels(): Array<Pick<RuntimeModelRecord, "id" | "object" | "created" | "owned_by">>;
+  listRuntimeModels(): RuntimeModelRecord[];
+  listDesktopModels(): MaybePromise<DesktopModelRecord[]>;
+  listDownloads(): DownloadTaskRecord[];
+  listEngines(): EngineRecord[];
+  getHealthSnapshot(plane: GatewayPlane): ControlHealthSnapshot;
+  registerLocalModel(
+    input: DesktopLocalModelImportRequest,
+    traceId?: string,
+  ): MaybePromise<DesktopLocalModelImportResponse>;
+  preloadModel(modelId: string, traceId?: string): MaybePromise<PreloadModelResult>;
+  evictModel(modelId: string, traceId?: string): MaybePromise<EvictModelResult>;
+  recordRequestTrace(payload: RequestTraceRecord): void;
+}

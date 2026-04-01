@@ -15,6 +15,7 @@
     "@fastify/websocket": "^11.2.0",
     "@localhub/db": "workspace:*",
     "@localhub/engine-core": "workspace:*",
+    "@localhub/engine-llama": "workspace:*",
     "@localhub/platform": "workspace:*",
     "@localhub/shared-contracts": "workspace:*",
     "fastify": "^5.8.4"

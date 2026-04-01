@@ -8,6 +8,9 @@
   },
   "references": [
     {
+      "path": "../db"
+    },
+    {
       "path": "../shared-contracts"
     },
     {

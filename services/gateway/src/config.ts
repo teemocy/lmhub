@@ -4,6 +4,7 @@ import {
 } from "@localhub/platform";
 
 export interface GatewayConfig {
+  defaultModelTtlMs: number;
   publicHost: string;
   publicPort: number;
   controlHost: string;
@@ -62,6 +63,7 @@ export function loadGatewayConfig(options: LoadConfigOptions = {}): GatewayConfi
   }
 
   return {
+    defaultModelTtlMs: loaded.value.defaultModelTtlMs,
     publicHost: loaded.value.publicHost,
     publicPort: loaded.value.publicPort,
     controlHost: loaded.value.controlHost,

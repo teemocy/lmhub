@@ -93,6 +93,9 @@ importers:
 
   packages/engine-llama:
     dependencies:
+      '@localhub/db':
+        specifier: workspace:*
+        version: link:../db
       '@localhub/engine-core':
         specifier: workspace:*
         version: link:../engine-core
@@ -132,6 +135,9 @@ importers:
       '@localhub/engine-core':
         specifier: workspace:*
         version: link:../../packages/engine-core
+      '@localhub/engine-llama':
+        specifier: workspace:*
+        version: link:../../packages/engine-llama
       '@localhub/platform':
         specifier: workspace:*
         version: link:../../packages/platform
