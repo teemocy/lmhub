@@ -209,9 +209,32 @@ afterEach(async () => {
 
 describe("llama.cpp stage 3 provider search and downloads", () => {
   it("normalizes HuggingFace and ModelScope search results into one provider catalog", async () => {
-    const mockFetch: typeof fetch = async (input) => {
+    const observedModelScopeBodies: string[] = [];
+    const mockFetch: typeof fetch = async (input, init) => {
       const url = String(input);
       if (url.startsWith("https://hf.test/api/models")) {
+        if (url.includes("?blobs=true")) {
+          return new Response(
+            JSON.stringify({
+              id: "acme/Tiny-Chat-GGUF",
+              author: "acme",
+              tags: ["gguf", "chat"],
+              downloads: 50,
+              likes: 7,
+              siblings: [
+                {
+                  rfilename: "tiny-chat-q4.gguf",
+                  size: 128,
+                  lfs: {
+                    sha256: "a".repeat(64),
+                    size: 128,
+                  },
+                },
+              ],
+            }),
+          );
+        }
+
         return new Response(
           JSON.stringify([
             {
@@ -220,25 +243,45 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
               tags: ["gguf", "chat"],
               downloads: 50,
               likes: 7,
-              siblings: [{ rfilename: "tiny-chat-q4.gguf", size: 128 }],
+              siblings: [{ rfilename: "tiny-chat-q4.gguf" }],
             },
           ]),
         );
       }
 
-      if (url.startsWith("https://ms.test/api/v1/models")) {
+      if (url === "https://ms.test/api/v1/models") {
+        observedModelScopeBodies.push(String(init?.body ?? ""));
         return new Response(
           JSON.stringify({
-            Data: [
-              {
-                Path: "ms/Tiny-Embed-GGUF",
-                Owner: "ms",
-                Tags: ["gguf", "embeddings"],
-                DownloadCount: 75,
-                LikeCount: 9,
-                Files: [{ Path: "tiny-embed-q8.gguf", Size: 256 }],
-              },
-            ],
+            Data: {
+              Models: [
+                {
+                  Path: "ms",
+                  Name: "Tiny-Embed-GGUF",
+                  Tags: ["gguf", "embeddings"],
+                  Downloads: 75,
+                  LikeCount: 9,
+                  LastUpdatedTime: 1_700_000_000,
+                },
+              ],
+            },
+          }),
+        );
+      }
+
+      if (url === "https://ms.test/api/v1/models/ms/Tiny-Embed-GGUF/repo/files?Recursive=True") {
+        return new Response(
+          JSON.stringify({
+            Data: {
+              Files: [
+                {
+                  Path: "tiny-embed-q8.gguf",
+                  Size: 256,
+                  Revision: "main",
+                  Sha256: "b".repeat(64),
+                },
+              ],
+            },
           }),
         );
       }
@@ -266,7 +309,20 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     expect(result.items).toHaveLength(2);
     expect(result.items.map((item) => item.provider)).toEqual(["modelscope", "huggingface"]);
     expect(result.items[0]?.artifacts[0]?.fileName).toBe("tiny-embed-q8.gguf");
+    expect(result.items[0]?.artifacts[0]?.sizeBytes).toBe(256);
     expect(result.items[1]?.artifacts[0]?.downloadUrl).toContain("tiny-chat-q4.gguf");
+    expect(result.items[1]?.artifacts[0]?.sizeBytes).toBe(128);
+    expect(observedModelScopeBodies).toEqual([
+      JSON.stringify({
+        PageSize: 30,
+        PageNumber: 1,
+        Target: "tiny",
+        Sort: {
+          SortBy: "Default",
+        },
+        Criterion: [],
+      }),
+    ]);
   });
 
   it("pauses and resumes a ranged download, then auto-registers the artifact", async () => {

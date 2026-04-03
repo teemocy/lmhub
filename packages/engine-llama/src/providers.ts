@@ -41,6 +41,25 @@ function toOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function toOptionalTimestamp(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    const epochMs = value > 1_000_000_000_000 ? value : value * 1_000;
+    return new Date(epochMs).toISOString();
+  }
+
+  if (typeof value === "string" && value.length > 0) {
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue) && numericValue > 0) {
+      const epochMs = numericValue > 1_000_000_000_000 ? numericValue : numericValue * 1_000;
+      return new Date(epochMs).toISOString();
+    }
+
+    return value;
+  }
+
+  return undefined;
+}
+
 function toArtifactId(fileName: string): string {
   return fileName
     .replace(/\.[^.]+$/, "")
@@ -50,6 +69,28 @@ function toArtifactId(fileName: string): string {
 
 function mapFormat(fileName: string): "gguf" | undefined {
   return fileName.toLowerCase().endsWith(".gguf") ? "gguf" : undefined;
+}
+
+function encodeProviderModelId(providerModelId: string): string {
+  return providerModelId
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+function toModelScopeProviderModelId(item: JsonResponse): string {
+  const modelId = toOptionalString(item.ModelId);
+  if (modelId) {
+    return modelId;
+  }
+
+  const path = toOptionalString(item.Path);
+  const name = toOptionalString(item.Name);
+  if (path && name) {
+    return path.endsWith(`/${name}`) ? path : `${path}/${name}`;
+  }
+
+  return path ?? "unknown/model";
 }
 
 async function readJson(
@@ -89,9 +130,21 @@ function normalizeHuggingFaceItem(baseUrl: string, item: JsonResponse): Provider
         downloadUrl: `${normalizeBaseUrl(baseUrl)}/${providerModelId}/resolve/main/${fileName}`,
       };
 
-      const sizeBytes = toOptionalNumber(entry.size);
+      const lfs =
+        entry.lfs && typeof entry.lfs === "object" ? (entry.lfs as JsonResponse) : undefined;
+      const sizeBytes = toOptionalNumber(entry.size) ?? toOptionalNumber(lfs?.size);
       if (sizeBytes !== undefined) {
         artifact.sizeBytes = sizeBytes;
+      }
+
+      const sha256 = toOptionalString(lfs?.sha256);
+      if (sha256) {
+        artifact.checksum = {
+          algorithm: "sha256",
+          value: sha256,
+          source: "provider",
+          status: "verified",
+        };
       }
 
       return artifact;
@@ -137,11 +190,14 @@ function normalizeHuggingFaceItem(baseUrl: string, item: JsonResponse): Provider
   return summary;
 }
 
-function normalizeModelScopeItem(baseUrl: string, item: JsonResponse): ProviderModelSummary {
-  const providerModelId =
-    toOptionalString(item.Path) ?? toOptionalString(item.ModelId) ?? "unknown/model";
-  const rawFiles = Array.isArray(item.Files) ? item.Files : [];
-  const artifacts = rawFiles
+function normalizeModelScopeArtifacts(
+  baseUrl: string,
+  providerModelId: string,
+  files: JsonResponse[],
+): ProviderModelSummary["artifacts"] {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+
+  return files
     .map((entry) => (entry && typeof entry === "object" ? (entry as JsonResponse) : undefined))
     .filter((entry): entry is JsonResponse => Boolean(entry))
     .map((entry) => {
@@ -159,7 +215,7 @@ function normalizeModelScopeItem(baseUrl: string, item: JsonResponse): ProviderM
         artifactId: toArtifactId(fileName),
         fileName,
         format,
-        downloadUrl: `${normalizeBaseUrl(baseUrl)}/api/v1/models/${providerModelId}/repo?Revision=master&FilePath=${encodeURIComponent(fileName)}`,
+        downloadUrl: `${normalizedBaseUrl}/api/v1/models/${encodeProviderModelId(providerModelId)}/repo?Revision=${encodeURIComponent(toOptionalString(entry.Revision) ?? "master")}&FilePath=${encodeURIComponent(fileName)}`,
       };
 
       const sizeBytes = toOptionalNumber(entry.Size);
@@ -167,25 +223,51 @@ function normalizeModelScopeItem(baseUrl: string, item: JsonResponse): ProviderM
         artifact.sizeBytes = sizeBytes;
       }
 
+      const sha256 = toOptionalString(entry.Sha256);
+      if (sha256) {
+        artifact.checksum = {
+          algorithm: "sha256",
+          value: sha256,
+          source: "provider",
+          status: "verified",
+        };
+      }
+
       return artifact;
     })
     .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+}
+
+function normalizeModelScopeItem(
+  baseUrl: string,
+  item: JsonResponse,
+  files: JsonResponse[] = [],
+): ProviderModelSummary {
+  const providerModelId = toModelScopeProviderModelId(item);
+  const path = toOptionalString(item.Path);
+  const name = toOptionalString(item.Name);
+  const author =
+    path && name && !path.endsWith(`/${name}`)
+      ? path
+      : providerModelId.split("/").slice(0, -1).join("/") || undefined;
+  const artifacts =
+    files.length > 0 ? normalizeModelScopeArtifacts(baseUrl, providerModelId, files) : [];
 
   const summary: ProviderModelSummary = {
     provider: "modelscope",
     providerModelId,
-    title: toOptionalString(item.Name) ?? providerModelId.split("/").at(-1) ?? providerModelId,
+    title: name ?? providerModelId.split("/").at(-1) ?? providerModelId,
     repositoryUrl: `${normalizeBaseUrl(baseUrl)}/models/${providerModelId}`,
     tags: toStringArray(item.Tags),
     formats: artifacts.map((artifact) => artifact.format),
     artifacts,
   };
 
-  const author = toOptionalString(item.Owner);
   const license = toOptionalString(item.License);
-  const downloads = toOptionalNumber(item.DownloadCount);
+  const downloads = toOptionalNumber(item.Downloads) ?? toOptionalNumber(item.DownloadCount);
   const likes = toOptionalNumber(item.LikeCount);
-  const updatedAt = toOptionalString(item.UpdatedAt);
+  const updatedAt =
+    toOptionalTimestamp(item.LastUpdatedTime) ?? toOptionalTimestamp(item.UpdatedAt);
   const description = toOptionalString(item.Description);
 
   if (author) {
@@ -229,7 +311,25 @@ export class HuggingFaceProvider implements ModelProvider {
     const startedAt = Date.now();
     const payload = await readJson(this.#fetch, url.toString());
     const items = Array.isArray(payload)
-      ? payload.map((item) => normalizeHuggingFaceItem(this.#baseUrl, item))
+      ? await Promise.all(
+          payload.map(async (item) => {
+            const providerModelId = toOptionalString(item.id);
+            if (!providerModelId) {
+              return normalizeHuggingFaceItem(this.#baseUrl, item);
+            }
+
+            try {
+              const detailUrl = new URL(
+                `${this.#baseUrl}/api/models/${encodeProviderModelId(providerModelId)}`,
+              );
+              detailUrl.searchParams.set("blobs", "true");
+              const detail = (await readJson(this.#fetch, detailUrl.toString())) as JsonResponse;
+              return normalizeHuggingFaceItem(this.#baseUrl, detail);
+            } catch {
+              return normalizeHuggingFaceItem(this.#baseUrl, item);
+            }
+          }),
+        )
       : [];
 
     return {
@@ -240,16 +340,14 @@ export class HuggingFaceProvider implements ModelProvider {
   }
 
   async resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
-    const searchResult = await this.search({
-      text: request.providerModelId,
-      formats: ["gguf"],
-      limit: 10,
-    });
-    const model = searchResult.items.find(
-      (item) => item.providerModelId === request.providerModelId,
+    const detailUrl = new URL(
+      `${this.#baseUrl}/api/models/${encodeProviderModelId(request.providerModelId)}`,
     );
-    const artifact = model?.artifacts.find((item) => item.artifactId === request.artifactId);
-    if (!model || !artifact || !artifact.downloadUrl) {
+    detailUrl.searchParams.set("blobs", "true");
+    const detail = (await readJson(this.#fetch, detailUrl.toString())) as JsonResponse;
+    const model = normalizeHuggingFaceItem(this.#baseUrl, detail);
+    const artifact = model.artifacts.find((item) => item.artifactId === request.artifactId);
+    if (!artifact || !artifact.downloadUrl) {
       throw new Error(
         `Unable to resolve HuggingFace artifact ${request.providerModelId}:${request.artifactId}.`,
       );
@@ -283,33 +381,83 @@ export class ModelScopeProvider implements ModelProvider {
   }
 
   async search(query: ProviderSearchQuery): Promise<ProviderSearchResult> {
-    const url = new URL(`${this.#baseUrl}/api/v1/models`);
-    url.searchParams.set("Search", query.text);
-    url.searchParams.set("PageSize", String(query.limit));
+    const pageSize = Math.min(Math.max(query.limit * 3, query.limit), 60);
 
     const startedAt = Date.now();
-    const payload = (await readJson(this.#fetch, url.toString())) as JsonResponse;
-    const data = Array.isArray(payload.Data) ? payload.Data : [];
-    const items = data.map((item) => normalizeModelScopeItem(this.#baseUrl, item as JsonResponse));
+    const payload = (await readJson(this.#fetch, `${this.#baseUrl}/api/v1/models`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        PageSize: pageSize,
+        PageNumber: 1,
+        Target: query.text,
+        Sort: {
+          SortBy: "Default",
+        },
+        Criterion: [],
+      }),
+    })) as JsonResponse;
+    const data =
+      payload.Data && typeof payload.Data === "object" ? (payload.Data as JsonResponse) : {};
+    const models = Array.isArray(data.Models) ? data.Models : [];
+    const items = await Promise.all(
+      models.map(async (item) => {
+        const candidate = item as JsonResponse;
+        const providerModelId = toModelScopeProviderModelId(candidate);
+
+        try {
+          const filesUrl = new URL(
+            `${this.#baseUrl}/api/v1/models/${encodeProviderModelId(providerModelId)}/repo/files`,
+          );
+          filesUrl.searchParams.set("Recursive", "True");
+          const filesPayload = (await readJson(this.#fetch, filesUrl.toString())) as JsonResponse;
+          const filesData =
+            filesPayload.Data && typeof filesPayload.Data === "object"
+              ? (filesPayload.Data as JsonResponse)
+              : {};
+          const files = Array.isArray(filesData.Files)
+            ? filesData.Files.map((entry) =>
+                entry && typeof entry === "object" ? (entry as JsonResponse) : undefined,
+              ).filter((entry): entry is JsonResponse => Boolean(entry))
+            : [];
+
+          return normalizeModelScopeItem(this.#baseUrl, candidate, files);
+        } catch {
+          return normalizeModelScopeItem(this.#baseUrl, candidate);
+        }
+      }),
+    );
 
     return {
-      items: items.filter((item) => item.artifacts.length > 0),
+      items: items.filter((item) => item.artifacts.length > 0).slice(0, query.limit),
       warnings: [],
       sourceLatencyMs: Date.now() - startedAt,
     };
   }
 
   async resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
-    const searchResult = await this.search({
-      text: request.providerModelId,
-      formats: ["gguf"],
-      limit: 10,
-    });
-    const model = searchResult.items.find(
-      (item) => item.providerModelId === request.providerModelId,
+    const filesUrl = new URL(
+      `${this.#baseUrl}/api/v1/models/${encodeProviderModelId(request.providerModelId)}/repo/files`,
     );
-    const artifact = model?.artifacts.find((item) => item.artifactId === request.artifactId);
-    if (!model || !artifact || !artifact.downloadUrl) {
+    filesUrl.searchParams.set("Recursive", "True");
+    const filesPayload = (await readJson(this.#fetch, filesUrl.toString())) as JsonResponse;
+    const filesData =
+      filesPayload.Data && typeof filesPayload.Data === "object"
+        ? (filesPayload.Data as JsonResponse)
+        : {};
+    const files = Array.isArray(filesData.Files)
+      ? filesData.Files.map((entry) =>
+          entry && typeof entry === "object" ? (entry as JsonResponse) : undefined,
+        ).filter((entry): entry is JsonResponse => Boolean(entry))
+      : [];
+    const artifact = normalizeModelScopeArtifacts(
+      this.#baseUrl,
+      request.providerModelId,
+      files,
+    ).find((item) => item.artifactId === request.artifactId);
+    if (!artifact || !artifact.downloadUrl) {
       throw new Error(
         `Unable to resolve ModelScope artifact ${request.providerModelId}:${request.artifactId}.`,
       );

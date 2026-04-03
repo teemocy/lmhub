@@ -25,6 +25,15 @@ const formatBytes = (value: number | undefined): string => {
   return `${nextValue >= 10 ? nextValue.toFixed(0) : nextValue.toFixed(1)} ${units[unitIndex]}`;
 };
 
+const formatSize = (value: number | undefined): string =>
+  value && value > 0 ? formatBytes(value) : "Unknown size";
+
+const formatCount = (value: number | undefined): string =>
+  value !== undefined ? value.toLocaleString() : "Unknown";
+
+const formatUpdatedAt = (value: string | undefined): string =>
+  value ? new Date(value).toLocaleDateString() : "Unknown";
+
 export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
   const [query, setQuery] = useState("qwen");
   const [results, setResults] = useState<DesktopProviderSearchItem[]>([]);
@@ -87,7 +96,7 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
         provider: item.provider,
         providerModelId: item.providerModelId,
         artifactId: item.artifactId,
-        title: item.title,
+        title: item.providerModelId,
         artifactName: item.artifactName,
         downloadUrl: item.downloadUrl,
         ...(item.checksumSha256 ? { checksumSha256: item.checksumSha256 } : {}),
@@ -163,7 +172,7 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
 
       <article className="wide-card">
         <span className="section-label">Search results</span>
-        <div className="model-grid">
+        <div className="search-result-strip">
           {results.length === 0 ? (
             <div className="empty-panel compact-empty">
               <strong>No results yet.</strong>
