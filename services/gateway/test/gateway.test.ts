@@ -288,6 +288,11 @@ describe("gateway skeleton", () => {
         contextLength: 4096,
         gpuLayers: 16,
         pinned: true,
+        capabilityOverrides: {
+          chat: false,
+          embeddings: true,
+          tools: false,
+        },
       },
     });
 
@@ -299,6 +304,13 @@ describe("gateway skeleton", () => {
         contextLength: 4096,
         gpuLayers: 16,
         pinned: true,
+        capabilityOverrides: {
+          chat: false,
+          embeddings: true,
+          tools: false,
+        },
+        role: "embeddings",
+        capabilities: expect.arrayContaining(["embeddings"]),
       }),
     });
   });

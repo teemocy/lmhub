@@ -127,6 +127,18 @@ const ENGINE_RECORD_CAPABILITIES: Partial<CapabilitySet> = {
   embeddings: true,
   streaming: true,
 };
+const CAPABILITY_OVERRIDE_KEYS: Array<keyof CapabilitySet> = [
+  "chat",
+  "embeddings",
+  "tools",
+  "streaming",
+  "vision",
+  "audioTranscription",
+  "audioSpeech",
+  "rerank",
+  "promptCache",
+];
+type CapabilityOverrides = NonNullable<ModelProfile["capabilityOverrides"]>;
 const QUANTIZATION_TOKEN_PATTERN =
   /^(?:Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4)$/i;
 const SHARD_SUFFIX_PATTERN = /^(.*?)-(\d{5})-of-(\d{5})$/i;
@@ -378,6 +390,7 @@ interface ResolvedModelRecord {
   stored: StoredModelRecord;
   artifact: ModelArtifact;
   profile: ModelProfile;
+  capabilities: CapabilitySet;
   runtimeKey: RuntimeEventKey;
   runtimeKeyString: string;
 }
@@ -425,16 +438,70 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function getModelRole(artifact: ModelArtifact, profile?: ModelProfile): RuntimeEventRole {
-  if (profile?.role) {
-    return profile.role;
+function normalizeCapabilityOverrides(
+  overrides: ModelProfile["capabilityOverrides"],
+): CapabilityOverrides {
+  if (!overrides) {
+    return {};
   }
 
-  if (artifact.capabilities.embeddings && !artifact.capabilities.chat) {
+  const normalized: CapabilityOverrides = {};
+  for (const key of CAPABILITY_OVERRIDE_KEYS) {
+    const value = overrides[key];
+    if (typeof value === "boolean") {
+      normalized[key] = value;
+    }
+  }
+
+  return normalized;
+}
+
+function applyCapabilityOverrides(
+  capabilities: CapabilitySet,
+  overrides: ModelProfile["capabilityOverrides"],
+): CapabilitySet {
+  const normalizedOverrides = normalizeCapabilityOverrides(overrides);
+
+  return {
+    chat: normalizedOverrides.chat ?? capabilities.chat,
+    embeddings: normalizedOverrides.embeddings ?? capabilities.embeddings,
+    tools: normalizedOverrides.tools ?? capabilities.tools,
+    streaming: normalizedOverrides.streaming ?? capabilities.streaming,
+    vision: normalizedOverrides.vision ?? capabilities.vision,
+    audioTranscription:
+      normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
+    audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
+    rerank: normalizedOverrides.rerank ?? capabilities.rerank,
+    promptCache: normalizedOverrides.promptCache ?? capabilities.promptCache,
+  };
+}
+
+function getEffectiveCapabilities(
+  artifact: ModelArtifact,
+  profile?: ModelProfile,
+): CapabilitySet {
+  return applyCapabilityOverrides(artifact.capabilities, profile?.capabilityOverrides);
+}
+
+function deriveRuntimeRole(capabilities: CapabilitySet): RuntimeEventRole {
+  if (capabilities.rerank) {
+    return "rerank";
+  }
+
+  if (capabilities.embeddings && !capabilities.chat) {
     return "embeddings";
   }
 
   return "chat";
+}
+
+function getModelRole(artifact: ModelArtifact, profile?: ModelProfile): RuntimeEventRole {
+  const capabilities = getEffectiveCapabilities(artifact, profile);
+  if (profile?.capabilityOverrides && Object.keys(profile.capabilityOverrides).length > 0) {
+    return deriveRuntimeRole(capabilities);
+  }
+
+  return profile?.role ?? deriveRuntimeRole(capabilities);
 }
 
 function hashConfig(profile: ModelProfile): string {
@@ -444,6 +511,7 @@ function hashConfig(profile: ModelProfile): string {
         defaultTtlMs: profile.defaultTtlMs,
         parameterOverrides: profile.parameterOverrides,
         promptCacheKey: profile.promptCacheKey ?? null,
+        capabilityOverrides: normalizeCapabilityOverrides(profile.capabilityOverrides),
         role: profile.role,
       }),
     )
@@ -464,6 +532,7 @@ function createDefaultProfile(artifact: ModelArtifact, defaultModelTtlMs: number
     defaultTtlMs: defaultModelTtlMs,
     role: getModelRole(artifact),
     parameterOverrides: {},
+    capabilityOverrides: {},
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -511,38 +580,39 @@ function getChannelFromVersion(versionTag: string): EngineRecord["channel"] {
   return versionTag.toLowerCase().includes("nightly") ? "nightly" : "stable";
 }
 
-function getCapabilityList(artifact: ModelArtifact): string[] {
-  const capabilities: string[] = [];
+function getCapabilityList(artifact: ModelArtifact, profile?: ModelProfile): string[] {
+  const effectiveCapabilities = getEffectiveCapabilities(artifact, profile);
+  const capabilityList: string[] = [];
 
-  if (artifact.capabilities.chat) {
-    capabilities.push("chat");
+  if (effectiveCapabilities.chat) {
+    capabilityList.push("chat");
   }
-  if (artifact.capabilities.embeddings) {
-    capabilities.push("embeddings");
+  if (effectiveCapabilities.embeddings) {
+    capabilityList.push("embeddings");
   }
-  if (artifact.capabilities.tools) {
-    capabilities.push("tools");
+  if (effectiveCapabilities.tools) {
+    capabilityList.push("tools");
   }
-  if (artifact.capabilities.streaming) {
-    capabilities.push("streaming");
+  if (effectiveCapabilities.streaming) {
+    capabilityList.push("streaming");
   }
-  if (artifact.capabilities.vision) {
-    capabilities.push("vision");
+  if (effectiveCapabilities.vision) {
+    capabilityList.push("vision");
   }
-  if (artifact.capabilities.audioTranscription) {
-    capabilities.push("audio-transcription");
+  if (effectiveCapabilities.audioTranscription) {
+    capabilityList.push("audio-transcription");
   }
-  if (artifact.capabilities.audioSpeech) {
-    capabilities.push("audio-speech");
+  if (effectiveCapabilities.audioSpeech) {
+    capabilityList.push("audio-speech");
   }
-  if (artifact.capabilities.rerank) {
-    capabilities.push("rerank");
+  if (effectiveCapabilities.rerank) {
+    capabilityList.push("rerank");
   }
-  if (artifact.capabilities.promptCache) {
-    capabilities.push("prompt-cache");
+  if (effectiveCapabilities.promptCache) {
+    capabilityList.push("prompt-cache");
   }
 
-  return capabilities;
+  return capabilityList;
 }
 
 function getEffectiveContextLength(
@@ -577,7 +647,8 @@ function hasRuntimeAffectingModelConfigChanges(
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
-    input.gpuLayers !== undefined
+    input.gpuLayers !== undefined ||
+    input.capabilityOverrides !== undefined
   );
 }
 
@@ -933,7 +1004,7 @@ function toRuntimeModelRecord(
     owned_by: "localhub",
     loaded: snapshot?.loaded ?? false,
     state,
-    capabilities: getCapabilityList(stored.artifact),
+    capabilities: getCapabilityList(stored.artifact, stored.profile),
     ...(snapshot?.lastError ? { lastError: snapshot.lastError } : {}),
   };
 }
@@ -962,6 +1033,7 @@ function toDesktopModelRecord(
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
+  const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
 
   return {
     id: stored.artifact.id,
@@ -973,8 +1045,9 @@ function toDesktopModelRecord(
     artifactStatus,
     sizeBytes: stored.artifact.sizeBytes,
     format: stored.artifact.format,
-    capabilities: getCapabilityList(stored.artifact),
-    role: profile.role,
+    capabilities: getCapabilityList(stored.artifact, profile),
+    capabilityOverrides,
+    role: getModelRole(stored.artifact, profile),
     tags: stored.artifact.tags,
     localPath: stored.artifact.localPath,
     sourceKind: stored.artifact.source.kind,
@@ -1826,8 +1899,14 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
         ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
       },
+      ...(input.capabilityOverrides !== undefined
+        ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }
+        : {}),
       updatedAt: nowIso(),
     };
+
+    const nextCapabilities = getEffectiveCapabilities(resolved.artifact, nextProfile);
+    nextProfile.role = deriveRuntimeRole(nextCapabilities);
 
     this.#modelsRepository.save(resolved.artifact, nextProfile);
 
@@ -2235,12 +2314,14 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
 
     const profile = this.getProfile(stored);
+    const capabilities = getEffectiveCapabilities(stored.artifact, profile);
     const runtimeKey = buildRuntimeKey(stored.artifact, profile);
 
     return {
       stored,
       artifact: stored.artifact,
       profile,
+      capabilities,
       runtimeKey,
       runtimeKeyString: runtimeKeyToString(runtimeKey),
     };
@@ -2250,7 +2331,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     resolved: ResolvedModelRecord,
     capability: "chat" | "embeddings" | "vision",
   ): void {
-    if (!resolved.artifact.capabilities[capability]) {
+    if (!resolved.capabilities[capability]) {
       throw new GatewayRequestError(
         "unsupported_model_capability",
         `Model ${resolved.artifact.id} does not support ${capability} requests.`,

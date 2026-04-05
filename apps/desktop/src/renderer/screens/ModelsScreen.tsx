@@ -34,6 +34,19 @@ type ModelsScreenProps = {
   onEvictModel(modelId: string): Promise<void>;
 };
 
+type CapabilityKey =
+  | "chat"
+  | "embeddings"
+  | "tools"
+  | "streaming"
+  | "vision"
+  | "audioTranscription"
+  | "audioSpeech"
+  | "rerank"
+  | "promptCache";
+
+type CapabilityToggleValue = "inherit" | "enabled" | "disabled";
+
 type FeedbackState =
   | {
       tone: "success" | "error";
@@ -122,6 +135,109 @@ const getStateToneClass = (state: DesktopModelRecord["state"]): string => {
 const getArtifactToneClass = (status: DesktopModelRecord["artifactStatus"]): string =>
   status === "available" ? "status-pill-positive" : "status-pill-negative";
 
+const capabilityDefinitions: Array<{
+  description: string;
+  key: CapabilityKey;
+  label: string;
+}> = [
+  {
+    key: "chat",
+    label: "Chat",
+    description: "General conversational completions.",
+  },
+  {
+    key: "embeddings",
+    label: "Embeddings",
+    description: "Vector search and embedding requests.",
+  },
+  {
+    key: "tools",
+    label: "Tools",
+    description: "Function calling and tool execution.",
+  },
+  {
+    key: "streaming",
+    label: "Streaming",
+    description: "Streaming chat and token-by-token responses.",
+  },
+  {
+    key: "vision",
+    label: "Vision",
+    description: "Image inputs and multimodal prompts.",
+  },
+  {
+    key: "audioTranscription",
+    label: "Audio transcription",
+    description: "Speech-to-text workflows.",
+  },
+  {
+    key: "audioSpeech",
+    label: "Audio speech",
+    description: "Text-to-speech output workflows.",
+  },
+  {
+    key: "rerank",
+    label: "Rerank",
+    description: "Document reranking and relevance scoring.",
+  },
+  {
+    key: "promptCache",
+    label: "Prompt cache",
+    description: "Persistent prompt-cache reuse.",
+  },
+];
+
+const getCapabilityToggleValue = (
+  overrides: DesktopModelRecord["capabilityOverrides"],
+  key: CapabilityKey,
+): CapabilityToggleValue => {
+  if (overrides[key] === true) {
+    return "enabled";
+  }
+
+  if (overrides[key] === false) {
+    return "disabled";
+  }
+
+  return "inherit";
+};
+
+const createCapabilityDraft = (
+  overrides: DesktopModelRecord["capabilityOverrides"],
+): Record<CapabilityKey, CapabilityToggleValue> =>
+  capabilityDefinitions.reduce((draft, { key }) => {
+    draft[key] = getCapabilityToggleValue(overrides, key);
+    return draft;
+  }, {} as Record<CapabilityKey, CapabilityToggleValue>);
+
+const toCapabilityOverrides = (
+  draft: Record<CapabilityKey, CapabilityToggleValue>,
+): DesktopModelConfigUpdateRequest["capabilityOverrides"] => {
+  const overrides: NonNullable<DesktopModelConfigUpdateRequest["capabilityOverrides"]> = {};
+
+  for (const { key } of capabilityDefinitions) {
+    const value = draft[key];
+    if (value === "enabled") {
+      overrides[key] = true;
+    } else if (value === "disabled") {
+      overrides[key] = false;
+    }
+  }
+
+  return overrides;
+};
+
+const formatCapabilityToggle = (value: CapabilityToggleValue): string => {
+  switch (value) {
+    case "enabled":
+      return "Enabled";
+    case "disabled":
+      return "Disabled";
+    default:
+      return "Inherit";
+  }
+};
+
 export function ModelsScreen({
   engines,
   models,
@@ -153,6 +269,7 @@ export function ModelsScreen({
     defaultTtlMinutes: "15",
     contextLength: "",
     gpuLayers: "",
+    capabilityOverrides: createCapabilityDraft({}),
   });
 
   const selectedModel =
@@ -184,18 +301,22 @@ export function ModelsScreen({
     !!selectedModel &&
     !selectedModel.loaded &&
     pendingActionModelId !== selectedModel.id;
+  const hasCapabilityOverrides =
+    !!selectedModel && Object.keys(selectedModel.capabilityOverrides).length > 0;
 
   useEffect(() => {
     if (!selectedModel) {
       return;
     }
 
+    const capabilityOverrides = createCapabilityDraft(selectedModel.capabilityOverrides);
     setAliasDraft(selectedModel.displayName);
     setConfigDraft({
       pinned: selectedModel.pinned,
       defaultTtlMinutes: String(Math.max(1, Math.round(selectedModel.defaultTtlMs / 60_000))),
       contextLength: selectedModel.contextLength ? String(selectedModel.contextLength) : "",
       gpuLayers: selectedModel.gpuLayers ? String(selectedModel.gpuLayers) : "",
+      capabilityOverrides,
     });
   }, [selectedModel?.id]);
 
@@ -432,7 +553,7 @@ export function ModelsScreen({
 
     try {
       const defaultTtlMinutes = Math.max(1, Number.parseInt(configDraft.defaultTtlMinutes, 10) || 15);
-      await onUpdateModelConfig(selectedModel.id, {
+      const result = await onUpdateModelConfig(selectedModel.id, {
         pinned: configDraft.pinned,
         defaultTtlMs: defaultTtlMinutes * 60_000,
         ...(configDraft.contextLength.trim()
@@ -441,6 +562,14 @@ export function ModelsScreen({
         ...(configDraft.gpuLayers.trim()
           ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
           : {}),
+        capabilityOverrides: toCapabilityOverrides(configDraft.capabilityOverrides),
+      });
+      setConfigDraft({
+        pinned: result.model.pinned,
+        defaultTtlMinutes: String(Math.max(1, Math.round(result.model.defaultTtlMs / 60_000))),
+        contextLength: result.model.contextLength ? String(result.model.contextLength) : "",
+        gpuLayers: result.model.gpuLayers ? String(result.model.gpuLayers) : "",
+        capabilityOverrides: createCapabilityDraft(result.model.capabilityOverrides),
       });
       setFeedback({
         tone: "success",
@@ -715,6 +844,78 @@ export function ModelsScreen({
                     {humanize(capability)}
                   </span>
                 ))}
+              </div>
+
+              <div className="advanced-config-card">
+                <div className="panel-header">
+                  <div>
+                    <span className="section-label">Capability overrides</span>
+                    <h3>Force model abilities on or off</h3>
+                  </div>
+                  <span
+                    className={
+                      hasCapabilityOverrides
+                        ? "status-pill status-pill-caution"
+                        : "status-pill status-pill-neutral"
+                    }
+                  >
+                    {hasCapabilityOverrides ? "Overrides active" : "Using defaults"}
+                  </span>
+                </div>
+                <p>
+                  Leave a capability on <strong>Inherit</strong> to keep the heuristic default
+                  from the GGUF artifact. Explicit overrides are saved to the profile and apply on
+                  the next preload.
+                </p>
+
+                <div className="capability-override-list">
+                  {capabilityDefinitions.map(({ key, label, description }) => (
+                    <label className="capability-override-row" key={key}>
+                      <div className="capability-override-copy">
+                        <strong>{label}</strong>
+                        <span>{description}</span>
+                      </div>
+                      <select
+                        className="text-input capability-override-select"
+                        disabled={!canSaveConfig}
+                        onChange={(event) =>
+                          setConfigDraft((current) => ({
+                            ...current,
+                            capabilityOverrides: {
+                              ...current.capabilityOverrides,
+                              [key]: event.target.value as CapabilityToggleValue,
+                            },
+                          }))
+                        }
+                        value={configDraft.capabilityOverrides[key]}
+                      >
+                        <option value="inherit">Inherit</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="capability-override-summary">
+                  <span className="section-label">Current overrides</span>
+                  <div className="pill-row">
+                    {hasCapabilityOverrides ? (
+                      capabilityDefinitions
+                        .filter(({ key }) => selectedModel.capabilityOverrides[key] !== undefined)
+                        .map(({ key, label }) => {
+                          const value = selectedModel.capabilityOverrides[key];
+                          return (
+                            <span className="meta-pill" key={key}>
+                              {label}: {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
+                            </span>
+                          );
+                        })
+                    ) : (
+                      <span className="meta-pill meta-pill-muted">No explicit overrides</span>
+                    )}
+                  </div>
+                </div>
               </div>
 
               <div className="advanced-config-card">

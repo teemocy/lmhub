@@ -685,6 +685,47 @@ select {
   border: 1px solid rgba(20, 33, 61, 0.08);
 }
 
+.capability-override-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.capability-override-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px;
+  gap: 12px;
+  align-items: center;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(20, 33, 61, 0.08);
+}
+
+.capability-override-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.capability-override-copy strong {
+  color: var(--ink);
+}
+
+.capability-override-copy span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.capability-override-select {
+  min-width: 0;
+}
+
+.capability-override-summary {
+  margin-top: 18px;
+}
+
 .chat-layout {
   display: grid;
   grid-template-columns: minmax(210px, 250px) minmax(0, 1fr);
@@ -1116,7 +1157,12 @@ select {
 
   .screen-grid,
   .settings-grid,
-  .meta-grid {
+  .meta-grid,
+  .capability-override-list {
+    grid-template-columns: 1fr;
+  }
+
+  .capability-override-row {
     grid-template-columns: 1fr;
   }
 
