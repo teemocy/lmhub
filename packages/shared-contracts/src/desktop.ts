@@ -9,6 +9,7 @@ import {
 } from "./common.js";
 import { type GatewayDiscoveryFile, gatewayDiscoveryFileSchema } from "./config.js";
 import {
+  capabilityOverridesSchema,
   engineTypeSchema,
   modelFormatSchema,
   modelSourceKindSchema,
@@ -102,6 +103,7 @@ export const desktopModelRecordSchema = z.object({
   sizeBytes: z.number().int().nonnegative(),
   format: modelFormatSchema,
   capabilities: z.array(nonEmptyStringSchema).default([]),
+  capabilityOverrides: capabilityOverridesSchema.default({}),
   role: runtimeRoleSchema,
   tags: z.array(nonEmptyStringSchema).default([]),
   localPath: fileSystemPathSchema,
@@ -144,6 +146,7 @@ export const desktopModelConfigUpdateRequestSchema = z.object({
   defaultTtlMs: positiveIntegerSchema.optional(),
   contextLength: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
+  capabilityOverrides: capabilityOverridesSchema.optional(),
 });
 
 export const desktopModelConfigUpdateResponseSchema = z.object({

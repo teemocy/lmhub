@@ -224,6 +224,75 @@ function deriveRole(capabilities: CapabilitySet): RuntimeRole {
   return "chat";
 }
 
+function normalizeCapabilityOverrides(
+  overrides: ModelProfile["capabilityOverrides"],
+): NonNullable<ModelProfile["capabilityOverrides"]> {
+  if (!overrides) {
+    return {};
+  }
+
+  const normalized: NonNullable<ModelProfile["capabilityOverrides"]> = {};
+  const orderedKeys: Array<keyof CapabilitySet> = [
+    "chat",
+    "embeddings",
+    "tools",
+    "streaming",
+    "vision",
+    "audioTranscription",
+    "audioSpeech",
+    "rerank",
+    "promptCache",
+  ];
+
+  for (const key of orderedKeys) {
+    const value = overrides[key];
+    if (typeof value === "boolean") {
+      normalized[key] = value;
+    }
+  }
+
+  return normalized;
+}
+
+function applyCapabilityOverrides(
+  capabilities: CapabilitySet,
+  overrides: ModelProfile["capabilityOverrides"],
+): CapabilitySet {
+  const normalizedOverrides = normalizeCapabilityOverrides(overrides);
+  return {
+    chat: normalizedOverrides.chat ?? capabilities.chat,
+    embeddings: normalizedOverrides.embeddings ?? capabilities.embeddings,
+    tools: normalizedOverrides.tools ?? capabilities.tools,
+    streaming: normalizedOverrides.streaming ?? capabilities.streaming,
+    vision: normalizedOverrides.vision ?? capabilities.vision,
+    audioTranscription:
+      normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
+    audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
+    rerank: normalizedOverrides.rerank ?? capabilities.rerank,
+    promptCache: normalizedOverrides.promptCache ?? capabilities.promptCache,
+  };
+}
+
+function getEffectiveCapabilities(
+  artifact: ModelArtifact,
+  profile: ModelProfile | undefined,
+): CapabilitySet {
+  return applyCapabilityOverrides(artifact.capabilities, profile?.capabilityOverrides);
+}
+
+function getRoleForProfile(
+  artifact: ModelArtifact,
+  profile: ModelProfile | undefined,
+): RuntimeRole {
+  const capabilities = getEffectiveCapabilities(artifact, profile);
+
+  if (profile?.capabilityOverrides && Object.keys(profile.capabilityOverrides).length > 0) {
+    return deriveRole(capabilities);
+  }
+
+  return profile?.role ?? deriveRole(capabilities);
+}
+
 function toRegisteredArtifactMetadata(
   filePath: string,
   metadata: GgufVerificationResult["metadata"],
@@ -263,7 +332,12 @@ function getContextLength(artifact: ModelArtifact, profile: ModelProfile): numbe
 
 function createRuntimeKey(profile: ModelProfile): RuntimeKey {
   const configHash = createHash("sha1")
-    .update(JSON.stringify(profile.parameterOverrides))
+    .update(
+      JSON.stringify({
+        parameterOverrides: profile.parameterOverrides,
+        capabilityOverrides: normalizeCapabilityOverrides(profile.capabilityOverrides),
+      }),
+    )
     .digest("hex")
     .slice(0, 12);
 
@@ -313,8 +387,8 @@ function toIndexedRecord(
   loadCount: number,
   lastLoadedAt: string | undefined,
 ): IndexedModelRecord {
-  const capabilities = artifact.capabilities;
-  const role = profile?.role ?? deriveRole(capabilities);
+  const capabilities = getEffectiveCapabilities(artifact, profile);
+  const role = getRoleForProfile(artifact, profile);
 
   const record: IndexedModelRecord = {
     artifactId: artifact.id,
@@ -438,7 +512,9 @@ export class LlamaCppModelManager {
     const artifactName = verification.metadata.modelName ?? existing?.artifact.name ?? displayName;
     const mmprojPath = findMmprojCompanionPath(filePath);
     const capabilities = deriveCapabilities(filePath, verification.metadata, mmprojPath);
-    const role = deriveRole(capabilities);
+    const capabilityOverrides = normalizeCapabilityOverrides(existing?.profile?.capabilityOverrides);
+    const effectiveCapabilities = applyCapabilityOverrides(capabilities, capabilityOverrides);
+    const role = deriveRole(effectiveCapabilities);
     const artifactId =
       existing?.artifact.id ??
       options.artifactId ??
@@ -502,6 +578,7 @@ export class LlamaCppModelManager {
             ? { contextLength: verification.metadata.contextLength }
             : {}),
         },
+      capabilityOverrides,
       createdAt: existing?.profile?.createdAt ?? now,
       updatedAt: now,
     };

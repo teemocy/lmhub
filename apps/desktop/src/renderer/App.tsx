@@ -1,7 +1,8 @@
 import type {
-  DesktopEngineRecord,
+  ControlAuthHeaderName,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
+  DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
   DesktopModelConfigUpdateRequest,
@@ -14,17 +15,19 @@ import type {
 } from "@localhub/shared-contracts";
 import { startTransition, useEffect, useState } from "react";
 import { HashRouter, NavLink, Route, Routes } from "react-router-dom";
+import { BACKGROUND_REFRESH_INTERVAL_MS } from "./constants";
 import { ChatScreen } from "./screens/ChatScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { DownloadsScreen } from "./screens/DownloadsScreen";
-import { ObservabilityScreen } from "./screens/ObservabilityScreen";
 import { ModelsScreen } from "./screens/ModelsScreen";
+import { ObservabilityScreen } from "./screens/ObservabilityScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
-import { BACKGROUND_REFRESH_INTERVAL_MS } from "./constants";
 
 type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
   discoveryFile: string;
 };
 
@@ -33,6 +36,8 @@ type DesktopRuntimeContext = {
     closeToTray: boolean;
     autoLaunchGateway: boolean;
     theme: "system" | "light" | "dark";
+    controlAuthHeaderName: ControlAuthHeaderName;
+    controlAuthToken?: string;
   };
   gateway: {
     enableLan: boolean;
@@ -42,6 +47,7 @@ type DesktopRuntimeContext = {
     corsAllowlist: string[];
     defaultModelTtlMs: number;
     localModelsDir: string;
+    controlAuthHeaderName: ControlAuthHeaderName;
     authConfigured: boolean;
   };
   files: {
@@ -158,7 +164,7 @@ export function App() {
 
     const unsubscribeEvents = window.desktopApi.gateway.subscribeEvents((event) => {
       startTransition(() => {
-        setEvents((current) => [event, ...current].slice(0, 40));
+        setEvents((current) => [event, ...current].slice(0, 100));
       });
 
       if (event.type === "MODEL_STATE_CHANGED") {
@@ -175,6 +181,7 @@ export function App() {
     };
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey intentionally retriggers this polling effect.
   useEffect(() => {
     if (shellState.phase !== "connected") {
       return;
@@ -214,8 +221,14 @@ export function App() {
       return;
     }
 
+    const firstModelId = modelLibrary[0]?.id;
+    if (!firstModelId) {
+      setSelectedModelId(null);
+      return;
+    }
+
     setSelectedModelId((current) =>
-      current && modelLibrary.some((model) => model.id === current) ? current : modelLibrary[0]!.id,
+      current && modelLibrary.some((model) => model.id === current) ? current : firstModelId,
     );
   }, [modelLibrary]);
 
@@ -318,6 +331,28 @@ export function App() {
       setRuntimeContext(updatedContext);
     });
     requestRefresh();
+  };
+
+  const updateControlAuthSettings = async (payload: {
+    headerName: ControlAuthHeaderName;
+    token: string;
+  }): Promise<void> => {
+    const updatedContext = await window.desktopApi.system.updateControlAuthSettings({
+      headerName: payload.headerName,
+      token: payload.token,
+    });
+    startTransition(() => {
+      setRuntimeContext(updatedContext);
+    });
+    requestRefresh();
+  };
+
+  const revealSessionLogFile = async (filePath: string): Promise<void> => {
+    await window.desktopApi.system.revealPath(filePath);
+  };
+
+  const copySessionLogFilePath = async (filePath: string): Promise<void> => {
+    await window.desktopApi.system.copyPath(filePath);
   };
 
   const restartGateway = async (): Promise<void> => {
@@ -446,11 +481,21 @@ export function App() {
               }
             />
             <Route path="/downloads" element={<DownloadsScreen shellState={shellState} />} />
-            <Route path="/chat" element={<ChatScreen models={chatModelSummaries} shellState={shellState} />} />
+            <Route
+              path="/chat"
+              element={<ChatScreen models={chatModelSummaries} shellState={shellState} />}
+            />
             <Route
               path="/observability"
               element={
-                <ObservabilityScreen events={events} health={health} shellState={shellState} />
+                <ObservabilityScreen
+                  events={events}
+                  health={health}
+                  paths={paths}
+                  onCopySessionLogFile={copySessionLogFilePath}
+                  onRevealSessionLogFile={revealSessionLogFile}
+                  shellState={shellState}
+                />
               }
             />
             <Route
@@ -460,6 +505,7 @@ export function App() {
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}
+                  onUpdateControlAuthSettings={updateControlAuthSettings}
                   onUpdateModelsDirectory={updateModelsDirectory}
                   paths={paths}
                   runtimeContext={runtimeContext}

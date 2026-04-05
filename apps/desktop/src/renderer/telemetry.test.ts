@@ -89,6 +89,26 @@ describe("telemetry helpers", () => {
     ]);
   });
 
+  it("keeps only the latest 10 log entries in the live console stream", () => {
+    const olderLogEvents: GatewayEvent[] = Array.from({ length: 20 }, (_, index) => ({
+      type: "LOG_STREAM",
+      ts: `2026-04-03T08:14:${String(40 - index).padStart(2, "0")}.000Z`,
+      traceId: `trace-${String(index).padStart(8, "0")}`,
+      payload: {
+        runtimeKey,
+        level: "info",
+        message: `Log entry ${index + 1}`,
+        source: "gateway",
+      },
+    }));
+
+    const liveConsoleEvents = selectLiveConsoleEvents([traceEvent, ...olderLogEvents]);
+
+    expect(liveConsoleEvents).toHaveLength(10);
+    expect(liveConsoleEvents[0]).toEqual(traceEvent);
+    expect(liveConsoleEvents.at(-1)).toEqual(olderLogEvents[8]);
+  });
+
   it("keeps streaming telemetry out of the right-rail activity list", () => {
     expect(
       selectActivityRailEvents([traceEvent, logEvent, modelStateEvent, downloadEvent]),

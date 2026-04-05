@@ -1,7 +1,7 @@
 import { type ChildProcess, type ChildProcessByStdio, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, type WriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -12,14 +12,14 @@ import {
   resolveAppPaths,
 } from "@localhub/platform";
 import {
-  type DesktopChatStreamEvent,
+  type ControlAuthHeaderName,
   type DesktopApiLogList,
-  type OpenAiToolCall,
   type DesktopChatMessageList,
   type DesktopChatRunRequest,
   type DesktopChatRunResponse,
   type DesktopChatSessionList,
   type DesktopChatSessionUpsertRequest,
+  type DesktopChatStreamEvent,
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
   type DesktopDownloadList,
@@ -38,6 +38,7 @@ import {
   type GatewayDiscoveryFile,
   type GatewayEvent,
   type GatewayHealthSnapshot,
+  type OpenAiToolCall,
   type PublicModelList,
   type RequestRoute,
   chatCompletionsChunkSchema,
@@ -100,6 +101,8 @@ type LegacyGatewayEvent = {
 export type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
   discoveryFile: string;
 };
 
@@ -235,13 +238,16 @@ export const resolveControlBearerToken = (
 };
 
 export const buildControlHeaders = (
-  controlBearerToken: string | undefined,
+  controlAuthToken: string | undefined,
+  controlAuthHeaderName: ControlAuthHeaderName,
   extraHeaders: Record<string, string> = {},
 ): Record<string, string> =>
-  controlBearerToken
+  controlAuthToken
     ? {
         ...extraHeaders,
-        Authorization: `Bearer ${controlBearerToken}`,
+        ...(controlAuthHeaderName === "authorization"
+          ? { Authorization: `Bearer ${controlAuthToken}` }
+          : { [controlAuthHeaderName]: controlAuthToken }),
       }
     : extraHeaders;
 
@@ -470,11 +476,23 @@ const drainSseBuffer = (buffer: string, onData: (data: string) => void): string 
   }
 };
 
+const formatSessionLogTimestamp = (value: Date): string => value.toISOString().replace(/:/g, "-");
+
+export const resolveSessionLogFilePath = (logsDir: string, now = new Date()): string =>
+  path.join(
+    logsDir,
+    `desktop-session-${formatSessionLogTimestamp(now)}-${process.pid}-${randomUUID()}.jsonl`,
+  );
+
 export class GatewayManager extends EventEmitter {
   private child: ChildProcessByStdio<null, Readable, Readable> | undefined;
   private controlSocket: WebSocket | undefined;
   private discovery: GatewayDiscoveryFile | undefined;
+  private sessionLogStream: WriteStream | undefined;
+  private closeSessionLogOnExit = false;
   private stopping = false;
+  private readonly getControlAuthHeaderName: () => ControlAuthHeaderName;
+  private readonly getControlAuthToken: () => string | undefined;
   private readonly controlBearerToken = resolveControlBearerToken();
   private readonly runtimeEnvironment: DesktopRuntimeEnvironment;
   private readonly stateValue: DesktopShellState = desktopShellStateSchema.parse({
@@ -489,10 +507,19 @@ export class GatewayManager extends EventEmitter {
 
   readonly paths: DesktopSystemPaths;
 
-  constructor(workspaceRootOverride?: string) {
+  constructor(
+    options: {
+      getControlAuthHeaderName?: () => ControlAuthHeaderName;
+      getControlAuthToken?: () => string | undefined;
+      workspaceRootOverride?: string;
+    } = {},
+  ) {
     super();
 
-    const workspaceRoot = workspaceRootOverride ?? path.resolve(__dirname, "..", "..", "..");
+    const workspaceRoot =
+      options.workspaceRootOverride ?? path.resolve(__dirname, "..", "..", "..");
+    this.getControlAuthHeaderName = options.getControlAuthHeaderName ?? (() => "authorization");
+    this.getControlAuthToken = options.getControlAuthToken ?? (() => undefined);
     this.runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
     const appPaths = resolveAppPaths({
       cwd: workspaceRoot,
@@ -502,6 +529,8 @@ export class GatewayManager extends EventEmitter {
     this.paths = {
       workspaceRoot,
       supportDir: appPaths.supportRoot,
+      logsDir: appPaths.logsDir,
+      sessionLogFile: resolveSessionLogFilePath(appPaths.logsDir),
       discoveryFile: appPaths.discoveryFile,
     };
   }
@@ -522,6 +551,8 @@ export class GatewayManager extends EventEmitter {
       return;
     }
 
+    this.closeSessionLogOnExit = false;
+    this.openSessionLogStream();
     this.updateState({
       phase: "launching",
       progress: 10,
@@ -542,6 +573,9 @@ export class GatewayManager extends EventEmitter {
     });
 
     this.child.once("exit", (code) => {
+      if (this.closeSessionLogOnExit) {
+        this.closeSessionLogStream();
+      }
       this.child = undefined;
       this.controlSocket = undefined;
 
@@ -915,7 +949,8 @@ export class GatewayManager extends EventEmitter {
         });
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Unable to read the chat stream.";
+      const errorMessage =
+        error instanceof Error ? error.message : "Unable to read the chat stream.";
       this.emit("chatStream", {
         type: "error",
         clientRequestId,
@@ -949,12 +984,10 @@ export class GatewayManager extends EventEmitter {
         updatedAt: new Date().toISOString(),
         metadata: {},
       });
-    const userMessage =
-      (userMessageId
-        ? messages.data.find((message) => message.id === userMessageId)
-        : undefined) ??
-      [...messages.data].reverse().find((message) => message.role === "user") ??
-      {
+    const userMessage = (userMessageId
+      ? messages.data.find((message) => message.id === userMessageId)
+      : undefined) ??
+      [...messages.data].reverse().find((message) => message.role === "user") ?? {
         id: userMessageId ?? `message_${clientRequestId}`,
         sessionId,
         role: "user" as const,
@@ -963,12 +996,10 @@ export class GatewayManager extends EventEmitter {
         metadata: {},
         createdAt: new Date().toISOString(),
       };
-    const assistantMessage =
-      (assistantMessageId
-        ? messages.data.find((message) => message.id === assistantMessageId)
-        : undefined) ??
-      [...messages.data].reverse().find((message) => message.role === "assistant") ??
-      {
+    const assistantMessage = (assistantMessageId
+      ? messages.data.find((message) => message.id === assistantMessageId)
+      : undefined) ??
+      [...messages.data].reverse().find((message) => message.role === "assistant") ?? {
         id: assistantMessageId ?? `message_${clientRequestId}-assistant`,
         sessionId,
         role: "assistant" as const,
@@ -1120,14 +1151,19 @@ export class GatewayManager extends EventEmitter {
     return desktopDownloadActionResponseSchema.parse(payload);
   }
 
-  async stop(): Promise<void> {
+  async stop(options: { preserveSessionLog?: boolean } = {}): Promise<void> {
+    const preserveSessionLog = options.preserveSessionLog ?? false;
     this.stopping = true;
+    this.closeSessionLogOnExit = !preserveSessionLog;
     this.controlSocket?.close();
     this.controlSocket = undefined;
 
     const child = this.child;
     if (!child) {
       this.discovery = undefined;
+      if (!preserveSessionLog) {
+        this.closeSessionLogStream();
+      }
       return;
     }
 
@@ -1156,6 +1192,9 @@ export class GatewayManager extends EventEmitter {
     }
 
     this.discovery = undefined;
+    if (!preserveSessionLog) {
+      this.closeSessionLogStream();
+    }
 
     if (!exited) {
       throw new Error("Gateway process did not exit after the shutdown request.");
@@ -1167,7 +1206,7 @@ export class GatewayManager extends EventEmitter {
   }
 
   async restart(): Promise<void> {
-    await this.stop();
+    await this.stop({ preserveSessionLog: true });
     this.stopping = false;
     this.discovery = undefined;
     await this.start();
@@ -1182,7 +1221,11 @@ export class GatewayManager extends EventEmitter {
   }
 
   private createControlHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
-    return buildControlHeaders(this.controlBearerToken, extraHeaders);
+    return buildControlHeaders(
+      this.getControlAuthToken() ?? this.controlBearerToken,
+      this.getControlAuthHeaderName(),
+      extraHeaders,
+    );
   }
 
   private async readJsonResponse(
@@ -1222,11 +1265,7 @@ export class GatewayManager extends EventEmitter {
   }
 
   private attachProcessLogging(child: ChildProcessByStdio<null, Readable, Readable>): void {
-    const emitLog = (
-      sourceLabel: string,
-      streamName: "stdout" | "stderr",
-      chunk: Buffer,
-    ) => {
+    const emitLog = (sourceLabel: string, streamName: "stdout" | "stderr", chunk: Buffer) => {
       const lines = chunk
         .toString("utf8")
         .split("\n")
@@ -1439,9 +1478,50 @@ export class GatewayManager extends EventEmitter {
 
   private emitEvent(event: GatewayEvent): void {
     const parsed = gatewayEventSchema.parse(event);
+    this.appendSessionLog(parsed);
     this.stateValue.lastEventAt = parsed.ts;
     this.emit("event", parsed);
     this.emit("state", this.getState());
+  }
+
+  private openSessionLogStream(): void {
+    if (this.sessionLogStream) {
+      return;
+    }
+
+    mkdirSync(this.paths.logsDir, { recursive: true });
+    const stream = createWriteStream(this.paths.sessionLogFile, {
+      flags: "a",
+      encoding: "utf8",
+    });
+    stream.on("error", (error: Error) => {
+      this.updateState({
+        lastError: `Unable to write session logs: ${error.message}`,
+      });
+      this.closeSessionLogStream();
+    });
+    this.sessionLogStream = stream;
+  }
+
+  private closeSessionLogStream(): void {
+    if (!this.sessionLogStream) {
+      return;
+    }
+
+    this.sessionLogStream.end();
+    this.sessionLogStream = undefined;
+  }
+
+  private appendSessionLog(event: GatewayEvent): void {
+    if (!this.sessionLogStream) {
+      return;
+    }
+
+    if (event.type !== "LOG_STREAM" && event.type !== "REQUEST_TRACE") {
+      return;
+    }
+
+    this.sessionLogStream.write(`${JSON.stringify(event)}\n`);
   }
 
   private updateState(next: Partial<DesktopShellState>): void {

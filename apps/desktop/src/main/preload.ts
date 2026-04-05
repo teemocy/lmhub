@@ -1,11 +1,12 @@
 import type {
+  ChatSession,
   DesktopApiLogList,
   DesktopChatMessageList,
   DesktopChatRunRequest,
   DesktopChatRunResponse,
-  DesktopChatStreamEvent,
   DesktopChatSessionList,
   DesktopChatSessionUpsertRequest,
+  DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
   DesktopDownloadList,
@@ -23,7 +24,6 @@ import type {
   GatewayEvent,
   GatewayHealthSnapshot,
   PublicModelList,
-  ChatSession,
 } from "@localhub/shared-contracts";
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./channels";
@@ -142,6 +142,10 @@ const api = {
     getPaths: () => ipcRenderer.invoke(IPC_CHANNELS.systemGetPaths) as Promise<DesktopSystemPaths>,
     getRuntimeContext: () =>
       ipcRenderer.invoke(IPC_CHANNELS.systemGetRuntimeContext) as Promise<DesktopRuntimeContext>,
+    copyPath: (filePath: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.systemCopyPath, filePath) as Promise<void>,
+    revealPath: (filePath: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.systemRevealPath, filePath) as Promise<boolean>,
     pickModelsDirectory: () =>
       ipcRenderer.invoke(
         IPC_CHANNELS.gatewayOpenModelsDirectoryDialog,
@@ -150,6 +154,14 @@ const api = {
       ipcRenderer.invoke(
         IPC_CHANNELS.systemUpdateModelsDirectory,
         modelsDir,
+      ) as Promise<DesktopRuntimeContext>,
+    updateControlAuthSettings: (payload: {
+      headerName: "authorization" | "x-api-key" | "api-key";
+      token?: string;
+    }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateControlAuthSettings,
+        payload,
       ) as Promise<DesktopRuntimeContext>,
   },
 };

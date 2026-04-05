@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
 import {
@@ -76,6 +76,29 @@ const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH = "stage1-mock";
 const MOCK_RESIDENT_MEMORY_BYTES = 2_147_483_648;
 const MOCK_GPU_MEMORY_BYTES = 1_073_741_824;
+const CAPABILITY_OVERRIDE_KEYS = [
+  "chat",
+  "embeddings",
+  "tools",
+  "streaming",
+  "vision",
+  "audioTranscription",
+  "audioSpeech",
+  "rerank",
+  "promptCache",
+] as const;
+const CAPABILITY_LABELS = {
+  chat: "chat",
+  embeddings: "embeddings",
+  tools: "tools",
+  streaming: "streaming",
+  vision: "vision",
+  audioTranscription: "audio-transcription",
+  audioSpeech: "audio-speech",
+  rerank: "rerank",
+  promptCache: "prompt-cache",
+} as const;
+type CapabilityOverrideMap = NonNullable<DesktopModelConfigUpdateRequest["capabilityOverrides"]>;
 
 interface StreamedAssistantAccumulator {
   responseId?: string;
@@ -117,6 +140,49 @@ function createModel(id: string, created: number, capabilities: string[]): Runti
   };
 }
 
+function normalizeCapabilityOverrides(
+  overrides: DesktopModelConfigUpdateRequest["capabilityOverrides"],
+): CapabilityOverrideMap {
+  if (!overrides) {
+    return {};
+  }
+
+  const normalized: CapabilityOverrideMap = {};
+  for (const key of CAPABILITY_OVERRIDE_KEYS) {
+    if (typeof overrides[key] === "boolean") {
+      normalized[key] = overrides[key];
+    }
+  }
+
+  return normalized;
+}
+
+function applyCapabilityOverridesToLabels(
+  capabilities: string[],
+  overrides: DesktopModelConfigUpdateRequest["capabilityOverrides"],
+): string[] {
+  const normalizedOverrides = normalizeCapabilityOverrides(overrides);
+  const current = new Set(capabilities);
+
+  for (const key of CAPABILITY_OVERRIDE_KEYS) {
+    const label = CAPABILITY_LABELS[key];
+    const value = normalizedOverrides[key];
+    if (typeof value !== "boolean") {
+      continue;
+    }
+
+    if (value) {
+      current.add(label);
+    } else {
+      current.delete(label);
+    }
+  }
+
+  return CAPABILITY_OVERRIDE_KEYS.map((key) => CAPABILITY_LABELS[key]).filter((label) =>
+    current.has(label),
+  );
+}
+
 function createTraceId(traceId?: string): string {
   return traceId?.trim() || randomUUID();
 }
@@ -127,7 +193,8 @@ function hasRuntimeAffectingModelConfigChanges(
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
-    input.gpuLayers !== undefined
+    input.gpuLayers !== undefined ||
+    input.capabilityOverrides !== undefined
   );
 }
 
@@ -270,6 +337,10 @@ function slugifyFileName(filePath: string): string {
 }
 
 function getModelRole(model: RuntimeModelRecord): RuntimeEventRole {
+  if (model.capabilities.includes("rerank")) {
+    return "rerank";
+  }
+
   if (model.capabilities.includes("embeddings") && !model.capabilities.includes("chat")) {
     return "embeddings";
   }
@@ -277,17 +348,25 @@ function getModelRole(model: RuntimeModelRecord): RuntimeEventRole {
   return "chat";
 }
 
-function buildRuntimeKey(modelId: string, role: RuntimeEventRole): RuntimeEventKey {
+function hashCapabilityList(capabilities: string[]): string {
+  return createHash("sha1").update(JSON.stringify(capabilities)).digest("hex").slice(0, 12);
+}
+
+function buildRuntimeKey(
+  modelId: string,
+  role: RuntimeEventRole,
+  configHash = DEFAULT_CONFIG_HASH,
+): RuntimeEventKey {
   return {
     modelId,
     engineType: DEFAULT_ENGINE_TYPE,
     role,
-    configHash: DEFAULT_CONFIG_HASH,
+    configHash,
   };
 }
 
 function getRuntimeKeyForModel(model: RuntimeModelRecord): RuntimeEventKey {
-  return buildRuntimeKey(model.id, getModelRole(model));
+  return buildRuntimeKey(model.id, getModelRole(model), hashCapabilityList(model.capabilities));
 }
 
 function getRuntimeKeyForLog(modelId?: string, model?: RuntimeModelRecord): RuntimeEventKey {
@@ -412,6 +491,7 @@ export class MockGatewayRuntime {
   readonly #chatMessages = new Map<string, ChatMessage[]>();
   readonly #chatSessions = new Map<string, ChatSession>();
   readonly #modelDetails = new Map<string, DesktopModelRecord>();
+  readonly #modelBaseCapabilities = new Map<string, string[]>();
   readonly #models = new Map<string, RuntimeModelRecord>();
   readonly #subscribers = new Set<GatewaySubscriber>();
   readonly #telemetryIntervalMs: number;
@@ -969,6 +1049,13 @@ export class MockGatewayRuntime {
       updatedAt: new Date().toISOString(),
     };
     this.#modelDetails.set(modelId, detail);
+    const currentModel = this.#models.get(modelId);
+    if (currentModel) {
+      this.#models.set(modelId, {
+        ...currentModel,
+        capabilities: [...detail.capabilities],
+      });
+    }
 
     const model = this.#models.get(modelId);
     if (model) {
@@ -1018,9 +1105,28 @@ export class MockGatewayRuntime {
       ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
       ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
       ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+      ...(input.capabilityOverrides !== undefined
+        ? {
+            capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides),
+          }
+        : {}),
       updatedAt: new Date().toISOString(),
     };
+    const baseCapabilities =
+      this.#modelBaseCapabilities.get(modelId) ?? current.capabilities ?? ["chat"];
+    updated.capabilities = applyCapabilityOverridesToLabels(
+      baseCapabilities,
+      updated.capabilityOverrides,
+    );
+    updated.role = getModelRole(createModel(modelId, Math.floor(Date.now() / 1000), updated.capabilities));
     this.#modelDetails.set(modelId, updated);
+    const runtimeModel = this.#models.get(modelId);
+    if (runtimeModel) {
+      this.#models.set(modelId, {
+        ...runtimeModel,
+        capabilities: [...updated.capabilities],
+      });
+    }
 
     return {
       model: structuredClone(updated),
@@ -1306,19 +1412,37 @@ export class MockGatewayRuntime {
     const model = this.#models.get(modelId);
     const existing = this.#modelDetails.get(modelId);
     const defaultName = prettifyModelName(modelId);
+    const baseCapabilities =
+      this.#modelBaseCapabilities.get(modelId) ??
+      model?.capabilities ??
+      existing?.capabilities ??
+      ["chat"];
+    if (!this.#modelBaseCapabilities.has(modelId)) {
+      this.#modelBaseCapabilities.set(modelId, [...baseCapabilities]);
+    }
+
+    const capabilityOverrides = normalizeCapabilityOverrides(existing?.capabilityOverrides);
+    const capabilities = applyCapabilityOverridesToLabels(baseCapabilities, capabilityOverrides);
+    const effectiveModel = model
+      ? {
+          ...model,
+          capabilities,
+        }
+      : createModel(modelId, Math.floor(Date.now() / 1000), capabilities);
 
     return {
       id: modelId,
       name: defaultName,
       displayName: overrides.displayName ?? existing?.displayName ?? defaultName,
       engineType: DEFAULT_ENGINE_TYPE,
-      state: toDesktopModelState(model?.state ?? "Idle"),
-      loaded: model?.loaded ?? false,
+      state: toDesktopModelState(effectiveModel.state),
+      loaded: effectiveModel.loaded,
       artifactStatus: "available",
       sizeBytes: existing?.sizeBytes ?? 1_610_612_736,
       format: "gguf",
-      capabilities: model?.capabilities ?? existing?.capabilities ?? ["chat"],
-      role: getModelRole(model ?? createModel(modelId, Math.floor(Date.now() / 1000), ["chat"])),
+      capabilities,
+      capabilityOverrides,
+      role: getModelRole(effectiveModel),
       tags: existing?.tags ?? ["mock"],
       localPath:
         overrides.localPath ??

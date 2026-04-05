@@ -31,5 +31,8 @@ export const IPC_CHANNELS = {
   gatewayOpenModelsDirectoryDialog: "gateway:open-models-directory-dialog",
   systemGetPaths: "system:get-paths",
   systemGetRuntimeContext: "system:get-runtime-context",
+  systemCopyPath: "system:copy-path",
+  systemRevealPath: "system:reveal-path",
   systemUpdateModelsDirectory: "system:update-models-directory",
+  systemUpdateControlAuthSettings: "system:update-control-auth-settings",
 } as const;

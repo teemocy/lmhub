@@ -3,6 +3,7 @@ import type {
   GatewayEvent,
   GatewayHealthSnapshot,
 } from "@localhub/shared-contracts";
+import { useEffect, useState } from "react";
 import {
   formatActivityRailMessage,
   formatLiveConsoleEntry,
@@ -10,10 +11,21 @@ import {
   selectLiveConsoleEvents,
 } from "../telemetry";
 
+type DesktopSystemPaths = {
+  workspaceRoot: string;
+  supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
+  discoveryFile: string;
+};
+
 type ObservabilityScreenProps = {
   shellState: DesktopShellState;
   health: GatewayHealthSnapshot | null;
+  paths: DesktopSystemPaths | null;
   events: GatewayEvent[];
+  onCopySessionLogFile(filePath: string): Promise<void>;
+  onRevealSessionLogFile(filePath: string): Promise<void>;
 };
 
 const formatClock = (value?: string | null): string => {
@@ -57,12 +69,59 @@ const findLatestTraceRoute = (events: GatewayEvent[]): string | null => {
   return typeof payload?.route === "string" ? payload.route : null;
 };
 
-export function ObservabilityScreen({ events, health, shellState }: ObservabilityScreenProps) {
+export function ObservabilityScreen({
+  events,
+  health,
+  onCopySessionLogFile,
+  onRevealSessionLogFile,
+  paths,
+  shellState,
+}: ObservabilityScreenProps) {
+  const [copyToast, setCopyToast] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
   const activityEvents = selectActivityRailEvents(events);
   const liveConsoleEvents = selectLiveConsoleEvents(events);
   const residentMemoryBytes = findMetricValue(events, "residentMemoryBytes");
   const gpuMemoryBytes = findMetricValue(events, "gpuMemoryBytes");
   const latestTraceRoute = findLatestTraceRoute(events);
+
+  useEffect(() => {
+    if (!copyToast) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setCopyToast(null);
+    }, 1800);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [copyToast]);
+
+  const copySessionLogPath = async () => {
+    if (!paths?.sessionLogFile) {
+      return;
+    }
+
+    try {
+      await onCopySessionLogFile(paths.sessionLogFile);
+      setCopyToast({
+        tone: "success",
+        text: "Session log path copied.",
+      });
+    } catch (error) {
+      setCopyToast({
+        tone: "error",
+        text:
+          error instanceof Error
+            ? `Unable to copy session log path. ${error.message}`
+            : "Unable to copy session log path.",
+      });
+    }
+  };
 
   return (
     <section className="screen-stack">
@@ -107,6 +166,47 @@ export function ObservabilityScreen({ events, health, shellState }: Observabilit
       <article className="wide-card observability-card">
         <span className="section-label">Live log console</span>
         <h3>Gateway log and trace stream</h3>
+        <div className="detail-meta-note">
+          <strong>Current session log</strong>
+          <p className="session-log-path">
+            {paths?.sessionLogFile ?? "Waiting for the gateway to create a session log file."}
+          </p>
+          <div className="button-row">
+            <button
+              className="secondary-button"
+              disabled={!paths?.sessionLogFile}
+              onClick={() => {
+                void copySessionLogPath();
+              }}
+              type="button"
+            >
+              Copy path
+            </button>
+            <button
+              className="secondary-button"
+              disabled={!paths?.sessionLogFile}
+              onClick={() => {
+                if (paths?.sessionLogFile) {
+                  void onRevealSessionLogFile(paths.sessionLogFile);
+                }
+              }}
+              type="button"
+            >
+              Reveal in folder
+            </button>
+          </div>
+          <p
+            className={
+              copyToast
+                ? `session-log-toast session-log-toast-${copyToast.tone} session-log-toast-visible`
+                : "session-log-toast"
+            }
+            aria-live="polite"
+            role="status"
+          >
+            {copyToast?.text ?? " "}
+          </p>
+        </div>
         <div className="log-console">
           {liveConsoleEvents.length === 0 ? (
             <p>Waiting for gateway logs or request traces.</p>

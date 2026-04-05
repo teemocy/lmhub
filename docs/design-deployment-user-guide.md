@@ -657,6 +657,12 @@ curl http://127.0.0.1:1337/v1/embeddings \
 
 If public auth is disabled, omit the `Authorization` header.
 
+Clients that prefer API-key style headers can also send the same token as
+`x-api-key` or `api-key` on either plane.
+
+In the desktop Settings screen, you can choose the header name and paste the
+token value the desktop uses for its own gateway requests.
+
 ## 5. Known Gaps and Current Limitations
 
 The current repo is strong on runtime foundations, but a few areas remain intentionally incomplete:

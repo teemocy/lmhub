@@ -2,22 +2,25 @@ import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  BrowserWindow,
-  type Event as ElectronEvent,
-  Menu,
-  Tray,
-  app,
-  dialog,
-  ipcMain,
-  nativeImage,
-} from "electron";
-import {
   ensureAppPaths,
   loadDesktopConfig,
   loadGatewayConfig as loadPlatformGatewayConfig,
   resolveAppPaths,
   writeConfigFile,
 } from "@localhub/platform";
+import type { ControlAuthHeaderName } from "@localhub/shared-contracts";
+import {
+  BrowserWindow,
+  type Event as ElectronEvent,
+  Menu,
+  Tray,
+  app,
+  clipboard,
+  dialog,
+  ipcMain,
+  nativeImage,
+  shell,
+} from "electron";
 import { loadGatewayConfig } from "../../../../services/gateway/src/config";
 import { IPC_CHANNELS } from "./channels";
 import { GatewayManager, resolveDesktopRuntimeEnvironment } from "./gateway-manager";
@@ -27,6 +30,8 @@ export type DesktopRuntimeContext = {
     closeToTray: boolean;
     autoLaunchGateway: boolean;
     theme: "system" | "light" | "dark";
+    controlAuthHeaderName: ControlAuthHeaderName;
+    controlAuthToken?: string;
   };
   gateway: {
     enableLan: boolean;
@@ -36,6 +41,7 @@ export type DesktopRuntimeContext = {
     corsAllowlist: string[];
     defaultModelTtlMs: number;
     localModelsDir: string;
+    controlAuthHeaderName: ControlAuthHeaderName;
     authConfigured: boolean;
   };
   files: {
@@ -50,17 +56,20 @@ let quitting = false;
 
 const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
 const runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
-const gatewayManager = new GatewayManager();
+let desktopConfig = loadDesktopConfig({
+  cwd: workspaceRoot,
+  environment: runtimeEnvironment,
+});
+const gatewayManager = new GatewayManager({
+  getControlAuthHeaderName: () => desktopConfig.value.controlAuthHeaderName,
+  getControlAuthToken: () => desktopConfig.value.controlAuthToken,
+});
 const appPaths = ensureAppPaths(
   resolveAppPaths({
     cwd: workspaceRoot,
     environment: runtimeEnvironment,
   }),
 );
-const desktopConfig = loadDesktopConfig({
-  cwd: workspaceRoot,
-  environment: runtimeEnvironment,
-});
 let gatewayConfig = loadGatewayConfig({
   cwd: workspaceRoot,
   environment: runtimeEnvironment,
@@ -138,6 +147,10 @@ const buildRuntimeContext = (): DesktopRuntimeContext => ({
     closeToTray: desktopConfig.value.closeToTray,
     autoLaunchGateway: desktopConfig.value.autoLaunchGateway,
     theme: desktopConfig.value.theme,
+    controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
+    ...(desktopConfig.value.controlAuthToken !== undefined
+      ? { controlAuthToken: desktopConfig.value.controlAuthToken }
+      : {}),
   },
   gateway: {
     enableLan: sharedGatewayConfig.value.enableLan,
@@ -147,6 +160,7 @@ const buildRuntimeContext = (): DesktopRuntimeContext => ({
     corsAllowlist: [...gatewayConfig.corsAllowlist],
     defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
     localModelsDir: gatewayConfig.localModelsDir,
+    controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
     authConfigured: Boolean(gatewayConfig.controlBearerToken || gatewayConfig.publicBearerToken),
   },
   files: {
@@ -161,6 +175,13 @@ const reloadGatewayConfig = (): void => {
     environment: runtimeEnvironment,
   });
   sharedGatewayConfig = loadPlatformGatewayConfig({
+    cwd: workspaceRoot,
+    environment: runtimeEnvironment,
+  });
+};
+
+const reloadDesktopConfig = (): void => {
+  desktopConfig = loadDesktopConfig({
     cwd: workspaceRoot,
     environment: runtimeEnvironment,
   });
@@ -280,6 +301,9 @@ const registerIpcHandlers = (): void => {
     IPC_CHANNELS.systemGetRuntimeContext,
     (): DesktopRuntimeContext => buildRuntimeContext(),
   );
+  ipcMain.handle(IPC_CHANNELS.systemCopyPath, (_event, filePath: string) => {
+    clipboard.writeText(filePath);
+  });
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelsDirectoryDialog, async () => {
     const options = {
       title: "Choose a local models directory",
@@ -300,6 +324,38 @@ const registerIpcHandlers = (): void => {
         localModelsDir: modelsDir,
       });
       reloadGatewayConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
+  );
+  ipcMain.handle(IPC_CHANNELS.systemRevealPath, async (_event, filePath: string) =>
+    shell.showItemInFolder(filePath),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.systemUpdateControlAuthSettings,
+    async (
+      _event,
+      payload: { headerName: ControlAuthHeaderName; token?: string | undefined },
+    ): Promise<DesktopRuntimeContext> => {
+      if (
+        payload.headerName !== "authorization" &&
+        payload.headerName !== "x-api-key" &&
+        payload.headerName !== "api-key"
+      ) {
+        throw new Error("Unsupported control auth header name.");
+      }
+
+      const controlAuthToken = payload.token?.trim();
+
+      mkdirSync(path.dirname(desktopConfig.filePath), { recursive: true });
+      writeConfigFile(desktopConfig.filePath, {
+        ...desktopConfig.value,
+        controlAuthHeaderName: payload.headerName,
+        controlAuthToken:
+          controlAuthToken && controlAuthToken.length > 0 ? controlAuthToken : undefined,
+      });
+      reloadDesktopConfig();
       await gatewayManager.restart();
 
       return buildRuntimeContext();

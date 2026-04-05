@@ -1,12 +1,13 @@
 import type {
   ChatSession,
+  ControlAuthHeaderName,
   DesktopApiLogList,
   DesktopChatMessageList,
   DesktopChatRunRequest,
   DesktopChatRunResponse,
-  DesktopChatStreamEvent,
   DesktopChatSessionList,
   DesktopChatSessionUpsertRequest,
+  DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
   DesktopDownloadList,
@@ -29,6 +30,8 @@ import type {
 type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
   discoveryFile: string;
 };
 
@@ -37,6 +40,8 @@ type DesktopRuntimeContext = {
     closeToTray: boolean;
     autoLaunchGateway: boolean;
     theme: "system" | "light" | "dark";
+    controlAuthHeaderName: ControlAuthHeaderName;
+    controlAuthToken?: string;
   };
   gateway: {
     enableLan: boolean;
@@ -46,6 +51,7 @@ type DesktopRuntimeContext = {
     corsAllowlist: string[];
     defaultModelTtlMs: number;
     localModelsDir: string;
+    controlAuthHeaderName: ControlAuthHeaderName;
     authConfigured: boolean;
   };
   files: {
@@ -108,8 +114,14 @@ type DesktopApi = {
   system: {
     getPaths(): Promise<DesktopSystemPaths>;
     getRuntimeContext(): Promise<DesktopRuntimeContext>;
+    copyPath(filePath: string): Promise<void>;
+    revealPath(filePath: string): Promise<boolean>;
     pickModelsDirectory(): Promise<FileDialogResult>;
     updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;
+    updateControlAuthSettings(payload: {
+      headerName: ControlAuthHeaderName;
+      token?: string;
+    }): Promise<DesktopRuntimeContext>;
   };
 };
 

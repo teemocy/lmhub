@@ -38,7 +38,7 @@ export const selectActivityRailEvents = (events: GatewayEvent[], limit = 10): Ac
     )
     .slice(0, limit);
 
-export const selectLiveConsoleEvents = (events: GatewayEvent[], limit = 18): LiveConsoleEvent[] =>
+export const selectLiveConsoleEvents = (events: GatewayEvent[], limit = 10): LiveConsoleEvent[] =>
   events
     .filter(
       (event): event is LiveConsoleEvent =>

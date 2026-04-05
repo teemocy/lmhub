@@ -40,6 +40,8 @@ export const capabilitySetSchema = z.object({
   promptCache: z.boolean(),
 });
 
+export const capabilityOverridesSchema = capabilitySetSchema.partial();
+
 export const ggufMetadataSchema = z.object({
   schemaVersion: schemaVersionSchema.default(CONTRACT_SCHEMA_VERSION),
   architecture: nonEmptyStringSchema.optional(),
@@ -86,11 +88,13 @@ export const modelProfileSchema = z.object({
   promptCacheKey: nonEmptyStringSchema.optional(),
   role: runtimeRoleSchema.default("chat"),
   parameterOverrides: jsonRecordSchema.default({}),
+  capabilityOverrides: capabilityOverridesSchema.optional(),
   createdAt: isoDatetimeSchema,
   updatedAt: isoDatetimeSchema,
 });
 
 export type CapabilitySet = z.infer<typeof capabilitySetSchema>;
+export type CapabilityOverrides = z.infer<typeof capabilityOverridesSchema>;
 export type GgufMetadata = z.infer<typeof ggufMetadataSchema>;
 export type ModelArtifact = z.infer<typeof modelArtifactSchema>;
 export type ModelProfile = z.infer<typeof modelProfileSchema>;
