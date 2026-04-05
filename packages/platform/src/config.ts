@@ -1,6 +1,6 @@
-import path from "node:path";
+import path, { dirname } from "node:path";
 import os from "node:os";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import {
   type DesktopConfigRecord,
@@ -179,5 +179,6 @@ export function loadDesktopConfig(
 }
 
 export function writeConfigFile<T extends object>(filePath: string, value: T): void {
+  mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }

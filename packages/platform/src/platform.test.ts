@@ -1,11 +1,11 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LOCAL_ARTIFACT_LAYOUT_SPEC } from "@localhub/shared-contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ensureAppPaths, resolveAppPaths } from "./app-paths.js";
-import { loadGatewayConfig } from "./config.js";
+import { loadGatewayConfig, writeConfigFile } from "./config.js";
 import { readGatewayDiscoveryFile, writeGatewayDiscoveryFile } from "./discovery.js";
 import { createLogger } from "./logger.js";
 import { createApiTokenRecord, verifyBearerToken } from "./security.js";
@@ -66,6 +66,23 @@ describe("platform helpers", () => {
     expect(config.value.enableLan).toBe(true);
     expect(config.value.localModelsDir).toBe(path.join(os.homedir(), ".llm_hub", "models"));
     expect(config.sources).toContain("env");
+  });
+
+  it("creates parent directories when writing config files", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-config-"));
+    tempDirectories.push(root);
+    const filePath = path.join(root, "config", "gateway.json");
+
+    writeConfigFile(filePath, {
+      localModelsDir: "/tmp/models",
+      enableLan: true,
+    });
+
+    expect(existsSync(filePath)).toBe(true);
+    expect(JSON.parse(readFileSync(filePath, "utf8"))).toEqual({
+      localModelsDir: "/tmp/models",
+      enableLan: true,
+    });
   });
 
   it("round-trips the discovery file", () => {
