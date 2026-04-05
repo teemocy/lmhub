@@ -32,4 +32,5 @@ export const IPC_CHANNELS = {
   systemGetPaths: "system:get-paths",
   systemGetRuntimeContext: "system:get-runtime-context",
   systemUpdateModelsDirectory: "system:update-models-directory",
+  systemUpdateControlAuthHeaderName: "system:update-control-auth-header-name",
 } as const;

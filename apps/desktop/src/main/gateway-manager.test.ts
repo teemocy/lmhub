@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildControlHeaders,
-  resolveGatewayLaunchCommand,
   resolveControlBearerToken,
+  resolveGatewayLaunchCommand,
   waitForChildExit,
 } from "./gateway-manager";
 
@@ -38,7 +38,7 @@ describe("gateway manager auth helpers", () => {
 
   it("adds bearer auth without dropping existing request headers", () => {
     expect(
-      buildControlHeaders("control-secret", {
+      buildControlHeaders("control-secret", "authorization", {
         "content-type": "application/json",
       }),
     ).toEqual({
@@ -46,7 +46,15 @@ describe("gateway manager auth helpers", () => {
       Authorization: "Bearer control-secret",
     });
 
-    expect(buildControlHeaders(undefined)).toEqual({});
+    expect(buildControlHeaders("control-secret", "x-api-key")).toEqual({
+      "x-api-key": "control-secret",
+    });
+
+    expect(buildControlHeaders("control-secret", "api-key")).toEqual({
+      "api-key": "control-secret",
+    });
+
+    expect(buildControlHeaders(undefined, "authorization")).toEqual({});
   });
 
   it("prefers an explicit node executable for development launches", () => {

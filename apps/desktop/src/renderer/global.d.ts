@@ -1,12 +1,13 @@
 import type {
   ChatSession,
+  ControlAuthHeaderName,
   DesktopApiLogList,
   DesktopChatMessageList,
   DesktopChatRunRequest,
   DesktopChatRunResponse,
-  DesktopChatStreamEvent,
   DesktopChatSessionList,
   DesktopChatSessionUpsertRequest,
+  DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
   DesktopDownloadList,
@@ -46,6 +47,7 @@ type DesktopRuntimeContext = {
     corsAllowlist: string[];
     defaultModelTtlMs: number;
     localModelsDir: string;
+    controlAuthHeaderName: ControlAuthHeaderName;
     authConfigured: boolean;
   };
   files: {
@@ -110,6 +112,7 @@ type DesktopApi = {
     getRuntimeContext(): Promise<DesktopRuntimeContext>;
     pickModelsDirectory(): Promise<FileDialogResult>;
     updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;
+    updateControlAuthHeaderName(headerName: ControlAuthHeaderName): Promise<DesktopRuntimeContext>;
   };
 };
 

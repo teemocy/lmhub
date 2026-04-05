@@ -94,6 +94,30 @@ describe("gateway skeleton", () => {
     });
   });
 
+  it("accepts API key headers on public and control routes", async () => {
+    const gateway = await createTestGateway();
+
+    const publicResponse = await gateway.publicApp.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: {
+        "x-api-key": "public-secret",
+      },
+    });
+
+    expect(publicResponse.statusCode).toBe(200);
+
+    const controlResponse = await gateway.controlApp.inject({
+      method: "GET",
+      url: "/control/models",
+      headers: {
+        "api-key": "control-secret",
+      },
+    });
+
+    expect(controlResponse.statusCode).toBe(200);
+  });
+
   it("rejects unauthorized public API requests when a bearer token is configured", async () => {
     const gateway = await createTestGateway();
 

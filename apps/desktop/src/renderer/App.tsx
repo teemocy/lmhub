@@ -1,7 +1,8 @@
 import type {
-  DesktopEngineRecord,
+  ControlAuthHeaderName,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
+  DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
   DesktopModelConfigUpdateRequest,
@@ -14,13 +15,13 @@ import type {
 } from "@localhub/shared-contracts";
 import { startTransition, useEffect, useState } from "react";
 import { HashRouter, NavLink, Route, Routes } from "react-router-dom";
+import { BACKGROUND_REFRESH_INTERVAL_MS } from "./constants";
 import { ChatScreen } from "./screens/ChatScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { DownloadsScreen } from "./screens/DownloadsScreen";
-import { ObservabilityScreen } from "./screens/ObservabilityScreen";
 import { ModelsScreen } from "./screens/ModelsScreen";
+import { ObservabilityScreen } from "./screens/ObservabilityScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
-import { BACKGROUND_REFRESH_INTERVAL_MS } from "./constants";
 
 type DesktopSystemPaths = {
   workspaceRoot: string;
@@ -42,6 +43,7 @@ type DesktopRuntimeContext = {
     corsAllowlist: string[];
     defaultModelTtlMs: number;
     localModelsDir: string;
+    controlAuthHeaderName: ControlAuthHeaderName;
     authConfigured: boolean;
   };
   files: {
@@ -175,6 +177,7 @@ export function App() {
     };
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey intentionally retriggers this polling effect.
   useEffect(() => {
     if (shellState.phase !== "connected") {
       return;
@@ -214,8 +217,14 @@ export function App() {
       return;
     }
 
+    const firstModelId = modelLibrary[0]?.id;
+    if (!firstModelId) {
+      setSelectedModelId(null);
+      return;
+    }
+
     setSelectedModelId((current) =>
-      current && modelLibrary.some((model) => model.id === current) ? current : modelLibrary[0]!.id,
+      current && modelLibrary.some((model) => model.id === current) ? current : firstModelId,
     );
   }, [modelLibrary]);
 
@@ -314,6 +323,14 @@ export function App() {
 
   const updateModelsDirectory = async (modelsDir: string): Promise<void> => {
     const updatedContext = await window.desktopApi.system.updateModelsDirectory(modelsDir);
+    startTransition(() => {
+      setRuntimeContext(updatedContext);
+    });
+    requestRefresh();
+  };
+
+  const updateControlAuthHeaderName = async (headerName: ControlAuthHeaderName): Promise<void> => {
+    const updatedContext = await window.desktopApi.system.updateControlAuthHeaderName(headerName);
     startTransition(() => {
       setRuntimeContext(updatedContext);
     });
@@ -446,7 +463,10 @@ export function App() {
               }
             />
             <Route path="/downloads" element={<DownloadsScreen shellState={shellState} />} />
-            <Route path="/chat" element={<ChatScreen models={chatModelSummaries} shellState={shellState} />} />
+            <Route
+              path="/chat"
+              element={<ChatScreen models={chatModelSummaries} shellState={shellState} />}
+            />
             <Route
               path="/observability"
               element={
@@ -460,6 +480,7 @@ export function App() {
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}
+                  onUpdateControlAuthHeaderName={updateControlAuthHeaderName}
                   onUpdateModelsDirectory={updateModelsDirectory}
                   paths={paths}
                   runtimeContext={runtimeContext}

@@ -1,11 +1,12 @@
 import type {
+  ChatSession,
   DesktopApiLogList,
   DesktopChatMessageList,
   DesktopChatRunRequest,
   DesktopChatRunResponse,
-  DesktopChatStreamEvent,
   DesktopChatSessionList,
   DesktopChatSessionUpsertRequest,
+  DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
   DesktopDownloadList,
@@ -23,7 +24,6 @@ import type {
   GatewayEvent,
   GatewayHealthSnapshot,
   PublicModelList,
-  ChatSession,
 } from "@localhub/shared-contracts";
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./channels";
@@ -150,6 +150,11 @@ const api = {
       ipcRenderer.invoke(
         IPC_CHANNELS.systemUpdateModelsDirectory,
         modelsDir,
+      ) as Promise<DesktopRuntimeContext>,
+    updateControlAuthHeaderName: (headerName: string) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateControlAuthHeaderName,
+        headerName,
       ) as Promise<DesktopRuntimeContext>,
   },
 };

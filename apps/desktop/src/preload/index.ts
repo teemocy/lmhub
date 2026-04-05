@@ -12,6 +12,7 @@ export const preloadBridgeContract = {
     "gateway:restart",
     "gateway:shutdown",
     "gateway:get-catalog-model",
+    "system:update-control-auth-header-name",
   ] as const,
 };
 

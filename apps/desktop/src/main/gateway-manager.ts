@@ -12,14 +12,14 @@ import {
   resolveAppPaths,
 } from "@localhub/platform";
 import {
-  type DesktopChatStreamEvent,
+  type ControlAuthHeaderName,
   type DesktopApiLogList,
-  type OpenAiToolCall,
   type DesktopChatMessageList,
   type DesktopChatRunRequest,
   type DesktopChatRunResponse,
   type DesktopChatSessionList,
   type DesktopChatSessionUpsertRequest,
+  type DesktopChatStreamEvent,
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
   type DesktopDownloadList,
@@ -38,6 +38,7 @@ import {
   type GatewayDiscoveryFile,
   type GatewayEvent,
   type GatewayHealthSnapshot,
+  type OpenAiToolCall,
   type PublicModelList,
   type RequestRoute,
   chatCompletionsChunkSchema,
@@ -236,12 +237,15 @@ export const resolveControlBearerToken = (
 
 export const buildControlHeaders = (
   controlBearerToken: string | undefined,
+  controlAuthHeaderName: ControlAuthHeaderName,
   extraHeaders: Record<string, string> = {},
 ): Record<string, string> =>
   controlBearerToken
     ? {
         ...extraHeaders,
-        Authorization: `Bearer ${controlBearerToken}`,
+        ...(controlAuthHeaderName === "authorization"
+          ? { Authorization: `Bearer ${controlBearerToken}` }
+          : { [controlAuthHeaderName]: controlBearerToken }),
       }
     : extraHeaders;
 
@@ -475,6 +479,7 @@ export class GatewayManager extends EventEmitter {
   private controlSocket: WebSocket | undefined;
   private discovery: GatewayDiscoveryFile | undefined;
   private stopping = false;
+  private readonly getControlAuthHeaderName: () => ControlAuthHeaderName;
   private readonly controlBearerToken = resolveControlBearerToken();
   private readonly runtimeEnvironment: DesktopRuntimeEnvironment;
   private readonly stateValue: DesktopShellState = desktopShellStateSchema.parse({
@@ -489,10 +494,14 @@ export class GatewayManager extends EventEmitter {
 
   readonly paths: DesktopSystemPaths;
 
-  constructor(workspaceRootOverride?: string) {
+  constructor(
+    getControlAuthHeaderName?: () => ControlAuthHeaderName,
+    workspaceRootOverride?: string,
+  ) {
     super();
 
     const workspaceRoot = workspaceRootOverride ?? path.resolve(__dirname, "..", "..", "..");
+    this.getControlAuthHeaderName = getControlAuthHeaderName ?? (() => "authorization");
     this.runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
     const appPaths = resolveAppPaths({
       cwd: workspaceRoot,
@@ -915,7 +924,8 @@ export class GatewayManager extends EventEmitter {
         });
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Unable to read the chat stream.";
+      const errorMessage =
+        error instanceof Error ? error.message : "Unable to read the chat stream.";
       this.emit("chatStream", {
         type: "error",
         clientRequestId,
@@ -949,12 +959,10 @@ export class GatewayManager extends EventEmitter {
         updatedAt: new Date().toISOString(),
         metadata: {},
       });
-    const userMessage =
-      (userMessageId
-        ? messages.data.find((message) => message.id === userMessageId)
-        : undefined) ??
-      [...messages.data].reverse().find((message) => message.role === "user") ??
-      {
+    const userMessage = (userMessageId
+      ? messages.data.find((message) => message.id === userMessageId)
+      : undefined) ??
+      [...messages.data].reverse().find((message) => message.role === "user") ?? {
         id: userMessageId ?? `message_${clientRequestId}`,
         sessionId,
         role: "user" as const,
@@ -963,12 +971,10 @@ export class GatewayManager extends EventEmitter {
         metadata: {},
         createdAt: new Date().toISOString(),
       };
-    const assistantMessage =
-      (assistantMessageId
-        ? messages.data.find((message) => message.id === assistantMessageId)
-        : undefined) ??
-      [...messages.data].reverse().find((message) => message.role === "assistant") ??
-      {
+    const assistantMessage = (assistantMessageId
+      ? messages.data.find((message) => message.id === assistantMessageId)
+      : undefined) ??
+      [...messages.data].reverse().find((message) => message.role === "assistant") ?? {
         id: assistantMessageId ?? `message_${clientRequestId}-assistant`,
         sessionId,
         role: "assistant" as const,
@@ -1182,7 +1188,11 @@ export class GatewayManager extends EventEmitter {
   }
 
   private createControlHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
-    return buildControlHeaders(this.controlBearerToken, extraHeaders);
+    return buildControlHeaders(
+      this.controlBearerToken,
+      this.getControlAuthHeaderName(),
+      extraHeaders,
+    );
   }
 
   private async readJsonResponse(
@@ -1222,11 +1232,7 @@ export class GatewayManager extends EventEmitter {
   }
 
   private attachProcessLogging(child: ChildProcessByStdio<null, Readable, Readable>): void {
-    const emitLog = (
-      sourceLabel: string,
-      streamName: "stdout" | "stderr",
-      chunk: Buffer,
-    ) => {
+    const emitLog = (sourceLabel: string, streamName: "stdout" | "stderr", chunk: Buffer) => {
       const lines = chunk
         .toString("utf8")
         .split("\n")

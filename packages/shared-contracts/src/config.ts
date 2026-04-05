@@ -1,6 +1,6 @@
-import { z } from "zod";
 import os from "node:os";
 import path from "node:path";
+import { z } from "zod";
 
 import {
   CONTRACT_SCHEMA_VERSION,
@@ -34,6 +34,7 @@ export const desktopConfigRecordSchema = z.object({
   closeToTray: z.boolean().default(true),
   autoLaunchGateway: z.boolean().default(true),
   theme: z.enum(["system", "light", "dark"]).default("system"),
+  controlAuthHeaderName: z.enum(["authorization", "x-api-key", "api-key"]).default("authorization"),
   preferredWindowWidth: z.number().int().positive().default(1440),
   preferredWindowHeight: z.number().int().positive().default(960),
   logLevel: logLevelSchema.default("info"),
@@ -77,6 +78,7 @@ export const desktopConfigDefaults = desktopConfigRecordSchema.parse({});
 
 export type GatewayConfigRecord = z.infer<typeof gatewayConfigRecordSchema>;
 export type DesktopConfigRecord = z.infer<typeof desktopConfigRecordSchema>;
+export type ControlAuthHeaderName = DesktopConfigRecord["controlAuthHeaderName"];
 export type GatewayDiscoveryFile = z.infer<typeof gatewayDiscoveryFileSchema>;
 export type ApiTokenRecord = z.infer<typeof apiTokenRecordSchema>;
 export type PromptCacheRecord = z.infer<typeof promptCacheRecordSchema>;

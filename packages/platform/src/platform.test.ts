@@ -5,7 +5,7 @@ import { LOCAL_ARTIFACT_LAYOUT_SPEC } from "@localhub/shared-contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ensureAppPaths, resolveAppPaths } from "./app-paths.js";
-import { loadGatewayConfig, writeConfigFile } from "./config.js";
+import { loadDesktopConfig, loadGatewayConfig, writeConfigFile } from "./config.js";
 import { readGatewayDiscoveryFile, writeGatewayDiscoveryFile } from "./discovery.js";
 import { classifyStderrLogLevel } from "./log-stream.js";
 import { createLogger } from "./logger.js";
@@ -67,6 +67,25 @@ describe("platform helpers", () => {
     expect(config.value.enableLan).toBe(true);
     expect(config.value.localModelsDir).toBe(path.join(os.homedir(), ".llm_hub", "models"));
     expect(config.sources).toContain("env");
+  });
+
+  it("loads desktop config with a persisted control auth header preference", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-desktop-config-"));
+    tempDirectories.push(root);
+    const filePath = path.join(root, "desktop.json");
+
+    writeConfigFile(filePath, {
+      controlAuthHeaderName: "x-api-key",
+    });
+
+    const config = loadDesktopConfig({
+      cwd: root,
+      environment: "development",
+      filePath,
+    });
+
+    expect(config.value.controlAuthHeaderName).toBe("x-api-key");
+    expect(config.sources).toContain("file");
   });
 
   it("creates parent directories when writing config files", () => {

@@ -1,4 +1,4 @@
-import type { DesktopShellState } from "@localhub/shared-contracts";
+import type { ControlAuthHeaderName, DesktopShellState } from "@localhub/shared-contracts";
 import { useEffect, useState } from "react";
 
 type DesktopSystemPaths = {
@@ -21,6 +21,7 @@ type DesktopRuntimeContext = {
     corsAllowlist: string[];
     defaultModelTtlMs: number;
     localModelsDir: string;
+    controlAuthHeaderName: ControlAuthHeaderName;
     authConfigured: boolean;
   };
   files: {
@@ -36,6 +37,7 @@ type SettingsScreenProps = {
   onPickModelsDirectory(): Promise<string | null>;
   onRestartGateway(): Promise<void>;
   onShutdownGateway(): Promise<void>;
+  onUpdateControlAuthHeaderName(headerName: ControlAuthHeaderName): Promise<void>;
   onUpdateModelsDirectory(modelsDir: string): Promise<void>;
 };
 
@@ -48,14 +50,24 @@ export function SettingsScreen({
   onPickModelsDirectory,
   onRestartGateway,
   onShutdownGateway,
+  onUpdateControlAuthHeaderName,
   onUpdateModelsDirectory,
 }: SettingsScreenProps) {
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [busyAction, setBusyAction] = useState<"restart" | "shutdown" | "models-dir" | null>(null);
-  const [pathFeedback, setPathFeedback] = useState<{ tone: "success" | "error"; text: string } | null>(
-    null,
-  );
+  const [busyAction, setBusyAction] = useState<
+    "restart" | "shutdown" | "models-dir" | "auth-header" | null
+  >(null);
+  const [pathFeedback, setPathFeedback] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
+  const [authHeaderFeedback, setAuthHeaderFeedback] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
   const [modelsDirDraft, setModelsDirDraft] = useState("");
+  const [controlAuthHeaderDraft, setControlAuthHeaderDraft] =
+    useState<ControlAuthHeaderName>("authorization");
 
   useEffect(() => {
     const dismissed = window.localStorage.getItem(FIRST_RUN_KEY) === "true";
@@ -67,6 +79,12 @@ export function SettingsScreen({
       setModelsDirDraft(runtimeContext.gateway.localModelsDir);
     }
   }, [runtimeContext?.gateway.localModelsDir]);
+
+  useEffect(() => {
+    if (runtimeContext?.gateway.controlAuthHeaderName) {
+      setControlAuthHeaderDraft(runtimeContext.gateway.controlAuthHeaderName);
+    }
+  }, [runtimeContext?.gateway.controlAuthHeaderName]);
 
   const dismissOnboarding = () => {
     window.localStorage.setItem(FIRST_RUN_KEY, "true");
@@ -116,7 +134,32 @@ export function SettingsScreen({
     } catch (error) {
       setPathFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Unable to update the local models directory.",
+        text:
+          error instanceof Error ? error.message : "Unable to update the local models directory.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const saveControlAuthHeaderName = async () => {
+    if (!runtimeContext) {
+      return;
+    }
+
+    setBusyAction("auth-header");
+    setAuthHeaderFeedback(null);
+
+    try {
+      await onUpdateControlAuthHeaderName(controlAuthHeaderDraft);
+      setAuthHeaderFeedback({
+        tone: "success",
+        text: "Desktop requests now use the selected auth header name.",
+      });
+    } catch (error) {
+      setAuthHeaderFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Unable to update the auth header name.",
       });
     } finally {
       setBusyAction(null);
@@ -128,6 +171,11 @@ export function SettingsScreen({
     busyAction === null &&
     modelsDirDraft.trim().length > 0 &&
     modelsDirDraft.trim() !== runtimeContext.gateway.localModelsDir;
+
+  const canSaveControlAuthHeader =
+    runtimeContext !== null &&
+    busyAction === null &&
+    controlAuthHeaderDraft !== runtimeContext.gateway.controlAuthHeaderName;
 
   const lanRisk =
     runtimeContext?.gateway.enableLan && !runtimeContext.gateway.authRequired
@@ -193,6 +241,53 @@ export function SettingsScreen({
       </article>
 
       <article className="wide-card">
+        <span className="section-label">Control-plane headers</span>
+        <h3>Outbound auth header</h3>
+        <p>
+          Choose which header name the desktop sends when it talks to the gateway. The gateway
+          accepts bearer and API-key style headers either way.
+        </p>
+        <div className="settings-grid">
+          <label className="field-stack">
+            <span className="section-label">Header format</span>
+            <select
+              className="text-input"
+              onChange={(event) =>
+                setControlAuthHeaderDraft(event.target.value as ControlAuthHeaderName)
+              }
+              value={controlAuthHeaderDraft}
+            >
+              <option value="authorization">Authorization: Bearer</option>
+              <option value="x-api-key">x-api-key</option>
+              <option value="api-key">api-key</option>
+            </select>
+          </label>
+        </div>
+        {authHeaderFeedback ? (
+          <div
+            className={
+              authHeaderFeedback.tone === "success"
+                ? "detail-alert detail-alert-success"
+                : "detail-alert"
+            }
+          >
+            <strong>{authHeaderFeedback.tone === "success" ? "Saved" : "Unable to save"}</strong>
+            <p>{authHeaderFeedback.text}</p>
+          </div>
+        ) : null}
+        <div className="button-row">
+          <button
+            className="primary-button"
+            disabled={!canSaveControlAuthHeader}
+            onClick={() => void saveControlAuthHeaderName()}
+            type="button"
+          >
+            {busyAction === "auth-header" ? "Saving..." : "Save header"}
+          </button>
+        </div>
+      </article>
+
+      <article className="wide-card">
         <span className="section-label">Runtime controls</span>
         <h3>Recovery and shutdown</h3>
         <p>
@@ -253,8 +348,8 @@ export function SettingsScreen({
         <span className="section-label">Local models</span>
         <h3>Auto-discovered GGUF directory</h3>
         <p>
-          The gateway scans this directory at startup and registers any GGUF files it finds. Use
-          the folder picker or type an absolute path, then save to restart the gateway.
+          The gateway scans this directory at startup and registers any GGUF files it finds. Use the
+          folder picker or type an absolute path, then save to restart the gateway.
         </p>
         <div className="settings-grid">
           <label className="field-stack">
@@ -271,9 +366,7 @@ export function SettingsScreen({
         {pathFeedback ? (
           <div
             className={
-              pathFeedback.tone === "success"
-                ? "detail-alert detail-alert-success"
-                : "detail-alert"
+              pathFeedback.tone === "success" ? "detail-alert detail-alert-success" : "detail-alert"
             }
           >
             <strong>{pathFeedback.tone === "success" ? "Saved" : "Unable to save"}</strong>
@@ -318,7 +411,9 @@ export function SettingsScreen({
           <div>
             <dt>Default model TTL</dt>
             <dd>
-              {runtimeContext ? `${Math.round(runtimeContext.gateway.defaultModelTtlMs / 60_000)} min` : "Loading"}
+              {runtimeContext
+                ? `${Math.round(runtimeContext.gateway.defaultModelTtlMs / 60_000)} min`
+                : "Loading"}
             </dd>
           </div>
         </div>
