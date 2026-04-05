@@ -1,11 +1,15 @@
 import type {
   DesktopEngineRecord,
+  DesktopEngineInstallRequest,
+  DesktopEngineInstallResponse,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelConfigUpdateRequest,
+  DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
   DesktopShellState,
 } from "@localhub/shared-contracts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type ModelsScreenProps = {
   engines: DesktopEngineRecord[];
@@ -14,9 +18,18 @@ type ModelsScreenProps = {
   shellState: DesktopShellState;
   onSelectModel(modelId: string): void;
   onPickImportFile(): Promise<string | null>;
+  onPickEngineBinaryFile(): Promise<string | null>;
   onRegisterModel(
     payload: DesktopLocalModelImportRequest,
   ): Promise<DesktopLocalModelImportResponse>;
+  onInstallEngineBinary(
+    payload: DesktopEngineInstallRequest,
+  ): Promise<DesktopEngineInstallResponse>;
+  onActivateEngineVersion(versionTag: string): Promise<DesktopEngineInstallResponse>;
+  onUpdateModelConfig(
+    modelId: string,
+    payload: DesktopModelConfigUpdateRequest,
+  ): Promise<DesktopModelConfigUpdateResponse>;
   onPreloadModel(modelId: string): Promise<void>;
   onEvictModel(modelId: string): Promise<void>;
 };
@@ -24,6 +37,14 @@ type ModelsScreenProps = {
 type FeedbackState =
   | {
       tone: "success" | "error";
+      text: string;
+    }
+  | null;
+
+type EngineFeedbackState =
+  | {
+      tone: "success" | "error";
+      title: string;
       text: string;
     }
   | null;
@@ -108,20 +129,41 @@ export function ModelsScreen({
   shellState,
   onSelectModel,
   onPickImportFile,
+  onPickEngineBinaryFile,
   onRegisterModel,
+  onInstallEngineBinary,
+  onActivateEngineVersion,
+  onUpdateModelConfig,
   onPreloadModel,
   onEvictModel,
 }: ModelsScreenProps) {
   const [feedback, setFeedback] = useState<FeedbackState>(null);
   const [importFilePath, setImportFilePath] = useState<string | null>(null);
-  const [importDisplayName, setImportDisplayName] = useState("");
+  const [importAliasName, setImportAliasName] = useState("");
+  const [aliasDraft, setAliasDraft] = useState("");
   const [pendingImport, setPendingImport] = useState(false);
   const [pendingActionModelId, setPendingActionModelId] = useState<string | null>(null);
+  const [pendingEngineAction, setPendingEngineAction] = useState<
+    "download" | "import" | "activate" | null
+  >(null);
+  const [engineFeedback, setEngineFeedback] = useState<EngineFeedbackState>(null);
+  const [selectedEngineVersionTag, setSelectedEngineVersionTag] = useState<string | null>(null);
+  const [configDraft, setConfigDraft] = useState({
+    pinned: false,
+    defaultTtlMinutes: "15",
+    contextLength: "",
+    gpuLayers: "",
+  });
 
   const selectedModel =
     (selectedModelId ? models.find((model) => model.id === selectedModelId) : undefined) ??
     models[0];
   const connected = shellState.phase === "connected";
+  const activeEngineVersionTag = engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
+  const selectedEngineVersion =
+    selectedEngineVersionTag && engines.some((engine) => engine.version === selectedEngineVersionTag)
+      ? selectedEngineVersionTag
+      : activeEngineVersionTag;
   const canRegister = connected && Boolean(importFilePath) && !pendingImport;
   const canPreload =
     connected &&
@@ -137,6 +179,40 @@ export function ModelsScreen({
     selectedModel.loaded &&
     selectedModel.state !== "evicting" &&
     pendingActionModelId !== selectedModel.id;
+  const canSaveConfig =
+    connected &&
+    !!selectedModel &&
+    !selectedModel.loaded &&
+    pendingActionModelId !== selectedModel.id;
+
+  useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
+
+    setAliasDraft(selectedModel.displayName);
+    setConfigDraft({
+      pinned: selectedModel.pinned,
+      defaultTtlMinutes: String(Math.max(1, Math.round(selectedModel.defaultTtlMs / 60_000))),
+      contextLength: selectedModel.contextLength ? String(selectedModel.contextLength) : "",
+      gpuLayers: selectedModel.gpuLayers ? String(selectedModel.gpuLayers) : "",
+    });
+  }, [selectedModel?.id]);
+
+  useEffect(() => {
+    if (engines.length === 0) {
+      setSelectedEngineVersionTag(null);
+      return;
+    }
+
+    setSelectedEngineVersionTag((current) => {
+      if (current && engines.some((engine) => engine.version === current)) {
+        return current;
+      }
+
+      return engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
+    });
+  }, [engines]);
 
   const handlePickImport = async () => {
     setFeedback(null);
@@ -164,11 +240,11 @@ export function ModelsScreen({
     try {
       const result = await onRegisterModel({
         filePath: importFilePath,
-        ...(importDisplayName.trim() ? { displayName: importDisplayName.trim() } : {}),
+        ...(importAliasName.trim() ? { displayName: importAliasName.trim() } : {}),
       });
 
       setImportFilePath(null);
-      setImportDisplayName("");
+      setImportAliasName("");
       onSelectModel(result.model.id);
       setFeedback({
         tone: "success",
@@ -183,6 +259,92 @@ export function ModelsScreen({
       });
     } finally {
       setPendingImport(false);
+    }
+  };
+
+  const handleDownloadMetalBinary = async () => {
+    setEngineFeedback(null);
+    setPendingEngineAction("download");
+
+    try {
+      const result = await onInstallEngineBinary({
+        action: "download-latest-metal",
+      });
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: "Install complete",
+        text: `Installed ${result.engine.version} into ${result.engine.binaryPath}.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Install blocked",
+        text: error instanceof Error ? error.message : "Unable to download the Metal binary.",
+      });
+    } finally {
+      setPendingEngineAction(null);
+    }
+  };
+
+  const handleImportLocalBinary = async () => {
+    setEngineFeedback(null);
+
+    const filePath = await onPickEngineBinaryFile();
+    if (!filePath) {
+      return;
+    }
+
+    setPendingEngineAction("import");
+    try {
+      const result = await onInstallEngineBinary({
+        action: "import-local-binary",
+        filePath,
+      });
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: "Install complete",
+        text: `Packaged ${result.engine.version} into ${result.engine.binaryPath}.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Install blocked",
+        text: error instanceof Error ? error.message : "Unable to package the selected binary.",
+      });
+    } finally {
+      setPendingEngineAction(null);
+    }
+  };
+
+  const handleActivateEngineVersion = async () => {
+    if (!selectedEngineVersion) {
+      return;
+    }
+
+    setEngineFeedback(null);
+    setPendingEngineAction("activate");
+
+    try {
+      const result = await onActivateEngineVersion(selectedEngineVersion);
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: "Version activated",
+        text: `Activated ${result.engine.version}. Future launches will use that llama.cpp binary.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Action blocked",
+        text: error instanceof Error ? error.message : "Unable to activate the selected version.",
+      });
+    } finally {
+      setPendingEngineAction(null);
     }
   };
 
@@ -215,6 +377,82 @@ export function ModelsScreen({
           error instanceof Error
             ? error.message
             : `Unable to ${action} ${selectedModel.displayName}.`,
+      });
+    } finally {
+      setPendingActionModelId(null);
+    }
+  };
+
+  const saveAlias = async () => {
+    if (!selectedModel) {
+      return;
+    }
+
+    const displayName = aliasDraft.trim();
+    if (!displayName) {
+      setFeedback({
+        tone: "error",
+        text: "Alias names cannot be empty.",
+      });
+      return;
+    }
+
+    setPendingActionModelId(selectedModel.id);
+    setFeedback(null);
+
+    try {
+      const result = await onUpdateModelConfig(selectedModel.id, {
+        displayName,
+      });
+      setAliasDraft(result.model.displayName);
+      setFeedback({
+        tone: "success",
+        text: `Saved alias for ${result.model.displayName}.`,
+      });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : `Unable to update the alias for ${selectedModel.displayName}.`,
+      });
+    } finally {
+      setPendingActionModelId(null);
+    }
+  };
+
+  const saveAdvancedConfig = async () => {
+    if (!selectedModel) {
+      return;
+    }
+
+    setPendingActionModelId(selectedModel.id);
+    setFeedback(null);
+
+    try {
+      const defaultTtlMinutes = Math.max(1, Number.parseInt(configDraft.defaultTtlMinutes, 10) || 15);
+      await onUpdateModelConfig(selectedModel.id, {
+        pinned: configDraft.pinned,
+        defaultTtlMs: defaultTtlMinutes * 60_000,
+        ...(configDraft.contextLength.trim()
+          ? { contextLength: Number.parseInt(configDraft.contextLength, 10) }
+          : {}),
+        ...(configDraft.gpuLayers.trim()
+          ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
+          : {}),
+      });
+      setFeedback({
+        tone: "success",
+        text: `Saved cold-start settings for ${selectedModel.displayName}. Changes apply on the next preload.`,
+      });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : `Unable to update advanced settings for ${selectedModel.displayName}.`,
       });
     } finally {
       setPendingActionModelId(null);
@@ -370,6 +608,47 @@ export function ModelsScreen({
                 </div>
               ) : null}
 
+              <div className="advanced-config-card">
+                <div className="panel-header">
+                  <div>
+                    <span className="section-label">Alias name</span>
+                    <h3>Rename this model</h3>
+                  </div>
+                  <span className="status-pill status-pill-positive">No eviction needed</span>
+                </div>
+                <p>
+                  Give the model a friendly alias without touching the artifact name or restarting
+                  the worker.
+                </p>
+
+                <label className="field-stack">
+                  <span className="section-label">Alias name</span>
+                  <input
+                    className="text-input"
+                    disabled={!connected || pendingActionModelId !== null}
+                    onChange={(event) => setAliasDraft(event.target.value)}
+                    type="text"
+                    value={aliasDraft}
+                  />
+                </label>
+
+                <div className="button-row">
+                  <button
+                    className="secondary-button"
+                    disabled={
+                      !connected ||
+                      pendingActionModelId !== null ||
+                      aliasDraft.trim().length === 0 ||
+                      aliasDraft.trim() === selectedModel.displayName.trim()
+                    }
+                    onClick={() => void saveAlias()}
+                    type="button"
+                  >
+                    {pendingActionModelId === selectedModel.id ? "Saving..." : "Save alias"}
+                  </button>
+                </div>
+              </div>
+
               <dl className="meta-grid">
                 <div>
                   <dt>Artifact path</dt>
@@ -412,6 +691,10 @@ export function ModelsScreen({
                   <dd>{formatTtl(selectedModel.defaultTtlMs)}</dd>
                 </div>
                 <div>
+                  <dt>GPU layers</dt>
+                  <dd>{selectedModel.gpuLayers ?? "Auto"}</dd>
+                </div>
+                <div>
                   <dt>Engine version</dt>
                   <dd>{selectedModel.engineVersion ?? "Materializes on first preload"}</dd>
                 </div>
@@ -432,6 +715,88 @@ export function ModelsScreen({
                     {humanize(capability)}
                   </span>
                 ))}
+              </div>
+
+              <div className="advanced-config-card">
+                <div className="panel-header">
+                  <div>
+                    <span className="section-label">Advanced configuration</span>
+                    <h3>Safe cold-start overrides</h3>
+                  </div>
+                  <span className={selectedModel.loaded ? "status-pill status-pill-caution" : "status-pill status-pill-neutral"}>
+                    {selectedModel.loaded ? "Evict before editing" : "Editable"}
+                  </span>
+                </div>
+                <p>
+                  These settings persist to the model profile and apply on the next preload. Loaded
+                  workers must be evicted first so the runtime key stays consistent. Use the alias
+                  section above if you only want to rename the model.
+                </p>
+
+                <div className="settings-grid">
+                  <label className="field-stack">
+                    <span className="section-label">Warm TTL (minutes)</span>
+                    <input
+                      className="text-input"
+                      disabled={!canSaveConfig}
+                      min="1"
+                      onChange={(event) =>
+                        setConfigDraft((current) => ({ ...current, defaultTtlMinutes: event.target.value }))
+                      }
+                      type="number"
+                      value={configDraft.defaultTtlMinutes}
+                    />
+                  </label>
+                  <label className="field-stack">
+                    <span className="section-label">Context length</span>
+                    <input
+                      className="text-input"
+                      disabled={!canSaveConfig}
+                      min="1"
+                      onChange={(event) =>
+                        setConfigDraft((current) => ({ ...current, contextLength: event.target.value }))
+                      }
+                      type="number"
+                      value={configDraft.contextLength}
+                    />
+                  </label>
+                  <label className="field-stack">
+                    <span className="section-label">GPU layers</span>
+                    <input
+                      className="text-input"
+                      disabled={!canSaveConfig}
+                      min="1"
+                      onChange={(event) =>
+                        setConfigDraft((current) => ({ ...current, gpuLayers: event.target.value }))
+                      }
+                      type="number"
+                      value={configDraft.gpuLayers}
+                    />
+                  </label>
+                </div>
+
+                <label className="checkbox-row">
+                  <input
+                    checked={configDraft.pinned}
+                    disabled={!canSaveConfig}
+                    onChange={(event) =>
+                      setConfigDraft((current) => ({ ...current, pinned: event.target.checked }))
+                    }
+                    type="checkbox"
+                  />
+                  <span>Pin this model in memory after the next successful preload.</span>
+                </label>
+
+                <div className="button-row">
+                  <button
+                    className="secondary-button"
+                    disabled={!canSaveConfig}
+                    onClick={() => void saveAdvancedConfig()}
+                    type="button"
+                  >
+                    {pendingActionModelId === selectedModel.id ? "Saving..." : "Save advanced settings"}
+                  </button>
+                </div>
               </div>
             </>
           ) : (
@@ -458,13 +823,13 @@ export function ModelsScreen({
           </div>
 
           <label className="field-stack">
-            <span className="section-label">Display name override</span>
+            <span className="section-label">Alias name</span>
             <input
               className="text-input"
-              onChange={(event) => setImportDisplayName(event.target.value)}
-              placeholder="Optional friendly name"
+              onChange={(event) => setImportAliasName(event.target.value)}
+              placeholder="Optional alias name"
               type="text"
-              value={importDisplayName}
+              value={importAliasName}
             />
           </label>
 
@@ -490,6 +855,81 @@ export function ModelsScreen({
             The gateway records the engine version that actually served the worker so the desktop
             detail view can show what is running.
           </p>
+
+          <div className="button-row">
+            <button
+              className="primary-button"
+              disabled={!connected || pendingEngineAction !== null}
+              onClick={() => void handleDownloadMetalBinary()}
+              type="button"
+            >
+              {pendingEngineAction === "download" ? "Downloading..." : "Download Metal build"}
+            </button>
+            <button
+              className="secondary-button"
+              disabled={!connected || pendingEngineAction !== null}
+              onClick={() => void handleImportLocalBinary()}
+              type="button"
+            >
+              {pendingEngineAction === "import" ? "Packaging..." : "Import local binary"}
+            </button>
+          </div>
+
+          <p className="search-detail-note">
+            Downloaded Metal builds are copied into the app support engines directory. Local binary
+            imports are packaged the same way so the app owns the installed executable. Use the
+            picker below to switch the active version for future launches.
+          </p>
+
+          {engines.length > 0 ? (
+            <>
+              <label className="field-stack">
+                <span className="section-label">Active llama.cpp version</span>
+                <select
+                  className="text-input"
+                  disabled={!connected || pendingEngineAction !== null}
+                  onChange={(event) => setSelectedEngineVersionTag(event.target.value)}
+                  value={selectedEngineVersion ?? ""}
+                >
+                  {engines.map((engine) => (
+                    <option key={engine.id} value={engine.version}>
+                      {engine.version}
+                      {engine.active ? " (active)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="button-row">
+                <button
+                  className="primary-button"
+                  disabled={!connected || !selectedEngineVersion || pendingEngineAction !== null}
+                  onClick={() => void handleActivateEngineVersion()}
+                  type="button"
+                >
+                  {pendingEngineAction === "activate" ? "Activating..." : "Activate selected version"}
+                </button>
+              </div>
+
+              <p className="search-detail-note">
+                Switching versions updates the registry used for future worker launches. Existing
+                workers keep running until they are evicted or restarted.
+              </p>
+            </>
+          ) : null}
+
+          {engineFeedback ? (
+            <div
+              className={
+                engineFeedback.tone === "error"
+                  ? "detail-alert feedback-card-error"
+                  : "detail-alert"
+              }
+            >
+              <strong>{engineFeedback.title}</strong>
+              <p>{engineFeedback.text}</p>
+            </div>
+          ) : null}
 
           {engines.length === 0 ? (
             <div className="empty-panel compact-empty">

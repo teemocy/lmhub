@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   type ApiLogRecord,
+  type ChatCompletionsChunk,
   type ChatCompletionsRequest,
   type ChatCompletionsResponse,
   type ChatMessage,
@@ -28,12 +29,21 @@ import {
   type EmbeddingsRequest,
   type EmbeddingsResponse,
   type GatewayEvent,
+  type OpenAiToolCall,
+  chatCompletionsChunkSchema,
   gatewayEventSchema,
 } from "@localhub/shared-contracts";
+import {
+  chatContentHasImages,
+  countChatContentTokens,
+  createChatSessionTitle,
+  formatChatContentSummary,
+} from "./chat-content.js";
 
 import {
   type ChatCompletionsStreamResult,
   type ControlHealthSnapshot,
+  type DesktopChatRunStreamResult,
   type EngineRecord,
   type EvictModelResult,
   type GatewayExecutionContext,
@@ -66,6 +76,17 @@ const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH = "stage1-mock";
 const MOCK_RESIDENT_MEMORY_BYTES = 2_147_483_648;
 const MOCK_GPU_MEMORY_BYTES = 1_073_741_824;
+
+interface StreamedAssistantAccumulator {
+  responseId?: string;
+  created?: number;
+  model?: string;
+  content: string;
+  reasoning: string;
+  finishReason: string | null;
+  toolCalls: OpenAiToolCall[];
+  completionTokens?: number;
+}
 
 function toDesktopModelState(state: WorkerState): DesktopModelRuntimeState {
   switch (state) {
@@ -100,14 +121,131 @@ function createTraceId(traceId?: string): string {
   return traceId?.trim() || randomUUID();
 }
 
-function countTokens(value: string): number {
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
+function hasRuntimeAffectingModelConfigChanges(
+  input: DesktopModelConfigUpdateRequest,
+): boolean {
+  return (
+    input.defaultTtlMs !== undefined ||
+    input.contextLength !== undefined ||
+    input.gpuLayers !== undefined
+  );
 }
 
-function createSessionTitle(message: string): string {
-  const trimmed = message.replace(/\s+/g, " ").trim();
-  return trimmed.length <= 56 ? trimmed : `${trimmed.slice(0, 53).trimEnd()}...`;
+function normalizeAssistantContent(content: unknown): ChatMessage["content"] {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (content === null || content === undefined) {
+    return null;
+  }
+
+  if (Array.isArray(content)) {
+    return content as ChatMessage["content"];
+  }
+
+  return JSON.stringify(content);
+}
+
+function getReasoningContent(
+  message:
+    | {
+        reasoning_content?: string | null | undefined;
+      }
+    | undefined,
+): string | undefined {
+  if (typeof message?.reasoning_content !== "string") {
+    return undefined;
+  }
+
+  return message.reasoning_content.length > 0 ? message.reasoning_content : undefined;
+}
+
+function buildAssistantMetadata(options: {
+  reasoningContent?: string | undefined;
+  finishReason?: string | null | undefined;
+}): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+
+  if (options.reasoningContent && options.reasoningContent.length > 0) {
+    metadata.reasoningContent = options.reasoningContent;
+  }
+
+  if (options.finishReason) {
+    metadata.finishReason = options.finishReason;
+  }
+
+  return metadata;
+}
+
+function createStreamedAssistantAccumulator(): StreamedAssistantAccumulator {
+  return {
+    content: "",
+    reasoning: "",
+    finishReason: null,
+    toolCalls: [],
+  };
+}
+
+function applyChunkToAccumulator(
+  accumulator: StreamedAssistantAccumulator,
+  chunk: ChatCompletionsChunk,
+): void {
+  accumulator.responseId ??= chunk.id;
+  accumulator.created ??= chunk.created;
+  accumulator.model ??= chunk.model;
+
+  const choice = chunk.choices[0];
+  if (!choice) {
+    return;
+  }
+
+  if (typeof choice.delta.content === "string" && choice.delta.content.length > 0) {
+    accumulator.content += choice.delta.content;
+  }
+
+  if (
+    typeof choice.delta.reasoning_content === "string" &&
+    choice.delta.reasoning_content.length > 0
+  ) {
+    accumulator.reasoning += choice.delta.reasoning_content;
+  }
+
+  if (choice.delta.tool_calls?.length) {
+    accumulator.toolCalls = choice.delta.tool_calls;
+  }
+
+  if (choice.finish_reason !== undefined) {
+    accumulator.finishReason = choice.finish_reason ?? accumulator.finishReason;
+  }
+
+  if (chunk.usage?.completion_tokens !== undefined) {
+    accumulator.completionTokens = chunk.usage.completion_tokens;
+  }
+}
+
+function drainSseBuffer(buffer: string, onData: (data: string) => void): string {
+  let normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  while (true) {
+    const boundaryIndex = normalized.indexOf("\n\n");
+    if (boundaryIndex < 0) {
+      return normalized;
+    }
+
+    const rawEvent = normalized.slice(0, boundaryIndex);
+    normalized = normalized.slice(boundaryIndex + 2);
+
+    const data = rawEvent
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+
+    if (data.length > 0) {
+      onData(data);
+    }
+  }
 }
 
 function prettifyModelName(modelId: string): string {
@@ -206,6 +344,7 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     case "POST /control/chat/sessions":
     case "DELETE /control/chat/sessions/:id":
     case "POST /control/chat/run":
+    case "POST /control/chat/run/stream":
     case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
     case "GET /control/downloads":
@@ -230,6 +369,11 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
 const DEFAULT_MODELS: RuntimeModelRecord[] = [
   createModel("localhub/tinyllama-1.1b-chat-q4", 1_717_286_400, ["chat"]),
   createModel("localhub/qwen2.5-7b-instruct-q4", 1_717_372_800, ["chat", "tools"]),
+  createModel("localhub/qwen2.5-vl-7b-instruct-q4", 1_717_414_400, [
+    "chat",
+    "tools",
+    "vision",
+  ]),
   createModel("localhub/bge-small-en-v1.5", 1_717_459_200, ["embeddings"]),
 ];
 
@@ -405,10 +549,12 @@ export class MockGatewayRuntime {
       ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
     });
     const now = new Date().toISOString();
+    const promptTokens = countChatContentTokens(input.message);
     const response = this.createChatCompletion(
       {
         model: input.model,
         stream: false,
+        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
         messages: [{ role: "user", content: input.message }],
       },
       { traceId: createTraceId(traceId) },
@@ -419,6 +565,7 @@ export class MockGatewayRuntime {
       role: "user",
       content: input.message,
       toolCalls: [],
+      tokensCount: promptTokens,
       metadata: {},
       createdAt: now,
     };
@@ -426,9 +573,12 @@ export class MockGatewayRuntime {
       id: `message_${Date.now() + 1}`,
       sessionId: session.id,
       role: "assistant",
-      content: response.choices[0]?.message.content as string | null,
+      content: normalizeAssistantContent(response.choices[0]?.message.content),
       toolCalls: response.choices[0]?.message.tool_calls ?? [],
-      metadata: {},
+      metadata: buildAssistantMetadata({
+        reasoningContent: getReasoningContent(response.choices[0]?.message),
+        finishReason: response.choices[0]?.finish_reason,
+      }),
       createdAt: now,
     };
 
@@ -442,7 +592,7 @@ export class MockGatewayRuntime {
       id: session.id,
       modelId: input.model,
       ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
-      ...(session.title ? { title: session.title } : { title: createSessionTitle(input.message) }),
+      ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
     });
 
     return {
@@ -450,6 +600,137 @@ export class MockGatewayRuntime {
       userMessage,
       assistantMessage,
       response,
+    };
+  }
+
+  runChatStream(input: DesktopChatRunRequest, traceId?: string): DesktopChatRunStreamResult {
+    const session = this.upsertChatSession({
+      ...(input.sessionId ? { id: input.sessionId } : {}),
+      modelId: input.model,
+      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+    });
+    const now = new Date().toISOString();
+    const promptTokens = countChatContentTokens(input.message);
+    const userMessage: ChatMessage = {
+      id: `message_${Date.now()}`,
+      sessionId: session.id,
+      role: "user",
+      content: input.message,
+      toolCalls: [],
+      tokensCount: promptTokens,
+      metadata: {},
+      createdAt: now,
+    };
+
+    this.#chatMessages.set(session.id, [...(this.#chatMessages.get(session.id) ?? []), userMessage]);
+
+    const assistantMessageId = `message_${Date.now() + 1}`;
+    const streamResult = this.createChatCompletionStream(
+      {
+        model: input.model,
+        stream: true,
+        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
+        messages: [{ role: "user", content: input.message }],
+      },
+      { traceId: createTraceId(traceId) },
+    );
+    const accumulator = createStreamedAssistantAccumulator();
+    const reader = streamResult.stream.getReader();
+    const decoder = new TextDecoder();
+    let finalized = false;
+
+    const persistAssistantMessage = () => {
+      if (finalized) {
+        return;
+      }
+
+      finalized = true;
+      const assistantMessage: ChatMessage = {
+        id: assistantMessageId,
+        sessionId: session.id,
+        role: "assistant",
+        content: accumulator.content.length > 0 ? accumulator.content : null,
+        toolCalls: accumulator.toolCalls,
+        tokensCount: accumulator.completionTokens,
+        metadata: buildAssistantMetadata({
+          reasoningContent: accumulator.reasoning,
+          finishReason: accumulator.finishReason,
+        }),
+        createdAt: new Date().toISOString(),
+      };
+
+      this.#chatMessages.set(session.id, [
+        ...(this.#chatMessages.get(session.id) ?? []),
+        assistantMessage,
+      ]);
+      this.upsertChatSession({
+        id: session.id,
+        modelId: input.model,
+        ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+        ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
+      });
+    };
+
+    return {
+      contentType: streamResult.contentType,
+      session,
+      userMessageId: userMessage.id,
+      assistantMessageId,
+      stream: new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          let sseBuffer = "";
+
+          void (async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  break;
+                }
+
+                sseBuffer += decoder.decode(value, { stream: true });
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(JSON.parse(data));
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+
+                controller.enqueue(value);
+              }
+
+              const remaining = decoder.decode();
+              if (remaining.length > 0) {
+                sseBuffer += remaining;
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(JSON.parse(data));
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+              }
+
+              persistAssistantMessage();
+              controller.close();
+            } catch (error) {
+              controller.error(error);
+            } finally {
+              reader.releaseLock();
+            }
+          })();
+        },
+        cancel: async (reason) => {
+          await reader.cancel(reason).catch(() => undefined);
+        },
+      }),
     };
   }
 
@@ -721,7 +1002,7 @@ export class MockGatewayRuntime {
     if (!existing) {
       throw new Error(`Unknown model: ${modelId}`);
     }
-    if (existing.loaded) {
+    if (existing.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
       throw new GatewayRequestError(
         "model_config_requires_cold_state",
         "Evict the model from memory before changing advanced runtime settings.",
@@ -729,8 +1010,9 @@ export class MockGatewayRuntime {
       );
     }
 
+    const current = this.getDesktopModelRecord(modelId);
     const updated: DesktopModelRecord = {
-      ...existing,
+      ...current,
       ...(input.displayName ? { displayName: input.displayName } : {}),
       ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
       ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
@@ -810,13 +1092,20 @@ export class MockGatewayRuntime {
         409,
       );
     }
+    if (input.messages.some((message) => chatContentHasImages(message.content))) {
+      if (!model.capabilities.includes("vision")) {
+        throw new GatewayRequestError(
+          "unsupported_model_capability",
+          `Model ${input.model} does not support image inputs.`,
+          409,
+        );
+      }
+    }
 
     const created = Math.floor(Date.now() / 1000);
-    const userText =
-      [...input.messages].reverse().find((message) => message.role === "user")?.content ??
-      "Hello from the mock gateway";
-    const normalizedUserText =
-      typeof userText === "string" ? userText : JSON.stringify(userText ?? "");
+    const lastUserMessage = [...input.messages].reverse().find((message) => message.role === "user");
+    const normalizedUserText = formatChatContentSummary(lastUserMessage?.content ?? "");
+    const promptTokens = countChatContentTokens(lastUserMessage?.content ?? "");
 
     this.transitionModel(model, "Busy", true, context.traceId, "Model is serving a request.");
 
@@ -848,14 +1137,15 @@ export class MockGatewayRuntime {
             },
           ],
           usage: {
-            prompt_tokens: countTokens(normalizedUserText),
+            prompt_tokens: promptTokens,
             completion_tokens: 1,
-            total_tokens: countTokens(normalizedUserText) + 1,
+            total_tokens: promptTokens + 1,
           },
         };
       }
 
       const answer = `Mock response from ${input.model}: ${normalizedUserText}`;
+      const completionTokens = countChatContentTokens(answer);
 
       return {
         id: `chatcmpl-${createTraceId(context.traceId)}`,
@@ -873,9 +1163,9 @@ export class MockGatewayRuntime {
           },
         ],
         usage: {
-          prompt_tokens: countTokens(normalizedUserText),
-          completion_tokens: countTokens(answer),
-          total_tokens: countTokens(normalizedUserText) + countTokens(answer),
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_tokens: promptTokens + completionTokens,
         },
       };
     } finally {

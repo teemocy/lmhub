@@ -163,6 +163,59 @@ describe("gateway skeleton", () => {
     });
   });
 
+  it("lets a loaded model keep a custom alias without eviction", async () => {
+    const gateway = await createTestGateway();
+
+    const preloadResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/models/preload",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        modelId: "localhub/tinyllama-1.1b-chat-q4",
+      },
+    });
+
+    expect(preloadResponse.statusCode).toBe(202);
+
+    const renameResponse = await gateway.controlApp.inject({
+      method: "PUT",
+      url: "/config/models/localhub/tinyllama-1.1b-chat-q4",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        displayName: "Tiny Llama Alias",
+      },
+    });
+
+    expect(renameResponse.statusCode).toBe(200);
+    expect(renameResponse.json()).toMatchObject({
+      model: expect.objectContaining({
+        displayName: "Tiny Llama Alias",
+        loaded: true,
+        state: "ready",
+      }),
+    });
+
+    const blockedResponse = await gateway.controlApp.inject({
+      method: "PUT",
+      url: "/config/models/localhub/tinyllama-1.1b-chat-q4",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        contextLength: 4096,
+      },
+    });
+
+    expect(blockedResponse.statusCode).toBe(409);
+    expect(blockedResponse.json()).toMatchObject({
+      error: "model_config_requires_cold_state",
+    });
+  });
+
   it("streams telemetry over the control websocket", async () => {
     const gateway = await createTestGateway();
     const ws = await gateway.controlApp.injectWS("/control/events", {

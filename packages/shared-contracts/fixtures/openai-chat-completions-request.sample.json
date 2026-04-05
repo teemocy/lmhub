@@ -12,7 +12,6 @@
   ],
   "stream": true,
   "temperature": 0.2,
-  "max_tokens": 256,
   "tools": [
     {
       "type": "function",

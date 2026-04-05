@@ -4,9 +4,11 @@ import path from "node:path";
 
 import {
   ChatRepository,
+  EngineVersionsRepository,
   ModelsRepository,
   fixtureModelArtifact,
   fixtureModelProfile,
+  fixtureEngineVersion,
   openDatabase,
 } from "@localhub/db";
 import { readEngineVersionRegistry, resolveEngineSupportPaths } from "@localhub/engine-core";
@@ -573,6 +575,26 @@ describe("gateway stage 2 runtime", () => {
       ]),
     });
 
+    const renameResponse = await gateway.controlApp.inject({
+      method: "PUT",
+      url: `/config/models/${fixtureModelArtifact.id}`,
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        displayName: "Gateway Tiny Chat Alias",
+      },
+    });
+
+    expect(renameResponse.statusCode).toBe(200);
+    expect(renameResponse.json()).toMatchObject({
+      model: expect.objectContaining({
+        id: fixtureModelArtifact.id,
+        displayName: "Gateway Tiny Chat Alias",
+        loaded: true,
+      }),
+    });
+
     const evictResponse = await gateway.controlApp.inject({
       method: "POST",
       url: "/control/models/evict",
@@ -863,6 +885,62 @@ describe("gateway stage 2 runtime", () => {
         }),
       ]),
     );
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("reuses an existing engine row when chat resolves the same binary path", async () => {
+    const fixture = await createStage2Fixture();
+    const seeded = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const engines = new EngineVersionsRepository(seeded.database);
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_legacy_fake_worker",
+      versionTag: "legacy-fake-worker",
+      binaryPath: process.execPath,
+      isActive: false,
+      installedAt: "2026-03-30T12:00:00.000Z",
+    });
+    seeded.database.close();
+
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "Explain the gateway stage." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const reopened = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const storedEngines = new EngineVersionsRepository(reopened.database).list();
+    reopened.database.close();
+
+    expect(storedEngines).toEqual([
+      expect.objectContaining({
+        binaryPath: process.execPath,
+        versionTag: "stage1-fixture",
+        isActive: true,
+      }),
+    ]);
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });

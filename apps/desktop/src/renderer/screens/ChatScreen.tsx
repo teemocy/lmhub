@@ -3,30 +3,188 @@ import type {
   ChatSession,
   DesktopShellState,
   ModelSummary,
+  OpenAiMessageContentPart,
 } from "@localhub/shared-contracts";
-import { startTransition, useEffect, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  type ReactNode,
+  startTransition,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type ChatScreenProps = {
   shellState: DesktopShellState;
   models: ModelSummary[];
 };
 
+type AttachmentPreview = {
+  id: string;
+  name: string;
+  mimeType: string;
+  src: string;
+};
+
 const createTempMessage = (
   sessionId: string,
   role: ChatMessage["role"],
-  content: string,
+  content: ChatMessage["content"],
+  metadata: ChatMessage["metadata"] = {},
 ): ChatMessage => ({
   id: `temp-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   sessionId,
   role,
   content,
   toolCalls: [],
-  metadata: {},
+  metadata,
   createdAt: new Date().toISOString(),
 });
 
 const sortByUpdatedDesc = (sessions: ChatSession[]): ChatSession[] =>
   [...sessions].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+
+const createClientRequestId = (): string =>
+  window.crypto?.randomUUID?.() ?? `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const parseMaxTokensDraft = (value: string): number | undefined => {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error("Max tokens must be a positive integer.");
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error("Max tokens must be a positive integer.");
+  }
+
+  return parsed;
+};
+
+const getClientRequestId = (message: ChatMessage): string | undefined =>
+  typeof message.metadata.clientRequestId === "string"
+    ? message.metadata.clientRequestId
+    : undefined;
+
+const getReasoningContent = (message: ChatMessage): string =>
+  typeof message.metadata.reasoningContent === "string" ? message.metadata.reasoningContent : "";
+
+const isTextPart = (
+  part: OpenAiMessageContentPart,
+): part is Extract<OpenAiMessageContentPart, { type: "text" }> => part.type === "text";
+
+const isImagePart = (
+  part: OpenAiMessageContentPart,
+): part is Extract<OpenAiMessageContentPart, { type: "image_url" }> => part.type === "image_url";
+
+const formatModelLabel = (model: ModelSummary): string =>
+  model.capabilities.includes("vision") ? `${model.name} · Vision` : model.name;
+
+const buildMessageContent = (
+  draft: string,
+  attachments: AttachmentPreview[],
+): string | OpenAiMessageContentPart[] => {
+  const normalizedDraft = draft.trim();
+  if (attachments.length === 0) {
+    return normalizedDraft;
+  }
+
+  const parts: OpenAiMessageContentPart[] = [];
+  if (normalizedDraft.length > 0) {
+    parts.push({
+      type: "text",
+      text: normalizedDraft,
+    });
+  }
+
+  parts.push(
+    ...attachments.map((attachment) => ({
+      type: "image_url" as const,
+      image_url: {
+        url: attachment.src,
+      },
+    })),
+  );
+
+  return parts;
+};
+
+const createImagePreview = async (file: File): Promise<AttachmentPreview> => {
+  const src = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error(`Unable to read ${file.name}.`));
+    };
+    reader.onerror = () => {
+      reject(new Error(`Unable to read ${file.name}.`));
+    };
+    reader.readAsDataURL(file);
+  });
+
+  return {
+    id:
+      window.crypto?.randomUUID?.() ??
+      `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: file.name,
+    mimeType: file.type || "image/*",
+    src,
+  };
+};
+
+const renderChatContent = (content: ChatMessage["content"]): ReactNode => {
+  if (typeof content === "string") {
+    const trimmed = content.trim();
+    return trimmed.length > 0 ? <p className="chat-message-text">{content}</p> : null;
+  }
+
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const parts = content.filter(
+    (part): part is OpenAiMessageContentPart => isTextPart(part) || isImagePart(part),
+  );
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="chat-message-content">
+      {parts.map((part) => {
+        if (isTextPart(part)) {
+          return (
+            <p className="chat-message-text" key={`text-${part.text}`}>
+              {part.text}
+            </p>
+          );
+        }
+
+        const imageKey = part.image_url.detail
+          ? `image-${part.image_url.url}-${part.image_url.detail}`
+          : `image-${part.image_url.url}`;
+
+        return (
+          <figure className="chat-message-image" key={imageKey}>
+            <img alt="Attachment" loading="lazy" src={part.image_url.url} />
+            {part.image_url.detail ? (
+              <figcaption>Detail: {part.image_url.detail}</figcaption>
+            ) : null}
+          </figure>
+        );
+      })}
+    </div>
+  );
+};
 
 export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -36,9 +194,12 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [draft, setDraft] = useState("");
+  const [maxTokensDraft, setMaxTokensDraft] = useState("");
+  const [attachments, setAttachments] = useState<AttachmentPreview[]>([]);
   const [busy, setBusy] = useState(false);
   const [sessionActionBusy, setSessionActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [sessions, activeSessionId],
@@ -47,6 +208,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     () => models.find((model) => model.id === selectedModelId) ?? null,
     [models, selectedModelId],
   );
+  const supportsVision = selectedModel?.capabilities.includes("vision") ?? false;
   const activeSessionTitle = activeSession?.title ?? "Untitled chat";
   const activeSessionUpdatedAt = activeSession
     ? new Date(activeSession.updatedAt).toLocaleString()
@@ -59,7 +221,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       return;
     }
 
-    setSelectedModelId((current) => (current ? current : models[0]!.id));
+    setSelectedModelId((current) =>
+      current && models.some((model) => model.id === current) ? current : (models[0]?.id ?? ""),
+    );
   }, [models]);
 
   useEffect(() => {
@@ -132,12 +296,77 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       return;
     }
 
-    if (activeSession.modelId) {
+    if (activeSession.modelId && models.some((model) => model.id === activeSession.modelId)) {
       setSelectedModelId(activeSession.modelId);
     }
     setSystemPrompt(activeSession.systemPrompt ?? "");
     setSessionTitleDraft(activeSession.title ?? "");
-  }, [activeSession]);
+  }, [activeSession, models]);
+
+  useEffect(
+    () =>
+      window.desktopApi.gateway.subscribeChatStream((event) => {
+        if (event.type === "error") {
+          setError(event.errorMessage);
+          return;
+        }
+
+        if (event.type !== "delta") {
+          return;
+        }
+
+        setMessages((current) =>
+          current.map((message) => {
+            if (getClientRequestId(message) !== event.clientRequestId) {
+              return message;
+            }
+
+            const nextReasoning = `${getReasoningContent(message)}${event.reasoningDelta ?? ""}`;
+            const nextContent =
+              typeof message.content === "string"
+                ? `${message.content}${event.contentDelta ?? ""}`
+                : (message.content ?? event.contentDelta ?? "");
+
+            return {
+              ...message,
+              content: nextContent,
+              toolCalls: event.toolCalls ?? message.toolCalls,
+              metadata: {
+                ...message.metadata,
+                ...(nextReasoning.length > 0 ? { reasoningContent: nextReasoning } : {}),
+              },
+            };
+          }),
+        );
+      }),
+    [],
+  );
+
+  const openAttachmentPicker = () => {
+    attachmentInputRef.current?.click();
+  };
+
+  const handleAttachmentPick = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    event.target.value = "";
+
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      const nextAttachments = await Promise.all(files.map((file) => createImagePreview(file)));
+      setAttachments((current) => [...current, ...nextAttachments]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to attach images.");
+    }
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+  };
 
   const ensureSession = async (): Promise<ChatSession> => {
     const next = await window.desktopApi.gateway.upsertChatSession({
@@ -173,13 +402,29 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   };
 
   const sendMessage = async () => {
+    const prompt = draft.trim();
+    const messageContent = buildMessageContent(prompt, attachments);
+    const hasImages = attachments.length > 0;
+
     if (
       busy ||
       sessionActionBusy ||
       shellState.phase !== "connected" ||
-      draft.trim().length === 0 ||
-      !selectedModelId
+      !selectedModelId ||
+      (prompt.length === 0 && !hasImages) ||
+      (hasImages && !supportsVision)
     ) {
+      if (hasImages && !supportsVision) {
+        setError("Select a vision-capable model to send image attachments.");
+      }
+      return;
+    }
+
+    let maxTokens: number | undefined;
+    try {
+      maxTokens = parseMaxTokensDraft(maxTokensDraft);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Invalid max token limit.");
       return;
     }
 
@@ -188,48 +433,24 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
     try {
       const session = await ensureSession();
-      const content = draft.trim();
+      const clientRequestId = createClientRequestId();
       setDraft("");
+      setAttachments([]);
 
-      const tempUser = createTempMessage(session.id, "user", content);
-      const tempAssistant = createTempMessage(session.id, "assistant", "");
+      const tempUser = createTempMessage(session.id, "user", messageContent);
+      const tempAssistant = createTempMessage(session.id, "assistant", "", {
+        clientRequestId,
+      });
       setMessages((current) => [...current, tempUser, tempAssistant]);
 
       const result = await window.desktopApi.gateway.runChat({
         sessionId: session.id,
         model: selectedModelId,
         systemPrompt: systemPrompt.trim(),
-        message: content,
+        message: messageContent,
+        clientRequestId,
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
       });
-
-      const assistantText = result.assistantMessage.content ?? "";
-      if (!assistantText) {
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === tempAssistant.id ? result.assistantMessage : message,
-          ),
-        );
-      } else {
-        let cursor = 0;
-        await new Promise<void>((resolve) => {
-          const timer = window.setInterval(() => {
-            cursor += 16;
-            const partial = assistantText.slice(0, cursor);
-            setMessages((current) =>
-              current.map((message) =>
-                message.id === tempAssistant.id
-                  ? { ...result.assistantMessage, content: partial }
-                  : message,
-              ),
-            );
-
-            if (cursor >= assistantText.length) {
-              window.clearInterval(timer);
-              resolve();
-            }
-          }, 24);
-        });
-      }
 
       setMessages((current) =>
         current.map((message) => {
@@ -382,6 +603,15 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             <span className="status-pill status-pill-neutral">
               {selectedModel?.name ?? "No model selected"}
             </span>
+            <span
+              className={
+                supportsVision
+                  ? "status-pill status-pill-positive"
+                  : "status-pill status-pill-caution"
+              }
+            >
+              {supportsVision ? "Vision enabled" : "Text only"}
+            </span>
             <span className="meta-pill meta-pill-muted">{messages.length} messages</span>
           </div>
         </div>
@@ -419,7 +649,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             >
               {models.map((model) => (
                 <option key={model.id} value={model.id}>
-                  {model.name}
+                  {formatModelLabel(model)}
                 </option>
               ))}
             </select>
@@ -433,6 +663,20 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
               rows={3}
               value={systemPrompt}
             />
+          </label>
+          <label className="field-stack">
+            <span className="section-label">Max tokens</span>
+            <input
+              className="text-input"
+              inputMode="numeric"
+              min={1}
+              onChange={(event) => setMaxTokensDraft(event.target.value)}
+              placeholder="Model default"
+              step={1}
+              type="number"
+              value={maxTokensDraft}
+            />
+            <p className="chat-control-note">Leave blank to use the model default.</p>
           </label>
           <div className="button-row">
             <span className="status-chip">Gateway {shellState.phase}</span>
@@ -449,13 +693,72 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             messages.map((message) => (
               <article className="chat-bubble" data-role={message.role} key={message.id}>
                 <strong>{message.role}</strong>
-                <p>{message.content ?? ""}</p>
+                {getReasoningContent(message) ? (
+                  <details className="chat-thinking-block" open>
+                    <summary>Thinking</summary>
+                    <pre>{getReasoningContent(message)}</pre>
+                  </details>
+                ) : null}
+                {renderChatContent(message.content)}
               </article>
             ))
           )}
         </div>
 
         <div className="chat-composer">
+          <div className="chat-composer-toolbar">
+            <button
+              className="secondary-button"
+              disabled={
+                shellState.phase !== "connected" ||
+                busy ||
+                sessionActionBusy ||
+                !selectedModelId ||
+                !supportsVision
+              }
+              onClick={openAttachmentPicker}
+              type="button"
+            >
+              Attach images
+            </button>
+            <span
+              className={
+                supportsVision
+                  ? "status-pill status-pill-positive"
+                  : "status-pill status-pill-caution"
+              }
+            >
+              {supportsVision ? "Ready for images" : "Select a vision model"}
+            </span>
+          </div>
+          {attachments.length > 0 ? (
+            <div className="chat-attachment-grid">
+              {attachments.map((attachment) => (
+                <article className="chat-attachment-card" key={attachment.id}>
+                  <img alt={attachment.name} loading="lazy" src={attachment.src} />
+                  <div className="chat-attachment-card-meta">
+                    <strong>{attachment.name}</strong>
+                    <p>{attachment.mimeType}</p>
+                  </div>
+                  <button
+                    className="secondary-button chat-attachment-remove"
+                    onClick={() => removeAttachment(attachment.id)}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                </article>
+              ))}
+            </div>
+          ) : null}
+          <input
+            ref={attachmentInputRef}
+            className="chat-attachment-input"
+            multiple
+            accept="image/*"
+            onChange={(event) => void handleAttachmentPick(event)}
+            type="file"
+          />
           <textarea
             className="text-input"
             onChange={(event) => setDraft(event.target.value)}
@@ -470,7 +773,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
                 shellState.phase !== "connected" ||
                 busy ||
                 sessionActionBusy ||
-                draft.trim().length === 0
+                !selectedModelId ||
+                (draft.trim().length === 0 && attachments.length === 0) ||
+                (attachments.length > 0 && !supportsVision)
               }
               onClick={() => void sendMessage()}
               type="button"
@@ -479,6 +784,11 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             </button>
             {error ? <span className="status-pill status-pill-negative">{error}</span> : null}
           </div>
+          <p className="chat-composer-note">
+            {supportsVision
+              ? "Add screenshots or photos to ground your prompt."
+              : "Switch to a vision-capable model before attaching images."}
+          </p>
         </div>
       </article>
     </section>
