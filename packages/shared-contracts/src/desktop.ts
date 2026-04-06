@@ -168,6 +168,7 @@ export const desktopChatSessionUpsertRequestSchema = z.object({
   modelId: nonEmptyStringSchema.optional(),
   title: z.string().optional(),
   systemPrompt: z.string().optional(),
+  metadata: jsonRecordSchema.optional(),
 });
 
 export const desktopChatRunRequestSchema = z.object({

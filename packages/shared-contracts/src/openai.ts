@@ -72,6 +72,7 @@ export const chatCompletionsRequestSchema = z.object({
   messages: z.array(openAiMessageSchema).min(1),
   stream: z.boolean().default(false),
   temperature: z.number().min(0).max(2).optional(),
+  top_p: z.number().min(0).max(1).optional(),
   max_tokens: positiveIntegerSchema.optional(),
   tools: z.array(openAiToolSchema).optional(),
   extra_body: z

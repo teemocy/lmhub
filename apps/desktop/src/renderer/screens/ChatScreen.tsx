@@ -27,6 +27,22 @@ type AttachmentPreview = {
   src: string;
 };
 
+type ChatSessionSettingsState = {
+  systemPrompt: string;
+  temperature: string;
+  maxMessagesInContext: string;
+  maxOutputTokens: string;
+  topP: string;
+};
+
+const createEmptyChatSessionSettingsState = (): ChatSessionSettingsState => ({
+  systemPrompt: "",
+  temperature: "",
+  maxMessagesInContext: "",
+  maxOutputTokens: "",
+  topP: "",
+});
+
 const createTempMessage = (
   sessionId: string,
   role: ChatMessage["role"],
@@ -75,22 +91,122 @@ const downloadJson = (fileName: string, payload: unknown): void => {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 };
 
-const parseMaxTokensDraft = (value: string): number | undefined => {
+const toDraftNumber = (value: unknown): string => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    if (normalized.length > 0 && Number.isFinite(Number(normalized))) {
+      return normalized;
+    }
+  }
+
+  return "";
+};
+
+const parseOptionalNumberDraft = (
+  value: string,
+  label: string,
+  options: { integer?: boolean; min?: number; max?: number } = {},
+): number | undefined => {
   const normalized = value.trim();
   if (normalized.length === 0) {
     return undefined;
   }
 
-  if (!/^\d+$/.test(normalized)) {
-    throw new Error("Max tokens must be a positive integer.");
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} must be a valid number.`);
   }
 
-  const parsed = Number(normalized);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error("Max tokens must be a positive integer.");
+  if (options.integer && !Number.isInteger(parsed)) {
+    throw new Error(`${label} must be an integer.`);
+  }
+
+  if (options.min !== undefined && parsed < options.min) {
+    throw new Error(`${label} must be at least ${options.min}.`);
+  }
+
+  if (options.max !== undefined && parsed > options.max) {
+    throw new Error(`${label} must be at most ${options.max}.`);
+  }
+
+  if (options.integer && !Number.isSafeInteger(parsed)) {
+    throw new Error(`${label} must be a safe integer.`);
   }
 
   return parsed;
+};
+
+const getChatSessionSettingsState = (session: ChatSession | null): ChatSessionSettingsState => {
+  const rawSettings = session?.metadata?.chatSettings;
+  const record =
+    rawSettings && typeof rawSettings === "object" && !Array.isArray(rawSettings)
+      ? (rawSettings as Record<string, unknown>)
+      : {};
+
+  return {
+    systemPrompt: session?.systemPrompt ?? "",
+    temperature: toDraftNumber(record.temperature),
+    maxMessagesInContext: toDraftNumber(record.maxMessagesInContext),
+    maxOutputTokens: toDraftNumber(record.maxOutputTokens),
+    topP: toDraftNumber(record.topP ?? record.top_p),
+  };
+};
+
+const normalizeChatSessionSettingsState = (
+  settings: ChatSessionSettingsState,
+): ChatSessionSettingsState => ({
+  systemPrompt: settings.systemPrompt.trim(),
+  temperature: settings.temperature.trim(),
+  maxMessagesInContext: settings.maxMessagesInContext.trim(),
+  maxOutputTokens: settings.maxOutputTokens.trim(),
+  topP: settings.topP.trim(),
+});
+
+const buildChatSessionMetadata = (
+  settings: ChatSessionSettingsState,
+): Record<string, unknown> => {
+  const chatSettings: Record<string, unknown> = {};
+  const temperature = parseOptionalNumberDraft(settings.temperature, "Temperature", {
+    min: 0,
+    max: 2,
+  });
+  if (temperature !== undefined) {
+    chatSettings.temperature = temperature;
+  }
+
+  const topP = parseOptionalNumberDraft(settings.topP, "Top P", {
+    min: 0,
+    max: 1,
+  });
+  if (topP !== undefined) {
+    chatSettings.topP = topP;
+  }
+
+  const maxMessagesInContext = parseOptionalNumberDraft(
+    settings.maxMessagesInContext,
+    "Max messages in context",
+    {
+      integer: true,
+      min: 1,
+    },
+  );
+  if (maxMessagesInContext !== undefined) {
+    chatSettings.maxMessagesInContext = maxMessagesInContext;
+  }
+
+  const maxOutputTokens = parseOptionalNumberDraft(settings.maxOutputTokens, "Max output tokens", {
+    integer: true,
+    min: 1,
+  });
+  if (maxOutputTokens !== undefined) {
+    chatSettings.maxOutputTokens = maxOutputTokens;
+  }
+
+  return chatSettings;
 };
 
 const getClientRequestId = (message: ChatMessage): string | undefined =>
@@ -219,12 +335,16 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [openSessionMenuId, setOpenSessionMenuId] = useState<string | null>(null);
   const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
   const [renameSessionDraft, setRenameSessionDraft] = useState("");
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>(models[0]?.id ?? "");
-  const [systemPrompt, setSystemPrompt] = useState("");
-  const [sessionTitleDraft, setSessionTitleDraft] = useState("");
+  const [sessionSettings, setSessionSettings] = useState<ChatSessionSettingsState>(
+    createEmptyChatSessionSettingsState(),
+  );
+  const [settingsDraft, setSettingsDraft] = useState<ChatSessionSettingsState>(
+    createEmptyChatSessionSettingsState(),
+  );
   const [draft, setDraft] = useState("");
-  const [maxTokensDraft, setMaxTokensDraft] = useState("");
   const [attachments, setAttachments] = useState<AttachmentPreview[]>([]);
   const [busy, setBusy] = useState(false);
   const [sessionActionBusy, setSessionActionBusy] = useState(false);
@@ -268,6 +388,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       if (event.key === "Escape") {
         setOpenSessionMenuId(null);
         closeRenameSessionDialog(true);
+        closeSettingsDialog();
       }
     };
 
@@ -281,15 +402,6 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   }, []);
 
   useEffect(() => {
-    if (!renameSessionTarget) {
-      setRenameSessionDraft("");
-      return;
-    }
-
-    setRenameSessionDraft(renameSessionTarget.title ?? "Untitled chat");
-  }, [renameSessionTarget]);
-
-  useEffect(() => {
     if (models.length === 0) {
       setSelectedModelId("");
       return;
@@ -299,6 +411,23 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       current && models.some((model) => model.id === current) ? current : (models[0]?.id ?? ""),
     );
   }, [models]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      setSessionSettings(createEmptyChatSessionSettingsState());
+      setSettingsDraft(createEmptyChatSessionSettingsState());
+      return;
+    }
+
+    const nextSettings = getChatSessionSettingsState(activeSession);
+
+    if (activeSession.modelId && models.some((model) => model.id === activeSession.modelId)) {
+      setSelectedModelId(activeSession.modelId);
+    }
+
+    setSessionSettings(nextSettings);
+    setSettingsDraft(nextSettings);
+  }, [activeSession, models]);
 
   useEffect(() => {
     if (shellState.phase !== "connected") {
@@ -362,20 +491,6 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       cancelled = true;
     };
   }, [activeSessionId, shellState.phase]);
-
-  useEffect(() => {
-    if (!activeSession) {
-      setSystemPrompt("");
-      setSessionTitleDraft("");
-      return;
-    }
-
-    if (activeSession.modelId && models.some((model) => model.id === activeSession.modelId)) {
-      setSelectedModelId(activeSession.modelId);
-    }
-    setSystemPrompt(activeSession.systemPrompt ?? "");
-    setSessionTitleDraft(activeSession.title ?? "");
-  }, [activeSession, models]);
 
   useEffect(
     () =>
@@ -443,11 +558,21 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   };
 
   const ensureSession = async (): Promise<ChatSession> => {
+    const normalizedSettings = normalizeChatSessionSettingsState(sessionSettings);
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = buildChatSessionMetadata(normalizedSettings);
+    } catch (reason) {
+      throw reason instanceof Error ? reason : new Error("Unable to validate chat settings.");
+    }
     const next = await window.desktopApi.gateway.upsertChatSession({
       ...(activeSessionId ? { id: activeSessionId } : {}),
       ...(selectedModelId ? { modelId: selectedModelId } : {}),
-      title: sessionTitleDraft.trim(),
-      systemPrompt: systemPrompt.trim(),
+      systemPrompt: normalizedSettings.systemPrompt,
+      metadata: {
+        ...(activeSession?.metadata ?? {}),
+        chatSettings: metadata,
+      },
     });
     startTransition(() => {
       setSessions((current) =>
@@ -477,14 +602,6 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       return;
     }
 
-    let maxTokens: number | undefined;
-    try {
-      maxTokens = parseMaxTokensDraft(maxTokensDraft);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Invalid max token limit.");
-      return;
-    }
-
     setBusy(true);
     setError(null);
 
@@ -503,10 +620,8 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       const result = await window.desktopApi.gateway.runChat({
         sessionId: session.id,
         model: selectedModelId,
-        systemPrompt: systemPrompt.trim(),
         message: messageContent,
         clientRequestId,
-        ...(maxTokens !== undefined ? { maxTokens } : {}),
       });
 
       setMessages((current) =>
@@ -542,10 +657,19 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
     try {
       setError(null);
+      const normalizedSettings = normalizeChatSessionSettingsState(sessionSettings);
+      let metadata: Record<string, unknown>;
+      try {
+        metadata = buildChatSessionMetadata(normalizedSettings);
+      } catch (reason) {
+        throw reason instanceof Error ? reason : new Error("Unable to validate chat settings.");
+      }
       const next = await window.desktopApi.gateway.upsertChatSession({
         modelId: selectedModelId || undefined,
-        title: sessionTitleDraft.trim(),
-        systemPrompt: systemPrompt.trim(),
+        systemPrompt: normalizedSettings.systemPrompt,
+        metadata: {
+          chatSettings: metadata,
+        },
       });
       setSessions((current) =>
         sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]),
@@ -554,6 +678,66 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       setMessages([]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to create session.");
+    } finally {
+      setSessionActionBusy(false);
+    }
+  };
+
+  const openSettingsDialog = () => {
+    if (sessionActionBusy) {
+      return;
+    }
+
+    setSettingsDraft(sessionSettings);
+    setSettingsModalOpen(true);
+  };
+
+  const closeSettingsDialog = () => {
+    if (sessionActionBusy) {
+      return;
+    }
+
+    setSettingsModalOpen(false);
+  };
+
+  const saveSettingsDialog = async () => {
+    if (sessionActionBusy) {
+      return;
+    }
+
+    const normalizedSettings = normalizeChatSessionSettingsState(settingsDraft);
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = buildChatSessionMetadata(normalizedSettings);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to validate chat settings.");
+      return;
+    }
+
+    setSessionActionBusy(true);
+
+    try {
+      setError(null);
+      if (activeSessionId) {
+        const next = await window.desktopApi.gateway.upsertChatSession({
+          id: activeSessionId,
+          ...(selectedModelId ? { modelId: selectedModelId } : {}),
+          systemPrompt: normalizedSettings.systemPrompt,
+          metadata: {
+            ...(activeSession?.metadata ?? {}),
+            chatSettings: metadata,
+          },
+        });
+        startTransition(() => {
+          setSessions((current) =>
+            sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]),
+          );
+        });
+      }
+      setSessionSettings(normalizedSettings);
+      setSettingsModalOpen(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to save chat settings.");
     } finally {
       setSessionActionBusy(false);
     }
@@ -589,8 +773,6 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       return;
     }
 
-    const renamingActiveSession = renameSessionTarget.id === activeSessionId;
-
     setSessionActionBusy(true);
 
     try {
@@ -599,7 +781,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         id: renameSessionTarget.id,
         title: normalizedTitle,
         ...(renameSessionTarget.modelId ? { modelId: renameSessionTarget.modelId } : {}),
-        ...(renameSessionTarget.systemPrompt
+        ...(renameSessionTarget.systemPrompt !== undefined
           ? { systemPrompt: renameSessionTarget.systemPrompt }
           : {}),
       });
@@ -607,9 +789,6 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         setSessions((current) =>
           sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]),
         );
-        if (renamingActiveSession) {
-          setSessionTitleDraft(normalizedTitle);
-        }
       });
       closeRenameSessionDialog(true);
     } catch (reason) {
@@ -664,10 +843,10 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     try {
       setError(null);
       await window.desktopApi.gateway.deleteChatSession(session.id);
-      const response = await window.desktopApi.gateway.listChatSessions();
-      if (renameSessionTarget?.id === session.id) {
-        closeRenameSessionDialog(true);
-      }
+          const response = await window.desktopApi.gateway.listChatSessions();
+          if (renameSessionTarget?.id === session.id) {
+            closeRenameSessionDialog(true);
+          }
 
       startTransition(() => {
         const sorted = sortByUpdatedDesc(response.data);
@@ -729,10 +908,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
                       setOpenSessionMenuId(null);
                     }}
                     type="button"
-                  >
-                    <h4>{session.title ?? "Untitled chat"}</h4>
-                    <p>{new Date(session.updatedAt).toLocaleString()}</p>
-                  </button>
+                    >
+                      <h4>{session.title ?? "Untitled chat"}</h4>
+                    </button>
                   <div className="chat-session-menu-shell">
                     <button
                       aria-expanded={openSessionMenuId === session.id}
@@ -803,12 +981,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         <div className="chat-session-banner">
           <div className="chat-session-copy">
             <span className="section-label">{sessionStatusLabel}</span>
-            <input
-              className="text-input chat-session-title-input"
-              onChange={(event) => setSessionTitleDraft(event.target.value)}
-              placeholder={activeSessionTitle}
-              value={sessionTitleDraft}
-            />
+            <h4 className="chat-session-active-title">{activeSessionTitle}</h4>
             <p>{activeSessionUpdatedAt}</p>
           </div>
           <div className="chat-session-meta">
@@ -887,49 +1060,150 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
           </div>
         ) : null}
 
-        <div className="chat-controls">
-          <label className="field-stack">
-            <span className="section-label">Model</span>
-            <select
-              className="text-input"
-              onChange={(event) => setSelectedModelId(event.target.value)}
-              value={selectedModelId}
+        {settingsModalOpen ? (
+          <div
+            className="model-detail-modal-backdrop chat-settings-backdrop"
+            onClick={() => closeSettingsDialog()}
+            role="presentation"
+          >
+            <form
+              aria-labelledby="chat-settings-modal-title"
+              aria-modal="true"
+              className="model-detail-modal chat-settings-modal"
+              onClick={(event) => event.stopPropagation()}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveSettingsDialog();
+              }}
+              role="dialog"
             >
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {formatModelLabel(model)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field-stack">
-            <span className="section-label">System prompt</span>
-            <textarea
-              className="text-input"
-              onChange={(event) => setSystemPrompt(event.target.value)}
-              placeholder="Optional system instruction"
-              rows={3}
-              value={systemPrompt}
-            />
-          </label>
-          <label className="field-stack">
-            <span className="section-label">Max tokens</span>
-            <input
-              className="text-input"
-              inputMode="numeric"
-              min={1}
-              onChange={(event) => setMaxTokensDraft(event.target.value)}
-              placeholder="Model default"
-              step={1}
-              type="number"
-              value={maxTokensDraft}
-            />
-            <p className="chat-control-note">Leave blank to use the model default.</p>
-          </label>
-          <div className="button-row">
-            <span className="status-chip">Gateway {shellState.phase}</span>
+              <div className="modal-shell-header">
+                <div>
+                  <span className="section-label">Chat settings</span>
+                  <h3 id="chat-settings-modal-title">Session configuration</h3>
+                  <p>Store the system prompt and generation controls for this chat.</p>
+                </div>
+                <div className="modal-shell-actions">
+                  <button
+                    className="secondary-button"
+                    onClick={() => closeSettingsDialog()}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              <div className="modal-panel chat-settings-panel">
+                <label className="field-stack">
+                  <span className="section-label">System prompt</span>
+                  <textarea
+                    autoFocus
+                    className="text-input"
+                    disabled={sessionActionBusy}
+                    onChange={(event) =>
+                      setSettingsDraft((current) => ({
+                        ...current,
+                        systemPrompt: event.target.value,
+                      }))
+                    }
+                    placeholder="Optional system instruction"
+                    rows={5}
+                    value={settingsDraft.systemPrompt}
+                  />
+                </label>
+                <div className="chat-settings-grid">
+                  <label className="field-stack">
+                    <span className="section-label">Temperature</span>
+                    <input
+                      className="text-input"
+                      disabled={sessionActionBusy}
+                      inputMode="decimal"
+                      min={0}
+                      max={2}
+                      onChange={(event) =>
+                        setSettingsDraft((current) => ({
+                          ...current,
+                          temperature: event.target.value,
+                        }))
+                      }
+                      placeholder="Model default"
+                      step={0.1}
+                      type="number"
+                      value={settingsDraft.temperature}
+                    />
+                  </label>
+                  <label className="field-stack">
+                    <span className="section-label">Top P</span>
+                    <input
+                      className="text-input"
+                      disabled={sessionActionBusy}
+                      inputMode="decimal"
+                      min={0}
+                      max={1}
+                      onChange={(event) =>
+                        setSettingsDraft((current) => ({
+                          ...current,
+                          topP: event.target.value,
+                        }))
+                      }
+                      placeholder="Model default"
+                      step={0.01}
+                      type="number"
+                      value={settingsDraft.topP}
+                    />
+                  </label>
+                  <label className="field-stack">
+                    <span className="section-label">Max messages in context</span>
+                    <input
+                      className="text-input"
+                      disabled={sessionActionBusy}
+                      inputMode="numeric"
+                      min={1}
+                      onChange={(event) =>
+                        setSettingsDraft((current) => ({
+                          ...current,
+                          maxMessagesInContext: event.target.value,
+                        }))
+                      }
+                      placeholder="Unlimited"
+                      step={1}
+                      type="number"
+                      value={settingsDraft.maxMessagesInContext}
+                    />
+                  </label>
+                  <label className="field-stack">
+                    <span className="section-label">Max output tokens</span>
+                    <input
+                      className="text-input"
+                      disabled={sessionActionBusy}
+                      inputMode="numeric"
+                      min={1}
+                      onChange={(event) =>
+                        setSettingsDraft((current) => ({
+                          ...current,
+                          maxOutputTokens: event.target.value,
+                        }))
+                      }
+                      placeholder="Model default"
+                      step={1}
+                      type="number"
+                      value={settingsDraft.maxOutputTokens}
+                    />
+                  </label>
+                </div>
+                <div className="detail-actions">
+                  <button
+                    className="primary-button"
+                    disabled={sessionActionBusy}
+                    type="submit"
+                  >
+                    {sessionActionBusy ? "Saving..." : "Save settings"}
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
-        </div>
+        ) : null}
 
         <div className="chat-thread">
           {messages.length === 0 ? (
@@ -1014,29 +1288,53 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             rows={3}
             value={draft}
           />
-          <div className="button-row">
-            <button
-              className="primary-button"
-              disabled={
-                shellState.phase !== "connected" ||
-                busy ||
-                sessionActionBusy ||
-                !selectedModelId ||
-                (draft.trim().length === 0 && attachments.length === 0) ||
-                (attachments.length > 0 && !supportsVision)
-              }
-              onClick={() => void sendMessage()}
-              type="button"
-            >
-              {busy ? "Generating..." : "Send"}
-            </button>
-            {error ? <span className="status-pill status-pill-negative">{error}</span> : null}
-          </div>
           <p className="chat-composer-note">
             {supportsVision
               ? "Add screenshots or photos to ground your prompt."
               : "Switch to a vision-capable model before attaching images."}
           </p>
+          <div className="chat-composer-footer">
+            <div className="chat-composer-actions">
+              <button
+                className="primary-button"
+                disabled={
+                  shellState.phase !== "connected" ||
+                  busy ||
+                  sessionActionBusy ||
+                  !selectedModelId ||
+                  (draft.trim().length === 0 && attachments.length === 0) ||
+                  (attachments.length > 0 && !supportsVision)
+                }
+                onClick={() => void sendMessage()}
+                type="button"
+              >
+                {busy ? "Generating..." : "Send"}
+              </button>
+              <button
+                className="secondary-button"
+                disabled={busy || sessionActionBusy}
+                onClick={openSettingsDialog}
+                type="button"
+              >
+                Settings
+              </button>
+              <div className="chat-model-field">
+                <select
+                  aria-label="Model"
+                  className="text-input chat-model-select"
+                  onChange={(event) => setSelectedModelId(event.target.value)}
+                  value={selectedModelId}
+                >
+                  {models.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {formatModelLabel(model)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {error ? <span className="status-pill status-pill-negative">{error}</span> : null}
+            </div>
+          </div>
         </div>
       </article>
     </section>

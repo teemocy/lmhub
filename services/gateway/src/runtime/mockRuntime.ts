@@ -246,6 +246,66 @@ function buildAssistantMetadata(options: {
   return metadata;
 }
 
+function getOptionalNumber(
+  value: unknown,
+  min?: number,
+  max?: number,
+): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  if (min !== undefined && value < min) {
+    return undefined;
+  }
+
+  if (max !== undefined && value > max) {
+    return undefined;
+  }
+
+  return value;
+}
+
+type ChatSettingsMetadata = {
+  maxMessagesInContext?: number;
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+};
+
+function getChatSettings(metadata: Record<string, unknown> | undefined): ChatSettingsMetadata {
+  const rawSettings = metadata?.chatSettings;
+  if (!rawSettings || typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
+    return {};
+  }
+
+  const record = rawSettings as Record<string, unknown>;
+
+  return {
+    temperature: getOptionalNumber(record.temperature, 0, 2),
+    topP: getOptionalNumber(record.topP ?? record.top_p, 0, 1),
+    maxOutputTokens: getOptionalNumber(record.maxOutputTokens, 1),
+    maxMessagesInContext: getOptionalNumber(record.maxMessagesInContext, 1),
+  };
+}
+
+function buildChatCompletionMessages(
+  messages: ChatMessage[],
+  systemPrompt: string | undefined,
+  maxMessagesInContext?: number,
+): ChatCompletionsRequest["messages"] {
+  const scopedMessages =
+    maxMessagesInContext !== undefined ? messages.slice(-maxMessagesInContext) : messages;
+
+  return [
+    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+    ...scopedMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
+}
+
 function createStreamedAssistantAccumulator(): StreamedAssistantAccumulator {
   return {
     content: "",
@@ -598,14 +658,20 @@ export class MockGatewayRuntime {
     const existing = input.id ? this.#chatSessions.get(input.id) : undefined;
     const session: ChatSession = {
       id: existing?.id ?? input.id ?? `session_${randomUUID().slice(0, 12)}`,
-      ...((input.title ?? existing?.title) ? { title: input.title ?? existing?.title } : {}),
+      ...(input.title !== undefined
+        ? { title: input.title }
+        : existing?.title
+          ? { title: existing.title }
+          : {}),
       ...((input.modelId ?? existing?.modelId)
         ? { modelId: input.modelId ?? existing?.modelId }
         : {}),
-      ...((input.systemPrompt ?? existing?.systemPrompt)
-        ? { systemPrompt: input.systemPrompt ?? existing?.systemPrompt }
-        : {}),
-      metadata: existing?.metadata ?? {},
+      ...(input.systemPrompt !== undefined
+        ? { systemPrompt: input.systemPrompt }
+        : existing?.systemPrompt !== undefined
+          ? { systemPrompt: existing.systemPrompt }
+          : {}),
+      metadata: input.metadata ?? existing?.metadata ?? {},
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -629,19 +695,11 @@ export class MockGatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
     const now = new Date().toISOString();
+    const chatSettings = getChatSettings(session.metadata);
     const promptTokens = countChatContentTokens(input.message);
-    const response = this.createChatCompletion(
-      {
-        model: input.model,
-        stream: false,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [{ role: "user", content: input.message }],
-      },
-      { traceId: createTraceId(traceId) },
-    );
     const userMessage: ChatMessage = {
       id: `message_${Date.now()}`,
       sessionId: session.id,
@@ -652,6 +710,27 @@ export class MockGatewayRuntime {
       metadata: {},
       createdAt: now,
     };
+    this.#chatMessages.set(session.id, [
+      ...(this.#chatMessages.get(session.id) ?? []),
+      userMessage,
+    ]);
+    const response = this.createChatCompletion(
+      {
+        model: input.model,
+        stream: false,
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...((input.maxTokens ?? chatSettings.maxOutputTokens) !== undefined
+          ? { max_tokens: input.maxTokens ?? chatSettings.maxOutputTokens }
+          : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatMessages.get(session.id) ?? [],
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
+      },
+      { traceId: createTraceId(traceId) },
+    );
     const assistantMessage: ChatMessage = {
       id: `message_${Date.now() + 1}`,
       sessionId: session.id,
@@ -667,14 +746,13 @@ export class MockGatewayRuntime {
 
     this.#chatMessages.set(session.id, [
       ...(this.#chatMessages.get(session.id) ?? []),
-      userMessage,
       assistantMessage,
     ]);
 
     const updatedSession = this.upsertChatSession({
       id: session.id,
       modelId: input.model,
-      ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+      ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
       ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
     });
 
@@ -690,9 +768,10 @@ export class MockGatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
     const now = new Date().toISOString();
+    const chatSettings = getChatSettings(session.metadata);
     const promptTokens = countChatContentTokens(input.message);
     const userMessage: ChatMessage = {
       id: `message_${Date.now()}`,
@@ -712,8 +791,16 @@ export class MockGatewayRuntime {
       {
         model: input.model,
         stream: true,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [{ role: "user", content: input.message }],
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...((input.maxTokens ?? chatSettings.maxOutputTokens) !== undefined
+          ? { max_tokens: input.maxTokens ?? chatSettings.maxOutputTokens }
+          : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatMessages.get(session.id) ?? [],
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
       },
       { traceId: createTraceId(traceId) },
     );
@@ -749,7 +836,7 @@ export class MockGatewayRuntime {
       this.upsertChatSession({
         id: session.id,
         modelId: input.model,
-        ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+        ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
         ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
       });
     };

@@ -159,6 +159,13 @@ interface StreamedAssistantAccumulator {
   totalTokens?: number;
 }
 
+type ChatSettingsMetadata = {
+  maxMessagesInContext?: number;
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+};
+
 interface CatalogVariantArtifact {
   artifact: ProviderArtifactDescriptor;
   auxiliary: boolean;
@@ -187,6 +194,61 @@ function extractTrailingQuantization(stem: string): string | undefined {
       stem,
     );
   return normalizeQuantLabel(match?.[1]);
+}
+
+function getOptionalNumber(
+  value: unknown,
+  min?: number,
+  max?: number,
+): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  if (min !== undefined && value < min) {
+    return undefined;
+  }
+
+  if (max !== undefined && value > max) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function getChatSettings(metadata: Record<string, unknown> | undefined): ChatSettingsMetadata {
+  const rawSettings = metadata?.chatSettings;
+  if (!rawSettings || typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
+    return {};
+  }
+
+  const record = rawSettings as Record<string, unknown>;
+
+  return {
+    temperature: getOptionalNumber(record.temperature, 0, 2),
+    topP: getOptionalNumber(record.topP ?? record.top_p, 0, 1),
+    maxOutputTokens: getOptionalNumber(record.maxOutputTokens, 1),
+    maxMessagesInContext: getOptionalNumber(record.maxMessagesInContext, 1),
+  };
+}
+
+function buildChatCompletionMessages(
+  chatRepository: ChatRepository,
+  sessionId: string,
+  systemPrompt: string | undefined,
+  maxMessagesInContext?: number,
+): ChatCompletionsRequest["messages"] {
+  const messages = chatRepository.listMessages(sessionId);
+  const scopedMessages =
+    maxMessagesInContext !== undefined ? messages.slice(-maxMessagesInContext) : messages;
+
+  return [
+    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+    ...scopedMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
 }
 
 function stripTrailingToken(value: string, token: string | undefined): string {
@@ -1467,14 +1529,20 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       : undefined;
     const session: ChatSession = {
       id: existing?.id ?? input.id ?? `session_${randomUUID().slice(0, 12)}`,
-      ...((input.title ?? existing?.title) ? { title: input.title ?? existing?.title } : {}),
+      ...(input.title !== undefined
+        ? { title: input.title }
+        : existing?.title
+          ? { title: existing.title }
+          : {}),
       ...((input.modelId ?? existing?.modelId)
         ? { modelId: input.modelId ?? existing?.modelId }
         : {}),
-      ...((input.systemPrompt ?? existing?.systemPrompt)
-        ? { systemPrompt: input.systemPrompt ?? existing?.systemPrompt }
-        : {}),
-      metadata: existing?.metadata ?? {},
+      ...(input.systemPrompt !== undefined
+        ? { systemPrompt: input.systemPrompt }
+        : existing?.systemPrompt !== undefined
+          ? { systemPrompt: existing.systemPrompt }
+          : {}),
+      metadata: input.metadata ?? existing?.metadata ?? {},
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -1492,8 +1560,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
+    const chatSettings = getChatSettings(session.metadata);
+    const maxTokens = input.maxTokens ?? chatSettings.maxOutputTokens;
     const userMessage: ChatMessage = {
       id: `message_${randomUUID().slice(0, 12)}`,
       sessionId: session.id,
@@ -1510,16 +1580,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: false,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [
-          ...(session.systemPrompt
-            ? [{ role: "system" as const, content: session.systemPrompt }]
-            : []),
-          ...this.#chatRepository.listMessages(session.id).map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-        ],
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatRepository,
+          session.id,
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
       },
       {
         traceId: normalizeTraceId(traceId),
@@ -1547,7 +1616,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const updatedSession = this.upsertChatSession({
       id: session.id,
       modelId: input.model,
-      ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+      ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
       ...(session.title
         ? { title: session.title }
         : { title: createChatSessionTitle(input.message) }),
@@ -1570,8 +1639,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
+    const chatSettings = getChatSettings(session.metadata);
+    const maxTokens = input.maxTokens ?? chatSettings.maxOutputTokens;
     const userMessage: ChatMessage = {
       id: `message_${randomUUID().slice(0, 12)}`,
       sessionId: session.id,
@@ -1590,16 +1661,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: true,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [
-          ...(session.systemPrompt
-            ? [{ role: "system" as const, content: session.systemPrompt }]
-            : []),
-          ...this.#chatRepository.listMessages(session.id).map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-        ],
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatRepository,
+          session.id,
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
       },
       {
         traceId: normalizedTraceId,
@@ -1630,7 +1700,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       this.upsertChatSession({
         id: session.id,
         modelId: input.model,
-        ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+        ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
         ...(session.title
           ? { title: session.title }
           : { title: createChatSessionTitle(input.message) }),
