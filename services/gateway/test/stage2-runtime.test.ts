@@ -1153,7 +1153,7 @@ describe("gateway stage 2 runtime", () => {
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });
 
-  it("allows concurrent chat requests by loading another worker instance", async () => {
+  it("reuses a busy worker for concurrent chat requests", async () => {
     const fixture = await createStage2Fixture({
       runtimeOverrides: {
         maxWorkersPerModel: 2,
@@ -1165,6 +1165,16 @@ describe("gateway stage 2 runtime", () => {
         endpoint: string,
         payload: { messages?: Array<{ content?: unknown }> },
       ) => Promise<Response>;
+    };
+
+    let loadWorkerCalls = 0;
+    const runtimeAny = fixture.runtime as unknown as {
+      loadWorker: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalLoadWorker = runtimeAny.loadWorker.bind(fixture.runtime);
+    runtimeAny.loadWorker = async (...args: unknown[]) => {
+      loadWorkerCalls += 1;
+      return originalLoadWorker(...args);
     };
 
     runtime.fetchWorkerResponse = async (_worker, endpoint, payload) => {
@@ -1216,6 +1226,7 @@ describe("gateway stage 2 runtime", () => {
 
     expect(secondResponse.statusCode).toBe(200);
     expect(firstCompleted).toBe(false);
+    expect(loadWorkerCalls).toBe(1);
 
     const firstResponse = await firstRequest;
     expect(firstResponse.statusCode).toBe(200);

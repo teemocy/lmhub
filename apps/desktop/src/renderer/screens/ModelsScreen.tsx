@@ -1,7 +1,7 @@
 import type {
-  DesktopEngineRecord,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
+  DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
   DesktopModelConfigUpdateRequest,
@@ -300,6 +300,11 @@ export function ModelsScreen({
     !!selectedModel &&
     selectedModel.loaded &&
     selectedModel.state !== "evicting" &&
+    pendingActionModelId !== selectedModel.id;
+  const canEmergencyEvict =
+    connected &&
+    !!selectedModel &&
+    selectedModel.state === "error" &&
     pendingActionModelId !== selectedModel.id;
   const detailModelAction: "preload" | "evict" = selectedModel?.loaded ? "evict" : "preload";
   const detailModelActionDisabled = detailModelAction === "evict" ? !canEvict : !canPreload;
@@ -797,6 +802,16 @@ export function ModelsScreen({
                   >
                     {detailModelActionLabel}
                   </button>
+                  {selectedModel?.state === "error" ? (
+                    <button
+                      className="secondary-button"
+                      disabled={!canEmergencyEvict}
+                      onClick={() => void runModelAction("evict")}
+                      type="button"
+                    >
+                      Evict from memory
+                    </button>
+                  ) : null}
                 </div>
 
                 {selectedModel.errorMessage ? (

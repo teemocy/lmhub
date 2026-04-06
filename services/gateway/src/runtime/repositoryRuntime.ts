@@ -2767,24 +2767,44 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
     await this.acquireRequestTurn(resolved.runtimeKeyString, traceId);
 
-    try {
-      const warmWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
-        (worker) => worker.state === "Ready" && worker.inflightRequests === 0,
-      );
-      if (warmWorker) {
-        warmWorker.inflightRequests += 1;
-        warmWorker.lastUsedAt = Date.now();
-        warmWorker.state = "Busy";
+    const reuseWorker = (worker: ManagedWorker): ManagedWorker => {
+      worker.inflightRequests += 1;
+      worker.lastUsedAt = Date.now();
+
+      if (worker.state !== "Busy") {
+        const previousState = worker.state;
+        worker.state = "Busy";
         this.publish(
-          this.createModelStateEvent(warmWorker.artifact, "Busy", {
-            previousState: "Ready",
+          this.createModelStateEvent(worker.artifact, "Busy", {
+            previousState,
             reason: "Model is serving a request.",
-            runtimeKey: warmWorker.runtimeKey,
+            runtimeKey: worker.runtimeKey,
             traceId,
           }),
         );
+      }
 
-        return warmWorker;
+      return worker;
+    };
+
+    try {
+      const warmWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
+        (worker) => worker.state === "Ready" || worker.state === "Busy",
+      );
+      if (warmWorker) {
+        return reuseWorker(warmWorker);
+      }
+
+      const existingLoad = this.getPendingLoadPromises(resolved.runtimeKeyString);
+      if (existingLoad.length > 0) {
+        await Promise.any(existingLoad);
+
+        const refreshedWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
+          (worker) => worker.state === "Ready" || worker.state === "Busy",
+        );
+        if (refreshedWorker) {
+          return reuseWorker(refreshedWorker);
+        }
       }
 
       if (this.getWorkerSlotCount(resolved.runtimeKeyString) >= this.#maxWorkersPerModel) {
@@ -2796,19 +2816,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       }
 
       const worker = await this.loadWorker(resolved, traceId);
-      worker.inflightRequests += 1;
-      worker.lastUsedAt = Date.now();
-      worker.state = "Busy";
-      this.publish(
-        this.createModelStateEvent(worker.artifact, "Busy", {
-          previousState: "Ready",
-          reason: "Model is serving a request.",
-          runtimeKey: worker.runtimeKey,
-          traceId,
-        }),
-      );
-
-      return worker;
+      return reuseWorker(worker);
     } catch (error) {
       this.releaseRequestTurn(resolved.runtimeKeyString);
       throw error;
