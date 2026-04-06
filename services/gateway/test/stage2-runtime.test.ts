@@ -6,9 +6,9 @@ import {
   ChatRepository,
   EngineVersionsRepository,
   ModelsRepository,
+  fixtureEngineVersion,
   fixtureModelArtifact,
   fixtureModelProfile,
-  fixtureEngineVersion,
   openDatabase,
 } from "@localhub/db";
 import { readEngineVersionRegistry, resolveEngineSupportPaths } from "@localhub/engine-core";
@@ -82,6 +82,49 @@ async function writeSampleGgufFile(targetPath: string): Promise<void> {
   ]);
 
   await writeFile(targetPath, payload);
+}
+
+function createDelayedChatResponse(model: string, userMessage: string, delayMs: number): Response {
+  const encoder = new TextEncoder();
+  const created = Math.floor(Date.now() / 1000);
+  const payload = {
+    id: `chatcmpl_${created}_${delayMs}`,
+    object: "chat.completion",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        finish_reason: "stop",
+        message: {
+          role: "assistant" as const,
+          content: `Fake response from ${model}: ${userMessage}`,
+        },
+      },
+    ],
+    usage: {
+      prompt_tokens: 1,
+      completion_tokens: 1,
+      total_tokens: 2,
+    },
+  };
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        setTimeout(() => {
+          controller.enqueue(encoder.encode(JSON.stringify(payload)));
+          controller.close();
+        }, delayMs);
+      },
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+      },
+    },
+  );
 }
 
 interface Stage2Fixture {
@@ -972,6 +1015,167 @@ describe("gateway stage 2 runtime", () => {
     expect(response.headers["content-type"]).toContain("text/event-stream");
     expect(response.body).toContain("data: ");
     expect(response.body).toContain("data: [DONE]");
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("allows concurrent chat requests by loading another worker instance", async () => {
+    const fixture = await createStage2Fixture({
+      runtimeOverrides: {
+        maxWorkersPerModel: 2,
+      },
+    });
+    const runtime = fixture.runtime as unknown as {
+      fetchWorkerResponse: (
+        worker: unknown,
+        endpoint: string,
+        payload: { messages?: Array<{ content?: unknown }> },
+      ) => Promise<Response>;
+    };
+
+    runtime.fetchWorkerResponse = async (_worker, endpoint, payload) => {
+      if (endpoint !== "/v1/chat/completions") {
+        throw new Error(`Unexpected endpoint: ${endpoint}`);
+      }
+
+      const messageText = String(payload.messages?.[0]?.content ?? "");
+      const delayMs = messageText.includes("first") ? 600 : 75;
+      return createDelayedChatResponse(fixtureModelArtifact.id, messageText, delayMs);
+    };
+
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    let firstCompleted = false;
+    const firstRequest = gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "first request" }],
+      },
+    });
+    firstRequest.then(() => {
+      firstCompleted = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const secondResponse = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "second request" }],
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(firstCompleted).toBe(false);
+
+    const firstResponse = await firstRequest;
+    expect(firstResponse.statusCode).toBe(200);
+    expect(firstCompleted).toBe(true);
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("queues chat requests that arrive after the per-model worker limit", async () => {
+    const fixture = await createStage2Fixture({
+      runtimeOverrides: {
+        maxWorkersPerModel: 2,
+      },
+    });
+    const runtime = fixture.runtime as unknown as {
+      fetchWorkerResponse: (
+        worker: unknown,
+        endpoint: string,
+        payload: { messages?: Array<{ content?: unknown }> },
+      ) => Promise<Response>;
+    };
+
+    runtime.fetchWorkerResponse = async (_worker, endpoint, payload) => {
+      if (endpoint !== "/v1/chat/completions") {
+        throw new Error(`Unexpected endpoint: ${endpoint}`);
+      }
+
+      const messageText = String(payload.messages?.[0]?.content ?? "");
+      const delayMs = messageText.includes("third") ? 75 : 600;
+      return createDelayedChatResponse(fixtureModelArtifact.id, messageText, delayMs);
+    };
+
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const firstRequest = gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "first request" }],
+      },
+    });
+
+    const secondRequest = gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "second request" }],
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const thirdRequest = gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "third request" }],
+      },
+    });
+
+    const thirdEarlyResult = await Promise.race([
+      thirdRequest.then(() => "resolved" as const),
+      new Promise<"pending">((resolve) => {
+        setTimeout(() => resolve("pending"), 100);
+      }),
+    ]);
+    expect(thirdEarlyResult).toBe("pending");
+
+    const [firstResponse, secondResponse, thirdResponse] = await Promise.all([
+      firstRequest,
+      secondRequest,
+      thirdRequest,
+    ]);
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(thirdResponse.statusCode).toBe(200);
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });
