@@ -426,11 +426,8 @@ export function App() {
           <section className="side-panel">
             <span className="section-label">Gateway</span>
             <div className="status-chip">{shellState.phase.replaceAll("_", " ")}</div>
-            <p>{shellState.message}</p>
-            <div className="progress-track">
-              <div className="progress-fill" style={{ width: `${shellState.progress}%` }} />
-            </div>
-            <small>Last event: {formatClock(shellState.lastEventAt)}</small>
+            {shellState.message ? <p>{shellState.message}</p> : null}
+            <small className="gateway-last-event">Last event: {formatClock(shellState.lastEventAt)}</small>
           </section>
         </aside>
 

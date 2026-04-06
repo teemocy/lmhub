@@ -613,7 +613,7 @@ export class GatewayManager extends EventEmitter {
       this.updateState({
         phase: "connected",
         progress: 100,
-        message: "Desktop shell connected to the live model runtime.",
+        message: "",
         lastError: null,
       });
     } catch (error) {
