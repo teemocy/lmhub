@@ -280,12 +280,16 @@ function getChatSettings(metadata: Record<string, unknown> | undefined): ChatSet
   }
 
   const record = rawSettings as Record<string, unknown>;
+  const temperature = getOptionalNumber(record.temperature, 0, 2);
+  const topP = getOptionalNumber(record.topP ?? record.top_p, 0, 1);
+  const maxOutputTokens = getOptionalNumber(record.maxOutputTokens, 1);
+  const maxMessagesInContext = getOptionalNumber(record.maxMessagesInContext, 1);
 
   return {
-    temperature: getOptionalNumber(record.temperature, 0, 2),
-    topP: getOptionalNumber(record.topP ?? record.top_p, 0, 1),
-    maxOutputTokens: getOptionalNumber(record.maxOutputTokens, 1),
-    maxMessagesInContext: getOptionalNumber(record.maxMessagesInContext, 1),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(topP !== undefined ? { topP } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(maxMessagesInContext !== undefined ? { maxMessagesInContext } : {}),
   };
 }
 
