@@ -351,6 +351,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const sessionListRef = useRef<HTMLDivElement | null>(null);
+  const selectedModelSessionIdRef = useRef<string | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [sessions, activeSessionId],
@@ -413,6 +414,27 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   }, [models]);
 
   useEffect(() => {
+    if (!activeSessionId) {
+      selectedModelSessionIdRef.current = null;
+      return;
+    }
+
+    if (!activeSession) {
+      return;
+    }
+
+    if (selectedModelSessionIdRef.current === activeSessionId) {
+      return;
+    }
+
+    selectedModelSessionIdRef.current = activeSessionId;
+
+    if (activeSession.modelId && models.some((model) => model.id === activeSession.modelId)) {
+      setSelectedModelId(activeSession.modelId);
+    }
+  }, [activeSession, activeSessionId, models]);
+
+  useEffect(() => {
     if (!activeSession) {
       setSessionSettings(createEmptyChatSessionSettingsState());
       setSettingsDraft(createEmptyChatSessionSettingsState());
@@ -420,14 +442,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     }
 
     const nextSettings = getChatSessionSettingsState(activeSession);
-
-    if (activeSession.modelId && models.some((model) => model.id === activeSession.modelId)) {
-      setSelectedModelId(activeSession.modelId);
-    }
-
     setSessionSettings(nextSettings);
     setSettingsDraft(nextSettings);
-  }, [activeSession, models]);
+  }, [activeSession]);
 
   useEffect(() => {
     if (shellState.phase !== "connected") {
