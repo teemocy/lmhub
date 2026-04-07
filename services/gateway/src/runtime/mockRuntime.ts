@@ -75,6 +75,7 @@ interface ModelStateEventOptions {
 
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH = "stage1-mock";
+const DEFAULT_UBATCH_SIZE = 512;
 const DEFAULT_BATCH_SIZE = 3_072;
 const MOCK_RESIDENT_MEMORY_BYTES = 2_147_483_648;
 const MOCK_GPU_MEMORY_BYTES = 1_073_741_824;
@@ -198,8 +199,23 @@ function hasRuntimeAffectingModelConfigChanges(
     input.batchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
     input.capabilityOverrides !== undefined
   );
+}
+
+function validateBatchSize(batchSize: number | undefined): void {
+  if (batchSize === undefined) {
+    return;
+  }
+
+  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      400,
+    );
+  }
 }
 
 function normalizeAssistantContent(content: unknown): ChatMessage["content"] {
@@ -1187,6 +1203,8 @@ export class MockGatewayRuntime {
       throw new Error(`Unknown model: ${modelId}`);
     }
 
+    validateBatchSize(input.batchSize);
+
     const current = this.getDesktopModelRecord(resolvedModelId);
     if (current.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
       throw new GatewayRequestError(
@@ -1205,6 +1223,9 @@ export class MockGatewayRuntime {
       ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
       ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
       ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
+      ...(input.flashAttentionType !== undefined
+        ? { flashAttentionType: input.flashAttentionType }
+        : {}),
       ...(input.capabilityOverrides !== undefined
         ? {
             capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides),
@@ -1557,6 +1578,7 @@ export class MockGatewayRuntime {
       batchSize: existing?.batchSize ?? DEFAULT_BATCH_SIZE,
       gpuLayers: existing?.gpuLayers ?? 20,
       parallelSlots: existing?.parallelSlots,
+      flashAttentionType: existing?.flashAttentionType ?? "auto",
       quantization: existing?.quantization ?? "Q4_K_M",
       architecture: existing?.architecture ?? "llama",
       tokenizer: existing?.tokenizer ?? "gpt2",

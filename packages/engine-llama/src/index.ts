@@ -22,6 +22,7 @@ import {
 } from "@localhub/engine-core";
 import type {
   CapabilitySet,
+  FlashAttentionType,
   ModelArtifact,
   ModelProfile,
 } from "@localhub/shared-contracts/foundation-models";
@@ -45,6 +46,7 @@ const LLAMA_CPP_ENGINE_TYPE = "llama.cpp";
 const LLAMA_CPP_BINARY_CANDIDATES = ["llama-server", "server"] as const;
 const DEFAULT_FAKE_VERSION_TAG = "stage1-fixture";
 const DEFAULT_FAKE_BASE_PORT = 46_000;
+const DEFAULT_UBATCH_SIZE = 512;
 const DEFAULT_BATCH_SIZE = 3_072;
 const PROMPT_CACHE_DIRNAME = "prompt-caches";
 
@@ -113,6 +115,15 @@ function getBatchSize(profile: ModelProfile): number {
   }
 
   return DEFAULT_BATCH_SIZE;
+}
+
+function getFlashAttentionType(profile: ModelProfile): FlashAttentionType {
+  const overrideValue = profile.parameterOverrides.flashAttentionType;
+  if (overrideValue === "enabled" || overrideValue === "disabled" || overrideValue === "auto") {
+    return overrideValue;
+  }
+
+  return "auto";
 }
 
 function getParallelSlots(profile: ModelProfile): number | undefined {
@@ -188,6 +199,8 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
     String(getContextLength(input.artifact, input.profile)),
     "--batch-size",
     String(getBatchSize(input.profile)),
+    "--ubatch-size",
+    String(DEFAULT_UBATCH_SIZE),
   ];
 
   const gpuLayers = getGpuLayers(input.profile);
@@ -199,6 +212,16 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
   if (parallelSlots !== undefined) {
     args.push("--parallel", String(parallelSlots));
   }
+
+  const flashAttentionType = getFlashAttentionType(input.profile);
+  args.push(
+    "--flash-attn",
+    flashAttentionType === "enabled"
+      ? "on"
+      : flashAttentionType === "disabled"
+        ? "off"
+        : "auto",
+  );
 
   if (input.runtimeKey.role === "embeddings") {
     args.push("--embedding");

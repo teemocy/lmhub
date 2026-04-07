@@ -92,6 +92,7 @@
       "contextLength": 8192,
       "batchSize": 3072,
       "gpuLayers": 99,
+      "flashAttentionType": "auto",
       "parallelSlots": 8,
       "ttlMs": 900000
     },

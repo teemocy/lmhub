@@ -1,3 +1,4 @@
+import type { FlashAttentionType } from "../models.js";
 import type { CapabilitySet } from "./capabilities.js";
 import type { EngineFamily } from "./engine.js";
 import type { ProviderId } from "./providers.js";
@@ -95,6 +96,7 @@ export interface ModelParameterOverrides {
   batchSize?: number;
   gpuLayers?: number;
   parallelSlots?: number;
+  flashAttentionType?: FlashAttentionType;
   tensorSplit?: number[];
   temperature?: number;
   topP?: number;

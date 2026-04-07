@@ -46,6 +46,7 @@ type CapabilityKey =
   | "promptCache";
 
 type CapabilityToggleValue = "inherit" | "enabled" | "disabled";
+type FlashAttentionValue = "auto" | "enabled" | "disabled";
 
 type ModelDetailTab = "details" | "config";
 
@@ -102,6 +103,17 @@ const formatTtl = (value: number): string => {
 
 const humanize = (value: string): string =>
   value.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+
+const formatFlashAttentionType = (value?: FlashAttentionValue): string => {
+  switch (value) {
+    case "enabled":
+      return "Enabled";
+    case "disabled":
+      return "Disabled";
+    default:
+      return "Auto";
+  }
+};
 
 const describeModel = (model: DesktopModelRecord): string => {
   const facets = [model.role, model.format, model.architecture, model.quantization]
@@ -274,6 +286,7 @@ export function ModelsScreen({
     batchSize: "",
     gpuLayers: "",
     parallelSlots: "",
+    flashAttentionType: "auto" as FlashAttentionValue,
     capabilityOverrides: createCapabilityDraft({}),
   });
 
@@ -344,6 +357,8 @@ export function ModelsScreen({
       batchSize: String(selectedModel.batchSize ?? 3072),
       gpuLayers: selectedModel.gpuLayers ? String(selectedModel.gpuLayers) : "",
       parallelSlots: selectedModel.parallelSlots ? String(selectedModel.parallelSlots) : "",
+      flashAttentionType:
+        (selectedModel.flashAttentionType as FlashAttentionValue | undefined) ?? "auto",
       capabilityOverrides,
     });
   }, [selectedModel?.id]);
@@ -611,21 +626,26 @@ export function ModelsScreen({
         1,
         Number.parseInt(configDraft.defaultTtlMinutes, 10) || 15,
       );
+      const batchSize = configDraft.batchSize.trim()
+        ? Number.parseInt(configDraft.batchSize, 10)
+        : 3072;
+      if (batchSize % 512 !== 0) {
+        throw new Error("Batch size must be a multiple of 512.");
+      }
       const result = await onUpdateModelConfig(selectedModel.id, {
         pinned: configDraft.pinned,
         defaultTtlMs: defaultTtlMinutes * 60_000,
         ...(configDraft.contextLength.trim()
           ? { contextLength: Number.parseInt(configDraft.contextLength, 10) }
           : {}),
-        ...(configDraft.batchSize.trim()
-          ? { batchSize: Number.parseInt(configDraft.batchSize, 10) }
-          : {}),
+        batchSize,
         ...(configDraft.gpuLayers.trim()
           ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
           : {}),
         ...(configDraft.parallelSlots.trim()
           ? { parallelSlots: Number.parseInt(configDraft.parallelSlots, 10) }
           : {}),
+        flashAttentionType: configDraft.flashAttentionType,
         capabilityOverrides: toCapabilityOverrides(configDraft.capabilityOverrides),
       });
       setConfigDraft({
@@ -635,6 +655,8 @@ export function ModelsScreen({
         batchSize: String(result.model.batchSize ?? 3072),
         gpuLayers: result.model.gpuLayers ? String(result.model.gpuLayers) : "",
         parallelSlots: result.model.parallelSlots ? String(result.model.parallelSlots) : "",
+        flashAttentionType:
+          (result.model.flashAttentionType as FlashAttentionValue | undefined) ?? "auto",
         capabilityOverrides: createCapabilityDraft(result.model.capabilityOverrides),
       });
       setFeedback({
@@ -887,6 +909,10 @@ export function ModelsScreen({
                     <dd>{selectedModel.parallelSlots ?? "Auto"}</dd>
                   </div>
                   <div>
+                    <dt>Flash attention</dt>
+                    <dd>{formatFlashAttentionType(selectedModel.flashAttentionType)}</dd>
+                  </div>
+                  <div>
                     <dt>Engine version</dt>
                     <dd>{selectedModel.engineVersion ?? "Materializes on first preload"}</dd>
                   </div>
@@ -1093,7 +1119,8 @@ export function ModelsScreen({
                       <input
                         className="text-input"
                         disabled={!canSaveConfig}
-                        min="1"
+                        min="512"
+                        step="512"
                         onChange={(event) =>
                           setConfigDraft((current) => ({
                             ...current,
@@ -1103,10 +1130,6 @@ export function ModelsScreen({
                         type="number"
                         value={configDraft.batchSize}
                       />
-                      <p className="detail-meta-note">
-                        Maps to llama.cpp `--batch-size`; this raises the logical batch limit to
-                        3072.
-                      </p>
                     </label>
                     <label className="field-stack">
                       <span className="section-label">GPU layers</span>
@@ -1139,9 +1162,24 @@ export function ModelsScreen({
                         type="number"
                         value={configDraft.parallelSlots}
                       />
-                      <p className="detail-meta-note">
-                        Maps to llama.cpp `--parallel`; higher values can increase memory use.
-                      </p>
+                    </label>
+                    <label className="field-stack">
+                      <span className="section-label">Flash attention</span>
+                      <select
+                        className="text-input"
+                        disabled={!canSaveConfig}
+                        onChange={(event) =>
+                          setConfigDraft((current) => ({
+                            ...current,
+                            flashAttentionType: event.target.value as FlashAttentionValue,
+                          }))
+                        }
+                        value={configDraft.flashAttentionType}
+                      >
+                        <option value="auto">Auto</option>
+                        <option value="enabled">Enabled</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
                     </label>
                   </div>
 

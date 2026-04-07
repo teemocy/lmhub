@@ -66,6 +66,7 @@ import {
 } from "@localhub/shared-contracts";
 import type {
   CapabilitySet,
+  FlashAttentionType,
   ModelArtifact,
   ModelProfile,
 } from "@localhub/shared-contracts/foundation-models";
@@ -112,6 +113,7 @@ import {
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "../../../../packages/db/migrations");
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH_LENGTH = 12;
+const DEFAULT_UBATCH_SIZE = 512;
 const DEFAULT_BATCH_SIZE = 3_072;
 // Real `llama-server` startups can take a while on large GGUFs, so keep the
 // readiness window generous enough for local model loads.
@@ -708,6 +710,15 @@ function getEffectiveBatchSize(profile: ModelProfile): number {
   return DEFAULT_BATCH_SIZE;
 }
 
+function getEffectiveFlashAttentionType(profile: ModelProfile): FlashAttentionType {
+  const override = profile.parameterOverrides.flashAttentionType;
+  if (override === "enabled" || override === "disabled" || override === "auto") {
+    return override;
+  }
+
+  return "auto";
+}
+
 function getCreatedEpochSeconds(artifact: ModelArtifact): number {
   const timestamp = Date.parse(artifact.createdAt);
 
@@ -729,8 +740,23 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
     input.batchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
     input.capabilityOverrides !== undefined
   );
+}
+
+function validateBatchSize(batchSize: number | undefined): void {
+  if (batchSize === undefined) {
+    return;
+  }
+
+  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      400,
+    );
+  }
 }
 
 function getMissingArtifactMessage(artifact: ModelArtifact): string {
@@ -1107,6 +1133,7 @@ function toDesktopModelRecord(
   const artifactStatus = getArtifactStatus(stored.artifact);
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
   const batchSize = getEffectiveBatchSize(profile);
+  const flashAttentionType = getEffectiveFlashAttentionType(profile);
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1133,6 +1160,7 @@ function toDesktopModelRecord(
     ...(stored.artifact.quantization ? { quantization: stored.artifact.quantization } : {}),
     ...(contextLength !== undefined ? { contextLength } : {}),
     batchSize,
+    flashAttentionType,
     ...(stored.artifact.metadata.parameterCount !== undefined
       ? { parameterCount: stored.artifact.metadata.parameterCount }
       : {}),
@@ -1994,6 +2022,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
+    validateBatchSize(input.batchSize);
 
     if (
       hasRuntimeAffectingModelConfigChanges(input) &&
@@ -2017,6 +2046,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
         ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
         ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
+        ...(input.flashAttentionType !== undefined
+          ? { flashAttentionType: input.flashAttentionType }
+          : {}),
       },
       ...(input.capabilityOverrides !== undefined
         ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }

@@ -354,6 +354,7 @@ describe("gateway skeleton", () => {
         contextLength: 4096,
         batchSize: 3072,
         gpuLayers: 16,
+        flashAttentionType: "enabled",
         parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
@@ -372,6 +373,7 @@ describe("gateway skeleton", () => {
         contextLength: 4096,
         batchSize: 3072,
         gpuLayers: 16,
+        flashAttentionType: "enabled",
         parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
