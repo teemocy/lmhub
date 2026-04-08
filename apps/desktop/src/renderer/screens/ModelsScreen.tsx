@@ -761,28 +761,6 @@ export function ModelsScreen({
 
   return (
     <section className="screen-stack">
-      <article className="hero-card model-runtime-hero">
-        <div className="model-runtime-hero-copy">
-          <span className="section-label">Model library</span>
-          <h3>Local model readiness</h3>
-        </div>
-        <div className="hero-actions hero-actions-inline">
-          <button className="primary-button" onClick={() => void handlePickImport()} type="button">
-            Pick local GGUF
-          </button>
-          <div className="hero-stat-grid">
-            <div className="hero-stat">
-              <span className="section-label">Registered</span>
-              <strong>{models.length}</strong>
-            </div>
-            <div className="hero-stat">
-              <span className="section-label">Ready</span>
-              <strong>{models.filter((model) => model.state === "ready").length}</strong>
-            </div>
-          </div>
-        </div>
-      </article>
-
       {feedback ? (
         <article
           className={
