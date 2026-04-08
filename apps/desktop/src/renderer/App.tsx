@@ -235,6 +235,8 @@ export function App() {
   const modelSummaries = modelLibrary.map((model) => toModelSummary(model));
   const chatModelSummaries = modelSummaries.filter((model) => model.capabilities.includes("chat"));
   const activeEngineCount = engines.filter((engine) => engine.active).length;
+  const registeredModelCount = modelLibrary.length;
+  const readyModelCount = modelLibrary.filter((model) => model.state === "ready").length;
 
   const requestRefresh = () => {
     startTransition(() => {
@@ -381,7 +383,7 @@ export function App() {
       <div className="app-shell">
         <header className="app-header">
           <div className="app-header-brand">
-            <h1>LLM Hub</h1>
+            <h1>LM Hub</h1>
           </div>
           <div className="app-header-aside">
             <p className="app-header-description">
@@ -396,10 +398,6 @@ export function App() {
               <div>
                 <span className="section-label">Started</span>
                 <strong>{formatClock(shellState.startedAt)}</strong>
-              </div>
-              <div>
-                <span className="section-label">Registered models</span>
-                <strong>{modelLibrary.length}</strong>
               </div>
               <div>
                 <span className="section-label">Active engines</span>
@@ -424,10 +422,24 @@ export function App() {
           </nav>
 
           <section className="side-panel">
-            <span className="section-label">Gateway</span>
-            <div className="status-chip">{shellState.phase.replaceAll("_", " ")}</div>
+            <div className="gateway-panel-head">
+              <span className="section-label">Gateway</span>
+              <div className="status-chip">{shellState.phase.replaceAll("_", " ")}</div>
+            </div>
+            <div className="gateway-panel-stats" aria-label="Gateway summary">
+              <div className="side-panel-stat">
+                <span className="gateway-stat-label">Registered</span>
+                <strong>{registeredModelCount}</strong>
+              </div>
+              <div className="side-panel-stat">
+                <span className="gateway-stat-label">Ready</span>
+                <strong>{readyModelCount}</strong>
+              </div>
+            </div>
             {shellState.message ? <p>{shellState.message}</p> : null}
-            <small className="gateway-last-event">Last event: {formatClock(shellState.lastEventAt)}</small>
+            <small className="gateway-last-event">
+              Last event: {formatClock(shellState.lastEventAt)}
+            </small>
           </section>
         </aside>
 

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
-import { Readable } from "node:stream";
 
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
@@ -16,7 +16,7 @@ import {
   desktopModelConfigUpdateRequestSchema,
   embeddingsRequestSchema,
 } from "@localhub/shared-contracts";
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { WebSocket } from "ws";
 
 import type { GatewayConfig } from "../config.js";
@@ -66,6 +66,70 @@ export async function stopGatewayServices(
   ]);
   await rm(discoveryFile, { force: true });
 }
+
+export const pipeStreamingResponse = async (
+  request: FastifyRequest,
+  reply: FastifyReply,
+  stream: globalThis.ReadableStream<Uint8Array>,
+): Promise<void> => {
+  const disconnectError = new Error("Client disconnected.");
+  const reader = stream.getReader();
+  let cleanedUp = false;
+
+  const cleanup = () => {
+    if (cleanedUp) {
+      return;
+    }
+
+    cleanedUp = true;
+    request.raw.off("aborted", handleDisconnect);
+    request.raw.off("close", handleDisconnect);
+    reply.raw.off("close", handleDisconnect);
+  };
+
+  const handleDisconnect = () => {
+    if (cleanedUp || reply.raw.destroyed || reply.raw.writableEnded) {
+      return;
+    }
+
+    void reader.cancel(disconnectError).catch(() => undefined);
+    if (!reply.raw.destroyed) {
+      reply.raw.destroy(disconnectError);
+    }
+  };
+
+  request.raw.once("aborted", handleDisconnect);
+  request.raw.once("close", handleDisconnect);
+  reply.raw.once("close", handleDisconnect);
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      if (!reply.raw.write(Buffer.from(value))) {
+        await Promise.race([once(reply.raw, "drain"), once(reply.raw, "close")]);
+      }
+    }
+
+    if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+      reply.raw.end();
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === disconnectError.message) {
+      return;
+    }
+
+    if (!reply.raw.destroyed) {
+      reply.raw.destroy(error instanceof Error ? error : new Error("Streaming response failed."));
+    }
+  } finally {
+    cleanup();
+    reader.releaseLock();
+  }
+};
 
 function createApp(): FastifyInstance {
   return Fastify({
@@ -221,7 +285,7 @@ async function registerPublicApp(
         reply.raw.setHeader("cache-control", "no-cache, no-transform");
         reply.raw.setHeader("connection", "keep-alive");
         reply.raw.setHeader("x-request-id", request.id);
-        Readable.fromWeb(result.stream as globalThis.ReadableStream<Uint8Array>).pipe(reply.raw);
+        pipeStreamingResponse(request, reply, result.stream as globalThis.ReadableStream<Uint8Array>);
         return reply;
       }
 
@@ -512,7 +576,7 @@ async function registerControlApp(
     reply.raw.setHeader("x-localhub-session-id", result.session.id);
     reply.raw.setHeader("x-localhub-user-message-id", result.userMessageId);
     reply.raw.setHeader("x-localhub-assistant-message-id", result.assistantMessageId);
-    Readable.fromWeb(result.stream as globalThis.ReadableStream<Uint8Array>).pipe(reply.raw);
+    pipeStreamingResponse(request, reply, result.stream as globalThis.ReadableStream<Uint8Array>);
     return reply;
   });
 

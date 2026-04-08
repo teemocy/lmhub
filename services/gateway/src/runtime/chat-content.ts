@@ -11,6 +11,7 @@ type DescribedChatContent = {
 };
 
 const normalizeText = (value: string): string => value.replace(/\s+/g, " ").trim();
+const EAST_ASIAN_TOKEN_REGEX = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
 
 const isTextPart = (
   part: OpenAiMessageContentPart,
@@ -70,9 +71,23 @@ export function formatChatContentSummary(content: ChatContent): string {
   return "";
 }
 
+export function estimateTextTokens(value: string | string[]): number {
+  const text = Array.isArray(value) ? value.join(" ") : value;
+  const normalized = normalizeText(text);
+  if (normalized.length === 0) {
+    return 1;
+  }
+
+  const eastAsianChars = normalized.match(EAST_ASIAN_TOKEN_REGEX) ?? [];
+  const remainingText = normalized.replace(EAST_ASIAN_TOKEN_REGEX, "");
+  const remainingChars = [...remainingText.replace(/\s+/g, "")].length;
+
+  return Math.max(1, eastAsianChars.length + Math.ceil(remainingChars / 4));
+}
+
 export function countChatContentTokens(content: ChatContent): number {
   const summary = formatChatContentSummary(content);
-  return summary.length > 0 ? summary.split(/\s+/).length : 1;
+  return estimateTextTokens(summary);
 }
 
 export function createChatSessionTitle(content: ChatContent): string {

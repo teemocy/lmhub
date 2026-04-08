@@ -232,16 +232,15 @@ function normalizeCapabilityOverrides(
   }
 
   const normalized: NonNullable<ModelProfile["capabilityOverrides"]> = {};
-  const orderedKeys: Array<keyof CapabilitySet> = [
+  const orderedKeys: Array<Exclude<keyof CapabilitySet, "promptCache">> = [
     "chat",
     "embeddings",
-    "tools",
-    "streaming",
     "vision",
     "audioTranscription",
     "audioSpeech",
     "rerank",
-    "promptCache",
+    "tools",
+    "streaming",
   ];
 
   for (const key of orderedKeys) {
@@ -269,7 +268,7 @@ function applyCapabilityOverrides(
       normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
     audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
     rerank: normalizedOverrides.rerank ?? capabilities.rerank,
-    promptCache: normalizedOverrides.promptCache ?? capabilities.promptCache,
+    promptCache: true,
   };
 }
 
@@ -285,8 +284,9 @@ function getRoleForProfile(
   profile: ModelProfile | undefined,
 ): RuntimeRole {
   const capabilities = getEffectiveCapabilities(artifact, profile);
+  const normalizedOverrides = normalizeCapabilityOverrides(profile?.capabilityOverrides);
 
-  if (profile?.capabilityOverrides && Object.keys(profile.capabilityOverrides).length > 0) {
+  if (Object.keys(normalizedOverrides).length > 0) {
     return deriveRole(capabilities);
   }
 

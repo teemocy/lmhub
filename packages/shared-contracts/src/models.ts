@@ -40,7 +40,9 @@ export const capabilitySetSchema = z.object({
   promptCache: z.boolean(),
 });
 
-export const capabilityOverridesSchema = capabilitySetSchema.partial();
+export const capabilityOverridesSchema = capabilitySetSchema.omit({ promptCache: true }).partial();
+
+export const flashAttentionTypeSchema = z.enum(["auto", "enabled", "disabled"]);
 
 export const ggufMetadataSchema = z.object({
   schemaVersion: schemaVersionSchema.default(CONTRACT_SCHEMA_VERSION),
@@ -95,6 +97,7 @@ export const modelProfileSchema = z.object({
 
 export type CapabilitySet = z.infer<typeof capabilitySetSchema>;
 export type CapabilityOverrides = z.infer<typeof capabilityOverridesSchema>;
+export type FlashAttentionType = z.infer<typeof flashAttentionTypeSchema>;
 export type GgufMetadata = z.infer<typeof ggufMetadataSchema>;
 export type ModelArtifact = z.infer<typeof modelArtifactSchema>;
 export type ModelProfile = z.infer<typeof modelProfileSchema>;

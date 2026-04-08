@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LOCAL_ARTIFACT_LAYOUT_SPEC } from "@localhub/shared-contracts";
@@ -21,11 +21,11 @@ afterEach(() => {
 
 describe("platform helpers", () => {
   it("resolves deterministic development app paths", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-paths-"));
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-paths-"));
     tempDirectories.push(root);
 
     const paths = resolveAppPaths({ cwd: root, environment: "development" });
-    expect(paths.supportRoot).toContain(path.join(".local", "local-llm-hub", "dev"));
+    expect(paths.supportRoot).toContain(path.join(".local", "lm-hub", "dev"));
     expect(paths.databaseFile.endsWith("gateway.sqlite")).toBe(true);
     expect(paths.promptCachesDir).toContain(
       LOCAL_ARTIFACT_LAYOUT_SPEC.directories.promptCaches.relativePath,
@@ -37,8 +37,48 @@ describe("platform helpers", () => {
     expect(paths.promptCacheDir).toBe(paths.promptCachesDir);
   });
 
+  it("migrates legacy development support roots to the new path", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-migrate-dev-"));
+    tempDirectories.push(root);
+
+    const legacySupportRoot = path.join(root, ".local", "local-llm-hub", "dev");
+    const preferredSupportRoot = path.join(root, ".local", "lm-hub", "dev");
+
+    mkdirSync(legacySupportRoot, { recursive: true });
+    writeFileSync(path.join(legacySupportRoot, "legacy-state.json"), '{"migrated":true}', "utf8");
+
+    const paths = resolveAppPaths({ cwd: root, environment: "development" });
+
+    expect(paths.supportRoot).toBe(preferredSupportRoot);
+    expect(existsSync(preferredSupportRoot)).toBe(true);
+    expect(existsSync(path.join(preferredSupportRoot, "legacy-state.json"))).toBe(true);
+    expect(existsSync(legacySupportRoot)).toBe(false);
+  });
+
+  it("migrates legacy packaged support roots to the new path", () => {
+    const homeDir = mkdtempSync(path.join(os.tmpdir(), "lm-hub-migrate-packaged-"));
+    tempDirectories.push(homeDir);
+
+    const legacySupportRoot = path.join(homeDir, "Library", "Application Support", "Local LLM Hub");
+    const preferredSupportRoot = path.join(homeDir, "Library", "Application Support", "LM Hub");
+
+    mkdirSync(legacySupportRoot, { recursive: true });
+    writeFileSync(path.join(legacySupportRoot, "legacy-state.json"), '{"migrated":true}', "utf8");
+
+    const paths = resolveAppPaths({
+      environment: "packaged",
+      homeDir,
+      platform: "darwin",
+    });
+
+    expect(paths.supportRoot).toBe(preferredSupportRoot);
+    expect(existsSync(preferredSupportRoot)).toBe(true);
+    expect(existsSync(path.join(preferredSupportRoot, "legacy-state.json"))).toBe(true);
+    expect(existsSync(legacySupportRoot)).toBe(false);
+  });
+
   it("provisions the shared artifact layout directories", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-layout-"));
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-layout-"));
     tempDirectories.push(root);
 
     const paths = ensureAppPaths(
@@ -70,7 +110,7 @@ describe("platform helpers", () => {
   });
 
   it("loads desktop config with a persisted control auth header preference", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-desktop-config-"));
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-desktop-config-"));
     tempDirectories.push(root);
     const filePath = path.join(root, "desktop.json");
 
@@ -91,7 +131,7 @@ describe("platform helpers", () => {
   });
 
   it("creates parent directories when writing config files", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-config-"));
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-config-"));
     tempDirectories.push(root);
     const filePath = path.join(root, "config", "gateway.json");
 
@@ -108,7 +148,7 @@ describe("platform helpers", () => {
   });
 
   it("round-trips the discovery file", () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-discovery-"));
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-discovery-"));
     tempDirectories.push(root);
     const filePath = path.join(root, "gateway-discovery.json");
 

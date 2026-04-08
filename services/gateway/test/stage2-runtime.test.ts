@@ -127,6 +127,76 @@ function createDelayedChatResponse(model: string, userMessage: string, delayMs: 
   );
 }
 
+function createReasoningChatStreamResponse(model: string): Response {
+  const encoder = new TextEncoder();
+  const created = Math.floor(Date.now() / 1000);
+  const completionId = `chatcmpl_${created}_reasoning`;
+  const chunks = [
+    {
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: "assistant" as const }, finish_reason: null }],
+    },
+    {
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            reasoning_content: "counterrevolutionary hyperparameterization metamorphosis",
+          },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            content: "finalization",
+          },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      id: completionId,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    },
+  ];
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+      },
+    },
+  );
+}
+
 interface Stage2Fixture {
   appPaths: ReturnType<typeof resolveAppPaths>;
   artifactPaths: Record<string, string>;
@@ -926,6 +996,8 @@ describe("gateway stage 2 runtime", () => {
           endpoint: "/v1/chat/completions",
           modelId: fixtureModelArtifact.id,
           statusCode: 200,
+          completionTokens: expect.any(Number),
+          tokensPerSecond: expect.any(Number),
         }),
       ]),
     );
@@ -1019,7 +1091,69 @@ describe("gateway stage 2 runtime", () => {
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });
 
-  it("allows concurrent chat requests by loading another worker instance", async () => {
+  it("counts reasoning text in streamed chat api logs", async () => {
+    const fixture = await createStage2Fixture();
+    const runtime = fixture.runtime as unknown as {
+      fetchWorkerResponse: (
+        worker: unknown,
+        endpoint: string,
+        payload: { messages?: Array<{ content?: unknown }> },
+      ) => Promise<Response>;
+    };
+
+    runtime.fetchWorkerResponse = async (_worker, endpoint) => {
+      if (endpoint !== "/v1/chat/completions") {
+        throw new Error(`Unexpected endpoint: ${endpoint}`);
+      }
+
+      return createReasoningChatStreamResponse(fixtureModelArtifact.id);
+    };
+
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        stream: true,
+        messages: [{ role: "user", content: "Explain your reasoning." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const reopened = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const chat = new ChatRepository(reopened.database);
+    const log = chat
+      .listRecentApiLogs()
+      .find(
+        (entry) => entry.endpoint === "/v1/chat/completions" && entry.modelId === fixtureModelArtifact.id,
+      );
+    reopened.database.close();
+
+    expect(log).toEqual(
+      expect.objectContaining({
+        completionTokens: 17,
+      }),
+    );
+    expect(log?.tokensPerSecond).toBeGreaterThan(0);
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("reuses a busy worker for concurrent chat requests", async () => {
     const fixture = await createStage2Fixture({
       runtimeOverrides: {
         maxWorkersPerModel: 2,
@@ -1031,6 +1165,16 @@ describe("gateway stage 2 runtime", () => {
         endpoint: string,
         payload: { messages?: Array<{ content?: unknown }> },
       ) => Promise<Response>;
+    };
+
+    let loadWorkerCalls = 0;
+    const runtimeAny = fixture.runtime as unknown as {
+      loadWorker: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalLoadWorker = runtimeAny.loadWorker.bind(fixture.runtime);
+    runtimeAny.loadWorker = async (...args: unknown[]) => {
+      loadWorkerCalls += 1;
+      return originalLoadWorker(...args);
     };
 
     runtime.fetchWorkerResponse = async (_worker, endpoint, payload) => {
@@ -1082,6 +1226,7 @@ describe("gateway stage 2 runtime", () => {
 
     expect(secondResponse.statusCode).toBe(200);
     expect(firstCompleted).toBe(false);
+    expect(loadWorkerCalls).toBe(1);
 
     const firstResponse = await firstRequest;
     expect(firstResponse.statusCode).toBe(200);

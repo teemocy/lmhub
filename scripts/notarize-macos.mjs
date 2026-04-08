@@ -4,7 +4,7 @@ import path from "node:path";
 import process from "node:process";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const appPath = process.argv[2] ?? path.join(repoRoot, "release", "macos", "Local LLM Hub.app");
+const appPath = process.argv[2] ?? path.join(repoRoot, "release", "macos", "LM Hub.app");
 
 if (process.platform !== "darwin") {
   throw new Error("notarize-macos.mjs must be run on macOS.");

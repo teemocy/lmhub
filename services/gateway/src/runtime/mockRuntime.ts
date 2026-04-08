@@ -75,18 +75,19 @@ interface ModelStateEventOptions {
 
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH = "stage1-mock";
+const DEFAULT_UBATCH_SIZE = 512;
+const DEFAULT_BATCH_SIZE = 3_072;
 const MOCK_RESIDENT_MEMORY_BYTES = 2_147_483_648;
 const MOCK_GPU_MEMORY_BYTES = 1_073_741_824;
 const CAPABILITY_OVERRIDE_KEYS = [
   "chat",
   "embeddings",
-  "tools",
-  "streaming",
   "vision",
   "audioTranscription",
   "audioSpeech",
   "rerank",
-  "promptCache",
+  "tools",
+  "streaming",
 ] as const;
 const CAPABILITY_LABELS = {
   chat: "chat",
@@ -137,7 +138,9 @@ function createModel(id: string, created: number, capabilities: string[]): Runti
     owned_by: "localhub",
     loaded: false,
     state: "Idle",
-    capabilities,
+    capabilities: capabilities.includes(CAPABILITY_LABELS.promptCache)
+      ? capabilities
+      : [...capabilities, CAPABILITY_LABELS.promptCache],
   };
 }
 
@@ -179,9 +182,12 @@ function applyCapabilityOverridesToLabels(
     }
   }
 
-  return CAPABILITY_OVERRIDE_KEYS.map((key) => CAPABILITY_LABELS[key]).filter((label) =>
-    current.has(label),
-  );
+  return [
+    ...CAPABILITY_OVERRIDE_KEYS.map((key) => CAPABILITY_LABELS[key]).filter((label) =>
+      current.has(label),
+    ),
+    CAPABILITY_LABELS.promptCache,
+  ];
 }
 
 function createTraceId(traceId?: string): string {
@@ -194,9 +200,26 @@ function hasRuntimeAffectingModelConfigChanges(
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
     input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
     input.capabilityOverrides !== undefined
   );
+}
+
+function validateBatchSize(batchSize: number | undefined): void {
+  if (batchSize === undefined) {
+    return;
+  }
+
+  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      400,
+    );
+  }
 }
 
 function normalizeAssistantContent(content: unknown): ChatMessage["content"] {
@@ -280,12 +303,16 @@ function getChatSettings(metadata: Record<string, unknown> | undefined): ChatSet
   }
 
   const record = rawSettings as Record<string, unknown>;
+  const temperature = getOptionalNumber(record.temperature, 0, 2);
+  const topP = getOptionalNumber(record.topP ?? record.top_p, 0, 1);
+  const maxOutputTokens = getOptionalNumber(record.maxOutputTokens, 1);
+  const maxMessagesInContext = getOptionalNumber(record.maxMessagesInContext, 1);
 
   return {
-    temperature: getOptionalNumber(record.temperature, 0, 2),
-    topP: getOptionalNumber(record.topP ?? record.top_p, 0, 1),
-    maxOutputTokens: getOptionalNumber(record.maxOutputTokens, 1),
-    maxMessagesInContext: getOptionalNumber(record.maxMessagesInContext, 1),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(topP !== undefined ? { topP } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(maxMessagesInContext !== undefined ? { maxMessagesInContext } : {}),
   };
 }
 
@@ -1180,6 +1207,8 @@ export class MockGatewayRuntime {
       throw new Error(`Unknown model: ${modelId}`);
     }
 
+    validateBatchSize(input.batchSize);
+
     const current = this.getDesktopModelRecord(resolvedModelId);
     if (current.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
       throw new GatewayRequestError(
@@ -1195,7 +1224,12 @@ export class MockGatewayRuntime {
       ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
       ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
       ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+      ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
       ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+      ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
+      ...(input.flashAttentionType !== undefined
+        ? { flashAttentionType: input.flashAttentionType }
+        : {}),
       ...(input.capabilityOverrides !== undefined
         ? {
             capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides),
@@ -1545,7 +1579,10 @@ export class MockGatewayRuntime {
       pinned: existing?.pinned ?? false,
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
       contextLength: existing?.contextLength ?? 8192,
+      batchSize: existing?.batchSize ?? DEFAULT_BATCH_SIZE,
       gpuLayers: existing?.gpuLayers ?? 20,
+      parallelSlots: existing?.parallelSlots,
+      flashAttentionType: existing?.flashAttentionType ?? "auto",
       quantization: existing?.quantization ?? "Q4_K_M",
       architecture: existing?.architecture ?? "llama",
       tokenizer: existing?.tokenizer ?? "gpt2",

@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -8,8 +8,10 @@ import {
   runtimeEnvironmentSchema,
 } from "@localhub/shared-contracts";
 
-const APP_SUPPORT_SLUG = "local-llm-hub";
-const APP_SUPPORT_NAME = "Local LLM Hub";
+const APP_SUPPORT_SLUG = "lm-hub";
+const APP_SUPPORT_NAME = "LM Hub";
+const LEGACY_APP_SUPPORT_SLUG = "local-llm-hub";
+const LEGACY_APP_SUPPORT_NAME = "Local LLM Hub";
 
 export interface ResolveAppPathsOptions {
   cwd?: string;
@@ -39,16 +41,46 @@ export interface AppPaths {
   databaseFile: string;
 }
 
-function defaultPackagedSupportRoot(platform: NodeJS.Platform, homeDir: string): string {
+function localSupportRoot(cwd: string, slug: string, environment: "development" | "test"): string {
+  const environmentSlug = environment === "development" ? "dev" : "test";
+
+  return path.join(cwd, ".local", slug, environmentSlug);
+}
+
+function packagedSupportRoot(
+  platform: NodeJS.Platform,
+  homeDir: string,
+  appSupportName: string,
+  appSupportSlug: string,
+): string {
   if (platform === "darwin") {
-    return path.join(homeDir, "Library", "Application Support", APP_SUPPORT_NAME);
+    return path.join(homeDir, "Library", "Application Support", appSupportName);
   }
 
   if (platform === "win32") {
-    return path.join(homeDir, "AppData", "Roaming", APP_SUPPORT_NAME);
+    return path.join(homeDir, "AppData", "Roaming", appSupportName);
   }
 
-  return path.join(homeDir, ".config", APP_SUPPORT_SLUG);
+  return path.join(homeDir, ".config", appSupportSlug);
+}
+
+function migrateLegacySupportRoot(preferredRoot: string, legacyRoot: string): string {
+  if (preferredRoot === legacyRoot) {
+    return preferredRoot;
+  }
+
+  if (existsSync(preferredRoot) || !existsSync(legacyRoot)) {
+    return preferredRoot;
+  }
+
+  mkdirSync(path.dirname(preferredRoot), { recursive: true });
+
+  try {
+    renameSync(legacyRoot, preferredRoot);
+    return preferredRoot;
+  } catch {
+    return legacyRoot;
+  }
 }
 
 export function resolveAppPaths(options: ResolveAppPathsOptions = {}): AppPaths {
@@ -58,15 +90,19 @@ export function resolveAppPaths(options: ResolveAppPathsOptions = {}): AppPaths 
   const platform = options.platform ?? process.platform;
   const cwd = options.cwd ?? process.cwd();
   const homeDir = options.homeDir ?? os.homedir();
+  const preferredSupportRoot =
+    environment === "development" || environment === "test"
+      ? localSupportRoot(cwd, APP_SUPPORT_SLUG, environment)
+      : packagedSupportRoot(platform, homeDir, APP_SUPPORT_NAME, APP_SUPPORT_SLUG);
+  const legacySupportRoot =
+    environment === "development" || environment === "test"
+      ? localSupportRoot(cwd, LEGACY_APP_SUPPORT_SLUG, environment)
+      : packagedSupportRoot(platform, homeDir, LEGACY_APP_SUPPORT_NAME, LEGACY_APP_SUPPORT_SLUG);
 
   const supportRoot =
     options.supportRoot ??
     process.env.LOCAL_LLM_HUB_APP_SUPPORT_DIR ??
-    (environment === "development"
-      ? path.join(cwd, ".local", APP_SUPPORT_SLUG, "dev")
-      : environment === "test"
-        ? path.join(cwd, ".local", APP_SUPPORT_SLUG, "test")
-        : defaultPackagedSupportRoot(platform, homeDir));
+    migrateLegacySupportRoot(preferredSupportRoot, legacySupportRoot);
 
   const configDir = path.join(supportRoot, "config");
   const logsDir = path.join(supportRoot, "logs");

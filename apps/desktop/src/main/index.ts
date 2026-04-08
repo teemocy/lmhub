@@ -53,9 +53,11 @@ export type DesktopRuntimeContext = {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
+const APP_NAME = "LM Hub";
 
 const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
 const runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
+app.setName(APP_NAME);
 let desktopConfig = loadDesktopConfig({
   cwd: workspaceRoot,
   environment: runtimeEnvironment,
@@ -217,7 +219,7 @@ const createWindow = async (): Promise<void> => {
 
 const createTray = (): void => {
   tray = new Tray(createTrayIcon());
-  tray.setToolTip("LLM Hub");
+  tray.setToolTip(APP_NAME);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
@@ -273,6 +275,9 @@ const registerIpcHandlers = (): void => {
     gatewayManager.deleteChatSession(sessionId),
   );
   ipcMain.handle(IPC_CHANNELS.gatewayRunChat, (_event, payload) => gatewayManager.runChat(payload));
+  ipcMain.handle(IPC_CHANNELS.gatewayCancelChat, (_event, clientRequestId: string) =>
+    gatewayManager.cancelChat(clientRequestId),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayListApiLogs, (_event, limit?: number) =>
     gatewayManager.listApiLogs(limit),
   );

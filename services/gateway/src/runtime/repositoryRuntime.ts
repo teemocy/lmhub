@@ -66,6 +66,7 @@ import {
 } from "@localhub/shared-contracts";
 import type {
   CapabilitySet,
+  FlashAttentionType,
   ModelArtifact,
   ModelProfile,
 } from "@localhub/shared-contracts/foundation-models";
@@ -105,12 +106,15 @@ import {
   chatContentHasImages,
   countChatContentTokens,
   createChatSessionTitle,
+  estimateTextTokens,
   formatChatContentSummary,
 } from "./chat-content.js";
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "../../../../packages/db/migrations");
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH_LENGTH = 12;
+const DEFAULT_UBATCH_SIZE = 512;
+const DEFAULT_BATCH_SIZE = 3_072;
 // Real `llama-server` startups can take a while on large GGUFs, so keep the
 // readiness window generous enough for local model loads.
 const DEFAULT_LOAD_TIMEOUT_MS = 60_000;
@@ -129,16 +133,15 @@ const ENGINE_RECORD_CAPABILITIES: Partial<CapabilitySet> = {
   embeddings: true,
   streaming: true,
 };
-const CAPABILITY_OVERRIDE_KEYS: Array<keyof CapabilitySet> = [
+const CAPABILITY_OVERRIDE_KEYS: Array<Exclude<keyof CapabilitySet, "promptCache">> = [
   "chat",
   "embeddings",
-  "tools",
-  "streaming",
   "vision",
   "audioTranscription",
   "audioSpeech",
   "rerank",
-  "promptCache",
+  "tools",
+  "streaming",
 ];
 type CapabilityOverrides = NonNullable<ModelProfile["capabilityOverrides"]>;
 const QUANTIZATION_TOKEN_PATTERN =
@@ -223,12 +226,16 @@ function getChatSettings(metadata: Record<string, unknown> | undefined): ChatSet
   }
 
   const record = rawSettings as Record<string, unknown>;
+  const temperature = getOptionalNumber(record.temperature, 0, 2);
+  const topP = getOptionalNumber(record.topP ?? record.top_p, 0, 1);
+  const maxOutputTokens = getOptionalNumber(record.maxOutputTokens, 1);
+  const maxMessagesInContext = getOptionalNumber(record.maxMessagesInContext, 1);
 
   return {
-    temperature: getOptionalNumber(record.temperature, 0, 2),
-    topP: getOptionalNumber(record.topP ?? record.top_p, 0, 1),
-    maxOutputTokens: getOptionalNumber(record.maxOutputTokens, 1),
-    maxMessagesInContext: getOptionalNumber(record.maxMessagesInContext, 1),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(topP !== undefined ? { topP } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(maxMessagesInContext !== undefined ? { maxMessagesInContext } : {}),
   };
 }
 
@@ -541,7 +548,7 @@ function applyCapabilityOverrides(
     audioTranscription: normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
     audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
     rerank: normalizedOverrides.rerank ?? capabilities.rerank,
-    promptCache: normalizedOverrides.promptCache ?? capabilities.promptCache,
+    promptCache: true,
   };
 }
 
@@ -563,7 +570,8 @@ function deriveRuntimeRole(capabilities: CapabilitySet): RuntimeEventRole {
 
 function getModelRole(artifact: ModelArtifact, profile?: ModelProfile): RuntimeEventRole {
   const capabilities = getEffectiveCapabilities(artifact, profile);
-  if (profile?.capabilityOverrides && Object.keys(profile.capabilityOverrides).length > 0) {
+  const normalizedOverrides = normalizeCapabilityOverrides(profile?.capabilityOverrides);
+  if (Object.keys(normalizedOverrides).length > 0) {
     return deriveRuntimeRole(capabilities);
   }
 
@@ -693,6 +701,24 @@ function getEffectiveContextLength(
   return artifact.metadata.contextLength;
 }
 
+function getEffectiveBatchSize(profile: ModelProfile): number {
+  const override = profile.parameterOverrides.batchSize;
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+
+  return DEFAULT_BATCH_SIZE;
+}
+
+function getEffectiveFlashAttentionType(profile: ModelProfile): FlashAttentionType {
+  const override = profile.parameterOverrides.flashAttentionType;
+  if (override === "enabled" || override === "disabled" || override === "auto") {
+    return override;
+  }
+
+  return "auto";
+}
+
 function getCreatedEpochSeconds(artifact: ModelArtifact): number {
   const timestamp = Date.parse(artifact.createdAt);
 
@@ -711,9 +737,26 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
     input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
     input.capabilityOverrides !== undefined
   );
+}
+
+function validateBatchSize(batchSize: number | undefined): void {
+  if (batchSize === undefined) {
+    return;
+  }
+
+  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      400,
+    );
+  }
 }
 
 function getMissingArtifactMessage(artifact: ModelArtifact): string {
@@ -740,12 +783,6 @@ function getChatUsage(response: ChatCompletionsResponse): {
       ? { totalTokens: response.usage.total_tokens }
       : {}),
   };
-}
-
-function countTextTokens(value: string | string[]): number {
-  const text = Array.isArray(value) ? value.join(" ") : value;
-  const trimmed = text.trim();
-  return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
 }
 
 function requestRequiresVision(messages: ChatCompletionsRequest["messages"]): boolean {
@@ -1095,6 +1132,8 @@ function toDesktopModelRecord(
 ): DesktopModelRecord {
   const artifactStatus = getArtifactStatus(stored.artifact);
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
+  const batchSize = getEffectiveBatchSize(profile);
+  const flashAttentionType = getEffectiveFlashAttentionType(profile);
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1120,6 +1159,8 @@ function toDesktopModelRecord(
     ...(stored.artifact.architecture ? { architecture: stored.artifact.architecture } : {}),
     ...(stored.artifact.quantization ? { quantization: stored.artifact.quantization } : {}),
     ...(contextLength !== undefined ? { contextLength } : {}),
+    batchSize,
+    flashAttentionType,
     ...(stored.artifact.metadata.parameterCount !== undefined
       ? { parameterCount: stored.artifact.metadata.parameterCount }
       : {}),
@@ -1130,6 +1171,11 @@ function toDesktopModelRecord(
     Number.isFinite(profile.parameterOverrides.gpuLayers) &&
     profile.parameterOverrides.gpuLayers > 0
       ? { gpuLayers: Math.floor(profile.parameterOverrides.gpuLayers) }
+      : {}),
+    ...(typeof profile.parameterOverrides.parallelSlots === "number" &&
+    Number.isFinite(profile.parameterOverrides.parallelSlots) &&
+    profile.parameterOverrides.parallelSlots > 0
+      ? { parallelSlots: Math.floor(profile.parameterOverrides.parallelSlots) }
       : {}),
     ...(stored.artifact.source.checksumSha256
       ? { checksumSha256: stored.artifact.source.checksumSha256 }
@@ -1976,6 +2022,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
+    validateBatchSize(input.batchSize);
 
     if (
       hasRuntimeAffectingModelConfigChanges(input) &&
@@ -1996,7 +2043,12 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       parameterOverrides: {
         ...resolved.profile.parameterOverrides,
         ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+        ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
         ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+        ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
+        ...(input.flashAttentionType !== undefined
+          ? { flashAttentionType: input.flashAttentionType }
+          : {}),
       },
       ...(input.capabilityOverrides !== undefined
         ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }
@@ -2162,6 +2214,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const startedAt = Date.now();
     let firstChunkAt: number | undefined;
     let settled = false;
+    const accumulator = createStreamedAssistantAccumulator();
 
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/chat/completions", {
@@ -2179,6 +2232,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
       const reader = response.body.getReader();
       const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
       const finalize = (reason: string) => {
         if (settled) {
           return;
@@ -2206,17 +2261,77 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                   firstChunkAt = Date.now();
                 }
 
+                sseBuffer += decoder.decode(value, { stream: true });
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  let parsedJson: unknown;
+                  try {
+                    parsedJson = JSON.parse(data);
+                  } catch {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(
+                    this.#adapter.normalizeResponse(parsedJson),
+                  );
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+
                 controller.enqueue(value);
               }
 
+              const remaining = decoder.decode();
+              if (remaining.length > 0) {
+                sseBuffer += remaining;
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  let parsedJson: unknown;
+                  try {
+                    parsedJson = JSON.parse(data);
+                  } catch {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(
+                    this.#adapter.normalizeResponse(parsedJson),
+                  );
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+              }
+
               controller.close();
+              const completionParts = [accumulator.reasoning, accumulator.content].filter(
+                (part) => part.trim().length > 0,
+              );
+              const completionTokens =
+                completionParts.length > 0 ? estimateTextTokens(completionParts) : undefined;
+              const totalDurationMs = Date.now() - startedAt;
+              const safeDurationMs = Math.max(totalDurationMs, 1);
               this.insertApiLog({
                 traceId: context.traceId,
                 modelId: input.model,
                 endpoint: "/v1/chat/completions",
                 requestIp: context.remoteAddress,
                 ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
-                totalDurationMs: Date.now() - startedAt,
+                totalDurationMs,
+                ...(completionTokens !== undefined ? { completionTokens } : {}),
+                ...(completionTokens !== undefined
+                  ? {
+                      tokensPerSecond: Number(
+                        ((completionTokens * 1000) / safeDurationMs).toFixed(2),
+                      ),
+                    }
+                  : {}),
                 statusCode: response.status,
                 createdAt: nowIso(),
               });
@@ -2297,7 +2412,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         modelId: input.model,
         endpoint: "/v1/embeddings",
         requestIp: context.remoteAddress,
-        promptTokens: countTextTokens(input.input),
+        promptTokens: estimateTextTokens(input.input),
         totalDurationMs: Date.now() - startedAt,
         statusCode: response.status,
         createdAt: nowIso(),
@@ -2705,24 +2820,44 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
     await this.acquireRequestTurn(resolved.runtimeKeyString, traceId);
 
-    try {
-      const warmWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
-        (worker) => worker.state === "Ready" && worker.inflightRequests === 0,
-      );
-      if (warmWorker) {
-        warmWorker.inflightRequests += 1;
-        warmWorker.lastUsedAt = Date.now();
-        warmWorker.state = "Busy";
+    const reuseWorker = (worker: ManagedWorker): ManagedWorker => {
+      worker.inflightRequests += 1;
+      worker.lastUsedAt = Date.now();
+
+      if (worker.state !== "Busy") {
+        const previousState = worker.state;
+        worker.state = "Busy";
         this.publish(
-          this.createModelStateEvent(warmWorker.artifact, "Busy", {
-            previousState: "Ready",
+          this.createModelStateEvent(worker.artifact, "Busy", {
+            previousState,
             reason: "Model is serving a request.",
-            runtimeKey: warmWorker.runtimeKey,
+            runtimeKey: worker.runtimeKey,
             traceId,
           }),
         );
+      }
 
-        return warmWorker;
+      return worker;
+    };
+
+    try {
+      const warmWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
+        (worker) => worker.state === "Ready" || worker.state === "Busy",
+      );
+      if (warmWorker) {
+        return reuseWorker(warmWorker);
+      }
+
+      const existingLoad = this.getPendingLoadPromises(resolved.runtimeKeyString);
+      if (existingLoad.length > 0) {
+        await Promise.any(existingLoad);
+
+        const refreshedWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
+          (worker) => worker.state === "Ready" || worker.state === "Busy",
+        );
+        if (refreshedWorker) {
+          return reuseWorker(refreshedWorker);
+        }
       }
 
       if (this.getWorkerSlotCount(resolved.runtimeKeyString) >= this.#maxWorkersPerModel) {
@@ -2734,19 +2869,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       }
 
       const worker = await this.loadWorker(resolved, traceId);
-      worker.inflightRequests += 1;
-      worker.lastUsedAt = Date.now();
-      worker.state = "Busy";
-      this.publish(
-        this.createModelStateEvent(worker.artifact, "Busy", {
-          previousState: "Ready",
-          reason: "Model is serving a request.",
-          runtimeKey: worker.runtimeKey,
-          traceId,
-        }),
-      );
-
-      return worker;
+      return reuseWorker(worker);
     } catch (error) {
       this.releaseRequestTurn(resolved.runtimeKeyString);
       throw error;

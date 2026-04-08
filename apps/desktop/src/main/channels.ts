@@ -15,6 +15,7 @@ export const IPC_CHANNELS = {
   gatewayUpsertChatSession: "gateway:upsert-chat-session",
   gatewayDeleteChatSession: "gateway:delete-chat-session",
   gatewayRunChat: "gateway:run-chat",
+  gatewayCancelChat: "gateway:cancel-chat",
   gatewayChatStream: "gateway:chat-stream",
   gatewayListApiLogs: "gateway:list-api-logs",
   gatewaySearchCatalog: "gateway:search-catalog",

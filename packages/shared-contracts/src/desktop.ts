@@ -11,6 +11,7 @@ import { type GatewayDiscoveryFile, gatewayDiscoveryFileSchema } from "./config.
 import {
   capabilityOverridesSchema,
   engineTypeSchema,
+  flashAttentionTypeSchema,
   modelFormatSchema,
   modelSourceKindSchema,
   runtimeRoleSchema,
@@ -115,7 +116,10 @@ export const desktopModelRecordSchema = z.object({
   contextLength: positiveIntegerSchema.optional(),
   parameterCount: z.number().int().nonnegative().optional(),
   tokenizer: nonEmptyStringSchema.optional(),
+  batchSize: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
+  parallelSlots: positiveIntegerSchema.optional(),
+  flashAttentionType: flashAttentionTypeSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
   engineVersion: nonEmptyStringSchema.optional(),
   engineChannel: desktopEngineChannelSchema.optional(),
@@ -145,7 +149,10 @@ export const desktopModelConfigUpdateRequestSchema = z.object({
   pinned: z.boolean().optional(),
   defaultTtlMs: positiveIntegerSchema.optional(),
   contextLength: positiveIntegerSchema.optional(),
+  batchSize: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
+  parallelSlots: positiveIntegerSchema.optional(),
+  flashAttentionType: flashAttentionTypeSchema.optional(),
   capabilityOverrides: capabilityOverridesSchema.optional(),
 });
 

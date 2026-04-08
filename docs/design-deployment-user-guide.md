@@ -1,10 +1,10 @@
-# Local LLM Hub Design, Deployment, and User Guide
+# LM Hub Design, Deployment, and User Guide
 
-This document is the operator and user-facing guide for the current Local LLM Hub workspace. It describes the system as it exists in this repository today, including the architecture, deployment paths, operational controls, and desktop user workflows.
+This document is the operator and user-facing guide for the current LM Hub workspace. It describes the system as it exists in this repository today, including the architecture, deployment paths, operational controls, and desktop user workflows.
 
 ## Scope
 
-Local LLM Hub currently ships these core capabilities:
+LM Hub currently ships these core capabilities:
 
 - An Electron desktop shell with a React renderer.
 - A separately runnable Node.js gateway daemon.
@@ -144,11 +144,13 @@ Migration safety is built around:
 
 The app-support root is resolved by environment:
 
-- development: `<repo>/.local/local-llm-hub/dev`
-- test: `<repo>/.local/local-llm-hub/test`
-- packaged macOS: `~/Library/Application Support/Local LLM Hub`
-- packaged Windows: `%APPDATA%/Local LLM Hub`
-- packaged Linux: `~/.config/local-llm-hub`
+- development: `<repo>/.local/lm-hub/dev`
+- test: `<repo>/.local/lm-hub/test`
+- packaged macOS: `~/Library/Application Support/LM Hub`
+- packaged Windows: `%APPDATA%/LM Hub`
+- packaged Linux: `~/.config/lm-hub`
+
+Legacy `local-llm-hub` folders migrate automatically to the new paths on first launch.
 
 Under that root, the platform package creates:
 
@@ -638,7 +640,7 @@ curl http://127.0.0.1:1337/v1/chat/completions \
   -d '{
     "model": "your-model-id",
     "messages": [
-      { "role": "user", "content": "Hello from Local LLM Hub" }
+      { "role": "user", "content": "Hello from LM Hub" }
     ]
   }'
 ```

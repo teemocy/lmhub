@@ -8,7 +8,7 @@ const gatewayDir = path.join(repoRoot, "services", "gateway");
 const packagesDir = path.join(repoRoot, "packages");
 const pnpmStoreDir = path.join(repoRoot, "node_modules", ".pnpm");
 const releaseRoot = path.join(repoRoot, "release", "macos");
-const appName = "Local LLM Hub";
+const appName = "LM Hub";
 const electronAppTemplate = path.join(
   desktopDir,
   "node_modules",

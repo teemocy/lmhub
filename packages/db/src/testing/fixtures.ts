@@ -60,6 +60,9 @@ export const fixtureModelProfile: ModelProfile = {
   role: "chat",
   parameterOverrides: {
     temperature: 0.2,
+    batchSize: 3072,
+    flashAttentionType: "auto",
+    parallelSlots: 4,
   },
   createdAt: FIXTURE_TIMESTAMP,
   updatedAt: FIXTURE_TIMESTAMP,

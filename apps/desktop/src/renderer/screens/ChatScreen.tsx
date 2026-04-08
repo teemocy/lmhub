@@ -64,6 +64,8 @@ const sortByUpdatedDesc = (sessions: ChatSession[]): ChatSession[] =>
 const createClientRequestId = (): string =>
   window.crypto?.randomUUID?.() ?? `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+const CHAT_REQUEST_CANCELLED_MESSAGE = "Chat request cancelled.";
+
 const normalizeSessionTitle = (value: string): string => value.trim();
 
 const formatSessionFileName = (title: string, sessionId: string): string => {
@@ -217,6 +219,17 @@ const getClientRequestId = (message: ChatMessage): string | undefined =>
 const getReasoningContent = (message: ChatMessage): string =>
   typeof message.metadata.reasoningContent === "string" ? message.metadata.reasoningContent : "";
 
+const isChatCancellationError = (reason: unknown): boolean => {
+  if (!reason || typeof reason !== "object") {
+    return false;
+  }
+
+  const candidate = reason as { message?: unknown };
+  return (
+    typeof candidate.message === "string" && candidate.message === CHAT_REQUEST_CANCELLED_MESSAGE
+  );
+};
+
 const isTextPart = (
   part: OpenAiMessageContentPart,
 ): part is Extract<OpenAiMessageContentPart, { type: "text" }> => part.type === "text";
@@ -351,6 +364,10 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [error, setError] = useState<string | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const sessionListRef = useRef<HTMLDivElement | null>(null);
+  const selectedModelSessionIdRef = useRef<string | null>(null);
+  const activeChatRequestIdRef = useRef<string | null>(null);
+  const cancelRequestedRef = useRef(false);
+  const hadChatDeltaRef = useRef(false);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [sessions, activeSessionId],
@@ -413,6 +430,27 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   }, [models]);
 
   useEffect(() => {
+    if (!activeSessionId) {
+      selectedModelSessionIdRef.current = null;
+      return;
+    }
+
+    if (!activeSession) {
+      return;
+    }
+
+    if (selectedModelSessionIdRef.current === activeSessionId) {
+      return;
+    }
+
+    selectedModelSessionIdRef.current = activeSessionId;
+
+    if (activeSession.modelId && models.some((model) => model.id === activeSession.modelId)) {
+      setSelectedModelId(activeSession.modelId);
+    }
+  }, [activeSession, activeSessionId, models]);
+
+  useEffect(() => {
     if (!activeSession) {
       setSessionSettings(createEmptyChatSessionSettingsState());
       setSettingsDraft(createEmptyChatSessionSettingsState());
@@ -420,14 +458,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     }
 
     const nextSettings = getChatSessionSettingsState(activeSession);
-
-    if (activeSession.modelId && models.some((model) => model.id === activeSession.modelId)) {
-      setSelectedModelId(activeSession.modelId);
-    }
-
     setSessionSettings(nextSettings);
     setSettingsDraft(nextSettings);
-  }, [activeSession, models]);
+  }, [activeSession]);
 
   useEffect(() => {
     if (shellState.phase !== "connected") {
@@ -502,6 +535,10 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
         if (event.type !== "delta") {
           return;
+        }
+
+        if (event.clientRequestId === activeChatRequestIdRef.current) {
+          hadChatDeltaRef.current = true;
         }
 
         setMessages((current) =>
@@ -604,18 +641,28 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
     setBusy(true);
     setError(null);
+    const clientRequestId = createClientRequestId();
+    activeChatRequestIdRef.current = clientRequestId;
+    cancelRequestedRef.current = false;
+    hadChatDeltaRef.current = false;
+
+    let tempAssistant: ChatMessage | undefined;
 
     try {
       const session = await ensureSession();
-      const clientRequestId = createClientRequestId();
+      if (cancelRequestedRef.current) {
+        throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
+      }
+
       setDraft("");
       setAttachments([]);
 
-      const tempUser = createTempMessage(session.id, "user", messageContent);
-      const tempAssistant = createTempMessage(session.id, "assistant", "", {
+      const createdTempUser = createTempMessage(session.id, "user", messageContent);
+      const createdTempAssistant = createTempMessage(session.id, "assistant", "", {
         clientRequestId,
       });
-      setMessages((current) => [...current, tempUser, tempAssistant]);
+      tempAssistant = createdTempAssistant;
+      setMessages((current) => [...current, createdTempUser, createdTempAssistant]);
 
       const result = await window.desktopApi.gateway.runChat({
         sessionId: session.id,
@@ -626,10 +673,10 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
       setMessages((current) =>
         current.map((message) => {
-          if (message.id === tempUser.id) {
+          if (message.id === createdTempUser.id) {
             return result.userMessage;
           }
-          if (message.id === tempAssistant.id) {
+          if (message.id === createdTempAssistant.id) {
             return result.assistantMessage;
           }
           return message;
@@ -642,10 +689,33 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         ]),
       );
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to run chat.");
+      const cancelled = cancelRequestedRef.current || isChatCancellationError(reason);
+      const assistantMessageToRemove = tempAssistant;
+      if (cancelled && assistantMessageToRemove && !hadChatDeltaRef.current) {
+        setMessages((current) =>
+          current.filter((message) => message.id !== assistantMessageToRemove.id),
+        );
+      } else if (!cancelled) {
+        setError(reason instanceof Error ? reason.message : "Unable to run chat.");
+      }
     } finally {
+      if (activeChatRequestIdRef.current === clientRequestId) {
+        activeChatRequestIdRef.current = null;
+      }
+      cancelRequestedRef.current = false;
+      hadChatDeltaRef.current = false;
       setBusy(false);
     }
+  };
+
+  const stopMessage = async () => {
+    cancelRequestedRef.current = true;
+    const requestId = activeChatRequestIdRef.current;
+    if (!requestId) {
+      return;
+    }
+
+    await window.desktopApi.gateway.cancelChat(requestId).catch(() => undefined);
   };
 
   const createSession = async () => {
@@ -1296,19 +1366,20 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
           <div className="chat-composer-footer">
             <div className="chat-composer-actions">
               <button
-                className="primary-button"
+                aria-label={busy ? "Stop generating response" : "Send message"}
+                className={busy ? "secondary-button danger-button" : "primary-button"}
                 disabled={
-                  shellState.phase !== "connected" ||
-                  busy ||
-                  sessionActionBusy ||
-                  !selectedModelId ||
-                  (draft.trim().length === 0 && attachments.length === 0) ||
-                  (attachments.length > 0 && !supportsVision)
+                  !busy &&
+                  (shellState.phase !== "connected" ||
+                    sessionActionBusy ||
+                    !selectedModelId ||
+                    (draft.trim().length === 0 && attachments.length === 0) ||
+                    (attachments.length > 0 && !supportsVision))
                 }
-                onClick={() => void sendMessage()}
+                onClick={() => void (busy ? stopMessage() : sendMessage())}
                 type="button"
               >
-                {busy ? "Generating..." : "Send"}
+                {busy ? "Stop" : "Send"}
               </button>
               <button
                 className="secondary-button"

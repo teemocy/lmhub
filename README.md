@@ -1,6 +1,6 @@
-# Local LLM Hub Workspace
+# LM Hub Workspace
 
-This repository contains the Local LLM Hub desktop shell, gateway daemon, shared contracts, and runtime support packages. The current workspace supports a desktop-managed local LLM stack with model registration, downloads, chat persistence, observability, OpenAI-compatible public routes, and a loopback-only control plane.
+This repository contains the LM Hub desktop shell, gateway daemon, shared contracts, and runtime support packages. The current workspace supports a desktop-managed local LLM stack with model registration, downloads, chat persistence, observability, OpenAI-compatible public routes, and a loopback-only control plane.
 
 ## Workspace layout
 
@@ -39,7 +39,7 @@ For a full setup, deployment, and user walkthrough, see [docs/design-deployment-
 - `LOCAL_LLM_HUB_GATEWAY_PUBLIC_PORT`: override the public listener port.
 - `LOCAL_LLM_HUB_GATEWAY_CONTROL_PORT`: override the control listener port.
 
-The platform package resolves a deterministic dev layout inside `.local/local-llm-hub/dev` and a packaged layout inside the OS application support directory.
+The platform package resolves a deterministic dev layout inside `.local/lm-hub/dev` and a packaged layout inside the OS application support directory, migrating legacy `local-llm-hub` folders on first launch.
 
 ## Documentation
 

@@ -1,7 +1,7 @@
 import { type ChildProcess, type ChildProcessByStdio, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { createWriteStream, existsSync, mkdirSync, type WriteStream } from "node:fs";
+import { type WriteStream, createWriteStream, existsSync, mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -395,6 +395,24 @@ const getErrorMessage = (value: unknown, fallback: string): string => {
     : fallback;
 };
 
+const CHAT_REQUEST_CANCELLED_MESSAGE = "Chat request cancelled.";
+
+const isAbortError = (error: unknown): boolean => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { message?: unknown; name?: unknown };
+  if (candidate.name === "AbortError") {
+    return true;
+  }
+
+  return (
+    typeof candidate.message === "string" &&
+    /aborted|cancelled/i.test(candidate.message)
+  );
+};
+
 const getReasoningContent = (metadata: Record<string, unknown> | undefined): string | undefined =>
   typeof metadata?.reasoningContent === "string" && metadata.reasoningContent.length > 0
     ? metadata.reasoningContent
@@ -489,6 +507,7 @@ export class GatewayManager extends EventEmitter {
   private controlSocket: WebSocket | undefined;
   private discovery: GatewayDiscoveryFile | undefined;
   private sessionLogStream: WriteStream | undefined;
+  private activeChatRequests = new Map<string, AbortController>();
   private closeSessionLogOnExit = false;
   private stopping = false;
   private readonly getControlAuthHeaderName: () => ControlAuthHeaderName;
@@ -820,228 +839,289 @@ export class GatewayManager extends EventEmitter {
   async runChat(input: DesktopChatRunRequest): Promise<DesktopChatRunResponse> {
     const discovery = this.requireDiscovery();
     const clientRequestId = input.clientRequestId?.trim() || randomUUID();
-    const response = await fetch(`${discovery.controlBaseUrl}/control/chat/run/stream`, {
-      method: "POST",
-      headers: this.createControlHeaders({
-        "content-type": "application/json",
-      }),
-      body: JSON.stringify({
-        ...input,
-        clientRequestId,
-      }),
-    });
-    const sessionId = response.headers.get("x-localhub-session-id") ?? input.sessionId ?? undefined;
-
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as unknown;
-      const errorMessage = getErrorMessage(payload, "Unable to run chat request.");
-      this.emit("chatStream", {
-        type: "error",
-        clientRequestId,
-        ...(sessionId ? { sessionId } : {}),
-        errorMessage,
-      });
-      throw new Error(errorMessage);
-    }
-
-    if (!sessionId) {
-      throw new Error("Unable to resolve the chat session for the streamed response.");
-    }
-
-    this.emit("chatStream", {
-      type: "start",
-      clientRequestId,
-      sessionId,
-    });
-
-    if (!response.body) {
-      const errorMessage = "The gateway did not provide a streaming response body.";
-      this.emit("chatStream", {
-        type: "error",
-        clientRequestId,
-        sessionId,
-        errorMessage,
-      });
-      throw new Error(errorMessage);
-    }
-
-    const accumulator = createStreamedChatAccumulator();
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let sseBuffer = "";
+    const controller = new AbortController();
+    this.activeChatRequests.set(clientRequestId, controller);
 
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
+      const response = await fetch(`${discovery.controlBaseUrl}/control/chat/run/stream`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        signal: controller.signal,
+        body: JSON.stringify({
+          ...input,
+          clientRequestId,
+        }),
+      });
+      const sessionId = response.headers.get("x-localhub-session-id") ?? input.sessionId ?? undefined;
+
+      if (controller.signal.aborted) {
+        throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
+      }
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as unknown;
+        if (controller.signal.aborted) {
+          throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
         }
 
-        sseBuffer += decoder.decode(value, { stream: true });
-        sseBuffer = drainSseBuffer(sseBuffer, (data) => {
-          if (data === "[DONE]") {
-            return;
-          }
-
-          let parsedJson: unknown;
-          try {
-            parsedJson = JSON.parse(data);
-          } catch {
-            return;
-          }
-
-          const parsed = chatCompletionsChunkSchema.safeParse(parsedJson);
-          if (!parsed.success) {
-            return;
-          }
-
-          applyChunkToAccumulator(accumulator, parsed.data);
-          const choice = parsed.data.choices[0];
-          if (!choice) {
-            return;
-          }
-
-          const contentDelta =
-            typeof choice.delta.content === "string" && choice.delta.content.length > 0
-              ? choice.delta.content
-              : undefined;
-          const reasoningDelta =
-            typeof choice.delta.reasoning_content === "string" &&
-            choice.delta.reasoning_content.length > 0
-              ? choice.delta.reasoning_content
-              : undefined;
-          const toolCalls = choice.delta.tool_calls?.length ? choice.delta.tool_calls : undefined;
-
-          if (!contentDelta && !reasoningDelta && !toolCalls) {
-            return;
-          }
-
-          this.emit("chatStream", {
-            type: "delta",
-            clientRequestId,
-            sessionId,
-            ...(contentDelta ? { contentDelta } : {}),
-            ...(reasoningDelta ? { reasoningDelta } : {}),
-            ...(toolCalls ? { toolCalls } : {}),
-          });
+        const errorMessage = getErrorMessage(payload, "Unable to run chat request.");
+        this.emit("chatStream", {
+          type: "error",
+          clientRequestId,
+          ...(sessionId ? { sessionId } : {}),
+          errorMessage,
         });
+        throw new Error(errorMessage);
       }
 
-      const remaining = decoder.decode();
-      if (remaining.length > 0) {
-        sseBuffer += remaining;
-        sseBuffer = drainSseBuffer(sseBuffer, (data) => {
-          if (data === "[DONE]") {
-            return;
-          }
-
-          let parsedJson: unknown;
-          try {
-            parsedJson = JSON.parse(data);
-          } catch {
-            return;
-          }
-
-          const parsed = chatCompletionsChunkSchema.safeParse(parsedJson);
-          if (parsed.success) {
-            applyChunkToAccumulator(accumulator, parsed.data);
-          }
-        });
+      if (!sessionId) {
+        throw new Error("Unable to resolve the chat session for the streamed response.");
       }
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Unable to read the chat stream.";
+
       this.emit("chatStream", {
-        type: "error",
+        type: "start",
         clientRequestId,
         sessionId,
-        errorMessage,
       });
+
+      if (!response.body) {
+        if (controller.signal.aborted) {
+          throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
+        }
+
+        const errorMessage = "The gateway did not provide a streaming response body.";
+        this.emit("chatStream", {
+          type: "error",
+          clientRequestId,
+          sessionId,
+          errorMessage,
+        });
+        throw new Error(errorMessage);
+      }
+
+      const accumulator = createStreamedChatAccumulator();
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      const handleAbort = () => {
+        void reader.cancel(CHAT_REQUEST_CANCELLED_MESSAGE).catch(() => undefined);
+      };
+
+      if (controller.signal.aborted) {
+        handleAbort();
+      } else {
+        controller.signal.addEventListener("abort", handleAbort, { once: true });
+      }
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+            if (data === "[DONE]") {
+              return;
+            }
+
+            let parsedJson: unknown;
+            try {
+              parsedJson = JSON.parse(data);
+            } catch {
+              return;
+            }
+
+            const parsed = chatCompletionsChunkSchema.safeParse(parsedJson);
+            if (!parsed.success) {
+              return;
+            }
+
+            applyChunkToAccumulator(accumulator, parsed.data);
+            const choice = parsed.data.choices[0];
+            if (!choice) {
+              return;
+            }
+
+            const contentDelta =
+              typeof choice.delta.content === "string" && choice.delta.content.length > 0
+                ? choice.delta.content
+                : undefined;
+            const reasoningDelta =
+              typeof choice.delta.reasoning_content === "string" &&
+              choice.delta.reasoning_content.length > 0
+                ? choice.delta.reasoning_content
+                : undefined;
+            const toolCalls = choice.delta.tool_calls?.length ? choice.delta.tool_calls : undefined;
+
+            if (!contentDelta && !reasoningDelta && !toolCalls) {
+              return;
+            }
+
+            this.emit("chatStream", {
+              type: "delta",
+              clientRequestId,
+              sessionId,
+              ...(contentDelta ? { contentDelta } : {}),
+              ...(reasoningDelta ? { reasoningDelta } : {}),
+              ...(toolCalls ? { toolCalls } : {}),
+            });
+          });
+        }
+
+        const remaining = decoder.decode();
+        if (remaining.length > 0) {
+          sseBuffer += remaining;
+          sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+            if (data === "[DONE]") {
+              return;
+            }
+
+            let parsedJson: unknown;
+            try {
+              parsedJson = JSON.parse(data);
+            } catch {
+              return;
+            }
+
+            const parsed = chatCompletionsChunkSchema.safeParse(parsedJson);
+            if (parsed.success) {
+              applyChunkToAccumulator(accumulator, parsed.data);
+            }
+          });
+        }
+
+        if (controller.signal.aborted) {
+          throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
+        }
+      } catch (error) {
+        if (controller.signal.aborted || isAbortError(error)) {
+          throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
+        }
+
+        const errorMessage =
+          error instanceof Error ? error.message : "Unable to read the chat stream.";
+        this.emit("chatStream", {
+          type: "error",
+          clientRequestId,
+          sessionId,
+          errorMessage,
+        });
+        throw error;
+      } finally {
+        controller.signal.removeEventListener("abort", handleAbort);
+        reader.releaseLock();
+      }
+
+      this.emit("chatStream", {
+        type: "done",
+        clientRequestId,
+        sessionId,
+      });
+
+      const [sessions, messages] = await Promise.all([
+        this.listChatSessions(),
+        this.listChatMessages(sessionId),
+      ]);
+      const userMessageId = response.headers.get("x-localhub-user-message-id") ?? undefined;
+      const assistantMessageId = response.headers.get("x-localhub-assistant-message-id") ?? undefined;
+      const session =
+        sessions.data.find((candidate) => candidate.id === sessionId) ??
+        chatSessionSchema.parse({
+          id: sessionId,
+          modelId: input.model,
+          ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          metadata: {},
+        });
+      const userMessage =
+        (userMessageId
+          ? messages.data.find((message) => message.id === userMessageId)
+          : undefined) ??
+        [...messages.data].reverse().find((message) => message.role === "user") ?? {
+          id: userMessageId ?? `message_${clientRequestId}`,
+          sessionId,
+          role: "user" as const,
+          content: input.message,
+          toolCalls: [],
+          metadata: {},
+          createdAt: new Date().toISOString(),
+        };
+      const assistantMessage =
+        (assistantMessageId
+          ? messages.data.find((message) => message.id === assistantMessageId)
+          : undefined) ??
+        [...messages.data].reverse().find((message) => message.role === "assistant") ?? {
+          id: assistantMessageId ?? `message_${clientRequestId}-assistant`,
+          sessionId,
+          role: "assistant" as const,
+          content: accumulator.content.length > 0 ? accumulator.content : null,
+          toolCalls: accumulator.toolCalls,
+          metadata:
+            accumulator.reasoning.length > 0
+              ? {
+                  reasoningContent: accumulator.reasoning,
+                }
+              : {},
+          createdAt: new Date().toISOString(),
+        };
+      const reasoningContent = getReasoningContent(
+        assistantMessage.metadata as Record<string, unknown> | undefined,
+      );
+
+      return desktopChatRunResponseSchema.parse({
+        session,
+        userMessage,
+        assistantMessage,
+        response: {
+          id: accumulator.responseId ?? `chatcmpl-${clientRequestId}`,
+          object: "chat.completion",
+          created: accumulator.created ?? Math.floor(Date.now() / 1000),
+          model: accumulator.model ?? input.model,
+          choices: [
+            {
+              index: 0,
+              finish_reason: accumulator.finishReason,
+              message: {
+                role: "assistant",
+                content: assistantMessage.content,
+                ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+                ...(assistantMessage.toolCalls.length > 0
+                  ? { tool_calls: assistantMessage.toolCalls }
+                  : {}),
+              },
+            },
+          ],
+        },
+      });
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) {
+        throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
+      }
+
       throw error;
     } finally {
-      reader.releaseLock();
+      this.activeChatRequests.delete(clientRequestId);
+    }
+  }
+
+  cancelChat(clientRequestId: string): boolean {
+    const normalizedClientRequestId = clientRequestId.trim();
+    if (normalizedClientRequestId.length === 0) {
+      return false;
     }
 
-    this.emit("chatStream", {
-      type: "done",
-      clientRequestId,
-      sessionId,
-    });
+    const controller = this.activeChatRequests.get(normalizedClientRequestId);
+    if (!controller) {
+      return false;
+    }
 
-    const [sessions, messages] = await Promise.all([
-      this.listChatSessions(),
-      this.listChatMessages(sessionId),
-    ]);
-    const userMessageId = response.headers.get("x-localhub-user-message-id") ?? undefined;
-    const assistantMessageId = response.headers.get("x-localhub-assistant-message-id") ?? undefined;
-    const session =
-      sessions.data.find((candidate) => candidate.id === sessionId) ??
-      chatSessionSchema.parse({
-        id: sessionId,
-        modelId: input.model,
-        ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        metadata: {},
-      });
-    const userMessage = (userMessageId
-      ? messages.data.find((message) => message.id === userMessageId)
-      : undefined) ??
-      [...messages.data].reverse().find((message) => message.role === "user") ?? {
-        id: userMessageId ?? `message_${clientRequestId}`,
-        sessionId,
-        role: "user" as const,
-        content: input.message,
-        toolCalls: [],
-        metadata: {},
-        createdAt: new Date().toISOString(),
-      };
-    const assistantMessage = (assistantMessageId
-      ? messages.data.find((message) => message.id === assistantMessageId)
-      : undefined) ??
-      [...messages.data].reverse().find((message) => message.role === "assistant") ?? {
-        id: assistantMessageId ?? `message_${clientRequestId}-assistant`,
-        sessionId,
-        role: "assistant" as const,
-        content: accumulator.content.length > 0 ? accumulator.content : null,
-        toolCalls: accumulator.toolCalls,
-        metadata:
-          accumulator.reasoning.length > 0
-            ? {
-                reasoningContent: accumulator.reasoning,
-              }
-            : {},
-        createdAt: new Date().toISOString(),
-      };
-    const reasoningContent = getReasoningContent(
-      assistantMessage.metadata as Record<string, unknown> | undefined,
-    );
-
-    return desktopChatRunResponseSchema.parse({
-      session,
-      userMessage,
-      assistantMessage,
-      response: {
-        id: accumulator.responseId ?? `chatcmpl-${clientRequestId}`,
-        object: "chat.completion",
-        created: accumulator.created ?? Math.floor(Date.now() / 1000),
-        model: accumulator.model ?? input.model,
-        choices: [
-          {
-            index: 0,
-            finish_reason: accumulator.finishReason,
-            message: {
-              role: "assistant",
-              content: assistantMessage.content,
-              ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
-              ...(assistantMessage.toolCalls.length > 0
-                ? { tool_calls: assistantMessage.toolCalls }
-                : {}),
-            },
-          },
-        ],
-      },
-    });
+    controller.abort(CHAT_REQUEST_CANCELLED_MESSAGE);
+    return true;
   }
 
   async listApiLogs(limit = 30): Promise<DesktopApiLogList> {

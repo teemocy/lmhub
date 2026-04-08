@@ -1,5 +1,7 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import {
   chmod,
   cp,
@@ -13,20 +15,18 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { createReadStream, createWriteStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import {
+  type EngineInstallResult,
   activateEngineVersion,
   createEmptyEngineVersionRegistry,
   ensureEngineSupportPaths,
   readEngineVersionRegistry,
   resolveEngineSupportPaths,
-  type EngineInstallResult,
   upsertEngineVersionRecord,
   writeEngineVersionRegistry,
 } from "@localhub/engine-core";
@@ -35,7 +35,7 @@ const LLAMA_CPP_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_RELEASE_OWNER = "ggml-org";
 const DEFAULT_RELEASE_REPO = "llama.cpp";
 const DEFAULT_BINARY_NAMES = ["llama-server", "server"] as const;
-const DEFAULT_GITHUB_USER_AGENT = "Local LLM Hub";
+const DEFAULT_GITHUB_USER_AGENT = "LM Hub";
 
 type InstallSource =
   | {
@@ -109,15 +109,17 @@ function sanitizeVersionTag(versionTag: string): string {
   return versionTag.replace(/[^A-Za-z0-9._-]+/g, "-");
 }
 
-function toVersionTag(source: InstallSource, explicitVersionTag?: string, checksumSha256?: string): string {
+function toVersionTag(
+  source: InstallSource,
+  explicitVersionTag?: string,
+  checksumSha256?: string,
+): string {
   if (explicitVersionTag?.trim()) {
     return sanitizeVersionTag(explicitVersionTag.trim());
   }
 
   if (source.kind === "release") {
-    return sanitizeVersionTag(
-      `release-${source.releaseTag}-${source.platform}-${source.arch}`,
-    );
+    return sanitizeVersionTag(`release-${source.releaseTag}-${source.platform}-${source.arch}`);
   }
 
   const baseName = path.basename(source.sourcePath, path.extname(source.sourcePath));
@@ -313,7 +315,11 @@ async function execTarExtract(archivePath: string, destinationDir: string): Prom
   });
 }
 
-async function downloadToFile(url: string, targetPath: string, fetchImpl: typeof fetch): Promise<void> {
+async function downloadToFile(
+  url: string,
+  targetPath: string,
+  fetchImpl: typeof fetch,
+): Promise<void> {
   const response = await fetchImpl(url, {
     headers: {
       "user-agent": DEFAULT_GITHUB_USER_AGENT,
@@ -407,7 +413,9 @@ async function registerInstalledBinary(
   supportRoot: string,
   manifest: InstallManifest,
 ): Promise<BinaryInstallResult> {
-  const paths = ensureEngineSupportPaths(resolveEngineSupportPaths(supportRoot, LLAMA_CPP_ENGINE_TYPE));
+  const paths = ensureEngineSupportPaths(
+    resolveEngineSupportPaths(supportRoot, LLAMA_CPP_ENGINE_TYPE),
+  );
   const manifestPath = path.join(manifest.installPath, "manifest.json");
 
   await writeManifest(manifestPath, manifest);
@@ -460,7 +468,9 @@ async function installReleaseBinary(options: ReleaseInstallOptions): Promise<Eng
     ...(typeof release.name === "string" ? { releaseName: release.name } : {}),
   };
   const versionTag = toVersionTag(source, options.versionTag);
-  const paths = ensureEngineSupportPaths(resolveEngineSupportPaths(options.supportRoot, LLAMA_CPP_ENGINE_TYPE));
+  const paths = ensureEngineSupportPaths(
+    resolveEngineSupportPaths(options.supportRoot, LLAMA_CPP_ENGINE_TYPE),
+  );
   const installPath = path.join(paths.versionsRoot, versionTag);
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-llama-cpp-"));
   const archivePath = path.join(tempRoot, asset.name);
@@ -521,7 +531,9 @@ async function installManualBinary(options: ManualInstallOptions): Promise<Engin
     arch,
   };
   const versionTag = toVersionTag(source, options.versionTag, checksumSha256);
-  const paths = ensureEngineSupportPaths(resolveEngineSupportPaths(options.supportRoot, LLAMA_CPP_ENGINE_TYPE));
+  const paths = ensureEngineSupportPaths(
+    resolveEngineSupportPaths(options.supportRoot, LLAMA_CPP_ENGINE_TYPE),
+  );
   const installPath = path.join(paths.versionsRoot, versionTag);
 
   await rm(installPath, { recursive: true, force: true });
@@ -569,7 +581,9 @@ async function installManualBinary(options: ManualInstallOptions): Promise<Engin
 async function restoreFromManifest(
   options: RestoreInstallOptions,
 ): Promise<EngineInstallResult | undefined> {
-  const paths = ensureEngineSupportPaths(resolveEngineSupportPaths(options.supportRoot, LLAMA_CPP_ENGINE_TYPE));
+  const paths = ensureEngineSupportPaths(
+    resolveEngineSupportPaths(options.supportRoot, LLAMA_CPP_ENGINE_TYPE),
+  );
   const installPath = path.join(paths.versionsRoot, sanitizeVersionTag(options.versionTag));
   const manifest = await readManifest(path.join(installPath, "manifest.json"));
   if (!manifest) {
@@ -604,7 +618,9 @@ export async function getInstalledPackagedLlamaCppBinary(
   supportRoot: string,
   versionTag: string,
 ): Promise<EngineInstallResult | undefined> {
-  const paths = ensureEngineSupportPaths(resolveEngineSupportPaths(supportRoot, LLAMA_CPP_ENGINE_TYPE));
+  const paths = ensureEngineSupportPaths(
+    resolveEngineSupportPaths(supportRoot, LLAMA_CPP_ENGINE_TYPE),
+  );
   const registry = readEngineVersionRegistry(paths.registryFile, LLAMA_CPP_ENGINE_TYPE);
   const existing = registry.versions.find((version) => version.versionTag === versionTag);
   if (!existing || !existsSync(existing.binaryPath)) {
@@ -638,7 +654,10 @@ export async function importLocalLlamaCppBinary(
 export async function restorePackagedLlamaCppBinary(
   options: RestoreInstallOptions,
 ): Promise<EngineInstallResult | undefined> {
-  const existing = await getInstalledPackagedLlamaCppBinary(options.supportRoot, options.versionTag);
+  const existing = await getInstalledPackagedLlamaCppBinary(
+    options.supportRoot,
+    options.versionTag,
+  );
   if (existing) {
     return existing;
   }

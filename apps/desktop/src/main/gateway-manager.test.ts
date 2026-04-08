@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import type { DesktopChatStreamEvent, GatewayDiscoveryFile } from "@localhub/shared-contracts";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { GatewayManager } from "./gateway-manager";
 import {
   buildControlHeaders,
   resolveControlBearerToken,
@@ -12,6 +14,10 @@ import {
 } from "./gateway-manager";
 
 describe("gateway manager auth helpers", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("matches gateway control-token precedence", () => {
     expect(
       resolveControlBearerToken({
@@ -120,5 +126,59 @@ describe("gateway manager auth helpers", () => {
 
     child.kill("SIGTERM");
     await waitForChildExit(child, 500);
+  });
+
+  it("cancels an in-flight chat stream by client request id", async () => {
+    const manager = new GatewayManager({ workspaceRootOverride: path.join("/tmp", "workspace") });
+    const discovery = {
+      schemaVersion: 1,
+      environment: "development",
+      gatewayVersion: "test-gateway",
+      generatedAt: new Date().toISOString(),
+      publicBaseUrl: "http://127.0.0.1:1337",
+      controlBaseUrl: "http://127.0.0.1:16384",
+      websocketUrl: "ws://127.0.0.1:16384",
+      supportRoot: path.join("/tmp", "workspace", "support"),
+    } satisfies GatewayDiscoveryFile;
+    const events: DesktopChatStreamEvent[] = [];
+    let bodyCancelled = false;
+    manager.on("chatStream", (event) => {
+      events.push(event);
+    });
+    (manager as unknown as { discovery: GatewayDiscoveryFile }).discovery = discovery;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          bodyCancelled = true;
+        },
+      });
+
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "x-localhub-session-id": "session-1",
+          "x-localhub-user-message-id": "user-1",
+          "x-localhub-assistant-message-id": "assistant-1",
+        },
+      });
+    });
+
+    const runPromise = manager.runChat({
+      model: "model-1",
+      sessionId: "session-1",
+      message: "Hello",
+      clientRequestId: "request-1",
+    });
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
+
+    expect(manager.cancelChat("request-1")).toBe(true);
+    await expect(runPromise).rejects.toThrow("Chat request cancelled.");
+    expect(bodyCancelled).toBe(true);
+    expect(events.some((event) => event.type === "error")).toBe(false);
   });
 });

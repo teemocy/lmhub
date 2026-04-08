@@ -38,5 +38,5 @@ jobs:
       - name: Upload release bundle
         uses: actions/upload-artifact@v4
         with:
-          name: local-llm-hub-macos-signed
+          name: lm-hub-macos-signed
           path: release/macos

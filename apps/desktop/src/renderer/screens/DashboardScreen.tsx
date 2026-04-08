@@ -6,13 +6,16 @@ type DashboardScreenProps = {
   shellState: DesktopShellState;
 };
 
-const formatRate = (value: number | undefined): string => {
+const formatRate = (value: number | undefined, estimated: boolean): string => {
   if (typeof value !== "number" || Number.isNaN(value)) {
     return "Pending";
   }
 
-  return `${value.toFixed(2)} tok/s`;
+  return `${estimated ? "~" : ""}${value.toFixed(2)} tok/s`;
 };
+
+const formatRateLabel = (estimated: boolean): string =>
+  estimated ? "Tokens/s (est.)" : "Tokens/s";
 
 export function DashboardScreen({ shellState }: DashboardScreenProps) {
   const [apiLogs, setApiLogs] = useState<ApiLogRecord[]>([]);
@@ -66,8 +69,8 @@ export function DashboardScreen({ shellState }: DashboardScreenProps) {
               <dd>{latestApiLog.ttftMs !== undefined ? `${latestApiLog.ttftMs} ms` : "Pending"}</dd>
             </div>
             <div>
-              <dt>Tokens/s</dt>
-              <dd>{formatRate(latestApiLog.tokensPerSecond)}</dd>
+              <dt>{formatRateLabel(latestApiLog.ttftMs !== undefined)}</dt>
+              <dd>{formatRate(latestApiLog.tokensPerSecond, latestApiLog.ttftMs !== undefined)}</dd>
             </div>
             <div>
               <dt>Total duration</dt>

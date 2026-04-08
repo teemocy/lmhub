@@ -97,6 +97,8 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.gatewayDeleteChatSession, sessionId) as Promise<void>,
     runChat: (payload: DesktopChatRunRequest) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayRunChat, payload) as Promise<DesktopChatRunResponse>,
+    cancelChat: (clientRequestId: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayCancelChat, clientRequestId) as Promise<boolean>,
     subscribeChatStream: (listener: Listener<DesktopChatStreamEvent>) =>
       subscribe(IPC_CHANNELS.gatewayChatStream, listener),
     listApiLogs: (limit?: number) =>

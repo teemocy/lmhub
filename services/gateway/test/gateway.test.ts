@@ -1,13 +1,16 @@
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
+import type { AddressInfo } from "node:net";
 
 import { type GatewayEvent, gatewayEventSchema } from "@localhub/shared-contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GatewayConfig } from "../src/config.js";
 import { MockGatewayRuntime } from "../src/runtime/mockRuntime.js";
-import { buildGateway, stopGatewayServices } from "../src/server/app.js";
+import { buildGateway, pipeStreamingResponse, stopGatewayServices } from "../src/server/app.js";
 import { GatewayRequestError, type GatewayRuntime } from "../src/types.js";
 
 interface TestGateway {
@@ -55,6 +58,36 @@ async function createTestGateway(overrides: Partial<GatewayConfig> = {}): Promis
 
   activeGateways.push(testGateway);
   return testGateway;
+}
+
+function toBaseUrl(address: string | AddressInfo | null): string {
+  if (typeof address === "string") {
+    return address;
+  }
+
+  if (!address) {
+    throw new Error("Listening address is unavailable.");
+  }
+
+  return `http://${address.address}:${address.port}`;
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+  intervalMs = 25,
+): Promise<void> {
+  const startedAt = Date.now();
+
+  while (!predicate()) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw new Error("Timed out waiting for the expected condition.");
+    }
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, intervalMs);
+    });
+  }
 }
 
 afterEach(async () => {
@@ -340,6 +373,46 @@ describe("gateway skeleton", () => {
     expect(messages.some((event) => event.type === "REQUEST_TRACE")).toBe(true);
   });
 
+  it("cancels an in-flight streamed chat response when the client closes the socket", async () => {
+    const requestRaw = new EventEmitter();
+    const replyRaw = new PassThrough();
+    const request = { raw: requestRaw } as unknown as Parameters<typeof pipeStreamingResponse>[0];
+    const reply = { raw: replyRaw } as unknown as Parameters<typeof pipeStreamingResponse>[1];
+    let streamCancelled = false;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({
+              id: "chatcmpl-cancel-test",
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: "localhub/tinyllama-1.1b-chat-q4",
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: "hello" },
+                  finish_reason: null,
+                },
+              ],
+            })}\n\n`,
+          ),
+        );
+      },
+      cancel() {
+        streamCancelled = true;
+      },
+    });
+
+    const pipePromise = pipeStreamingResponse(request, reply, stream);
+    requestRaw.emit("close");
+    await waitForCondition(() => streamCancelled);
+    await pipePromise;
+
+    expect(streamCancelled).toBe(true);
+  });
+
   it("updates cold model configuration through the control plane", async () => {
     const gateway = await createTestGateway();
 
@@ -352,7 +425,10 @@ describe("gateway skeleton", () => {
       payload: {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
+        batchSize: 3072,
         gpuLayers: 16,
+        flashAttentionType: "enabled",
+        parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
           chat: false,
@@ -368,7 +444,10 @@ describe("gateway skeleton", () => {
         id: "localhub/tinyllama-1.1b-chat-q4",
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
+        batchSize: 3072,
         gpuLayers: 16,
+        flashAttentionType: "enabled",
+        parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
           chat: false,
