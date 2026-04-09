@@ -309,10 +309,10 @@ export function SettingsScreen({
               : "wide-card"
         }
       >
-        <span className="section-label">Security posture</span>
-        <h3>Network exposure and API auth</h3>
+        <span className="section-label">Runtime info</span>
+        <h3>Gateway and desktop state</h3>
         <p>{exposureRisk}</p>
-        <dl className="settings-grid">
+        <dl className="settings-grid runtime-status-grid">
           <div>
             <dt>LAN enabled</dt>
             <dd>{runtimeContext?.gateway.enableLan ? "Yes" : "No"}</dd>
@@ -328,6 +328,36 @@ export function SettingsScreen({
           <div>
             <dt>CORS allowlist</dt>
             <dd>{runtimeContext?.gateway.corsAllowlist.join(", ") ?? "Loading"}</dd>
+          </div>
+          <div>
+            <dt>Close to tray</dt>
+            <dd>{runtimeContext?.desktop.closeToTray ? "Enabled" : "Disabled"}</dd>
+          </div>
+          <div>
+            <dt>Auto launch gateway</dt>
+            <dd>{runtimeContext?.desktop.autoLaunchGateway ? "Enabled" : "Disabled"}</dd>
+          </div>
+          <div>
+            <dt>Theme</dt>
+            <dd>{runtimeContext?.desktop.theme ?? "Loading"}</dd>
+          </div>
+          <div>
+            <dt>Default model TTL</dt>
+            <dd>
+              {runtimeContext
+                ? `${Math.round(runtimeContext.gateway.defaultModelTtlMs / 60_000)} min`
+                : "Loading"}
+            </dd>
+          </div>
+          <div>
+            <dt>Active model cap</dt>
+            <dd>
+              {runtimeContext
+                ? runtimeContext.gateway.maxActiveModelsInMemory === 0
+                  ? "Unlimited"
+                  : `${runtimeContext.gateway.maxActiveModelsInMemory} model${runtimeContext.gateway.maxActiveModelsInMemory === 1 ? "" : "s"}`
+                : "Loading"}
+            </dd>
           </div>
         </dl>
       </article>
@@ -515,41 +545,6 @@ export function SettingsScreen({
         </div>
       </article>
 
-      <article className="wide-card">
-        <span className="section-label">Desktop behavior</span>
-        <div className="settings-grid">
-          <div>
-            <dt>Close to tray</dt>
-            <dd>{runtimeContext?.desktop.closeToTray ? "Enabled" : "Disabled"}</dd>
-          </div>
-          <div>
-            <dt>Auto launch gateway</dt>
-            <dd>{runtimeContext?.desktop.autoLaunchGateway ? "Enabled" : "Disabled"}</dd>
-          </div>
-          <div>
-            <dt>Theme</dt>
-            <dd>{runtimeContext?.desktop.theme ?? "Loading"}</dd>
-          </div>
-          <div>
-            <dt>Default model TTL</dt>
-            <dd>
-              {runtimeContext
-                ? `${Math.round(runtimeContext.gateway.defaultModelTtlMs / 60_000)} min`
-                : "Loading"}
-            </dd>
-          </div>
-          <div>
-            <dt>Active model cap</dt>
-            <dd>
-              {runtimeContext
-                ? runtimeContext.gateway.maxActiveModelsInMemory === 0
-                  ? "Unlimited"
-                  : `${runtimeContext.gateway.maxActiveModelsInMemory} model${runtimeContext.gateway.maxActiveModelsInMemory === 1 ? "" : "s"}`
-                : "Loading"}
-            </dd>
-          </div>
-        </div>
-      </article>
     </section>
   );
 }

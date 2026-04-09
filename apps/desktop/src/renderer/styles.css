@@ -633,6 +633,10 @@ select {
   white-space: nowrap;
 }
 
+.runtime-status-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .meta-grid dt,
 .settings-grid dt {
   font-size: 0.76rem;
@@ -1837,6 +1841,10 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .runtime-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .gateway-runtime-actions {
     justify-content: flex-start;
   }
@@ -1916,6 +1924,7 @@ select {
 
   .screen-grid,
   .settings-grid,
+  .runtime-status-grid,
   .runtime-envelope-fields,
   .meta-grid,
   .capability-override-list {
