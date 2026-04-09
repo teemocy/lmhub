@@ -45,6 +45,7 @@ The platform package resolves a deterministic dev layout inside `.local/lm-hub/d
 ## Documentation
 
 - [Design, Deployment, and User Guide](./docs/design-deployment-user-guide.md)
+- [Apple Silicon MLX Backend Plan](./docs/mlx-backend-plan.md)
 - [Release Readiness](./docs/release-readiness.md)
 - [Config Precedence](./docs/config-precedence.md)
 - [Package Ownership](./docs/package-ownership.md)

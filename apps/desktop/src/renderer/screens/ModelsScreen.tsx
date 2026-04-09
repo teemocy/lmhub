@@ -7,6 +7,7 @@ import type {
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
+  DesktopRuntimeContext,
   DesktopShellState,
 } from "@localhub/shared-contracts";
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
@@ -14,6 +15,7 @@ import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "r
 type ModelsScreenProps = {
   engines: DesktopEngineRecord[];
   models: DesktopModelRecord[];
+  runtimeContext: DesktopRuntimeContext | null;
   selectedModelId: string | null;
   shellState: DesktopShellState;
   onSelectModel(modelId: string): void;
@@ -25,7 +27,10 @@ type ModelsScreenProps = {
   onInstallEngineBinary(
     payload: DesktopEngineInstallRequest,
   ): Promise<DesktopEngineInstallResponse>;
-  onActivateEngineVersion(versionTag: string): Promise<DesktopEngineInstallResponse>;
+  onActivateEngineVersion(payload: {
+    engineType: "llama.cpp" | "mlx";
+    versionTag: string;
+  }): Promise<DesktopEngineInstallResponse>;
   onUpdateModelConfig(
     modelId: string,
     payload: DesktopModelConfigUpdateRequest,
@@ -159,7 +164,7 @@ const formatModelCardSummary = (model: DesktopModelRecord): string => {
 };
 
 const modelMetadataHint =
-  "For exact parameter count and tokenizer details, include a companion model metadata file or manifest with explicit values. GGUF-only detection can be incomplete or wrong for those fields.";
+  "For exact parameter count and tokenizer details, include a companion model metadata file or manifest with explicit values. Lightweight local detection can be incomplete or wrong for those fields.";
 
 const getStateToneClass = (state: DesktopModelRecord["state"]): string => {
   switch (state) {
@@ -302,6 +307,7 @@ const formatCapabilityToggle = (value: CapabilityToggleValue): string => {
 export function ModelsScreen({
   engines,
   models,
+  runtimeContext,
   selectedModelId,
   shellState,
   onSelectModel,
@@ -321,7 +327,7 @@ export function ModelsScreen({
   const [pendingImport, setPendingImport] = useState(false);
   const [pendingActionModelId, setPendingActionModelId] = useState<string | null>(null);
   const [pendingEngineAction, setPendingEngineAction] = useState<
-    "download" | "import" | "activate" | null
+    "download" | "import" | "install-mlx" | "activate" | null
   >(null);
   const [engineFeedback, setEngineFeedback] = useState<EngineFeedbackState>(null);
   const [selectedEngineVersionTag, setSelectedEngineVersionTag] = useState<string | null>(null);
@@ -343,14 +349,15 @@ export function ModelsScreen({
   const selectedModel =
     (selectedModelId ? models.find((model) => model.id === selectedModelId) : undefined) ??
     models[0];
+  const mlxSupported = runtimeContext?.mlx.supported ?? false;
   const connected = shellState.phase === "connected";
   const activeEngineVersionTag =
     engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
   const selectedEngineVersion =
     selectedEngineVersionTag &&
     engines.some((engine) => engine.version === selectedEngineVersionTag)
-      ? selectedEngineVersionTag
-      : activeEngineVersionTag;
+      ? engines.find((engine) => engine.version === selectedEngineVersionTag) ?? null
+      : engines.find((engine) => engine.version === activeEngineVersionTag) ?? null;
   const canRegister = connected && Boolean(importFilePath) && !pendingImport;
   const canPreload =
     connected &&
@@ -390,6 +397,7 @@ export function ModelsScreen({
     pendingActionModelId !== selectedModel.id;
   const hasCapabilityOverrides =
     !!selectedModel && Object.keys(selectedModel.capabilityOverrides).length > 0;
+  const selectedModelUsesLlamaRuntime = selectedModel?.engineType === "llama.cpp";
 
   useEffect(() => {
     if (!selectedModel) {
@@ -504,7 +512,9 @@ export function ModelsScreen({
     if (!importFilePath) {
       setFeedback({
         tone: "error",
-        text: "Choose a local GGUF before trying to register it.",
+        text: mlxSupported
+          ? "Choose a local GGUF file or MLX model directory before trying to register it."
+          : "Choose a local GGUF before trying to register it.",
       });
       return;
     }
@@ -532,7 +542,7 @@ export function ModelsScreen({
     } catch (error) {
       setFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Unable to register the selected artifact.",
+        text: error instanceof Error ? error.message : "Unable to register the selected model.",
       });
     } finally {
       setPendingImport(false);
@@ -598,7 +608,10 @@ export function ModelsScreen({
   };
 
   const handleActivateEngineVersion = async () => {
-    if (!selectedEngineVersion) {
+    if (
+      !selectedEngineVersion ||
+      (selectedEngineVersion.engineType !== "llama.cpp" && selectedEngineVersion.engineType !== "mlx")
+    ) {
       return;
     }
 
@@ -606,19 +619,49 @@ export function ModelsScreen({
     setPendingEngineAction("activate");
 
     try {
-      const result = await onActivateEngineVersion(selectedEngineVersion);
+      const result = await onActivateEngineVersion({
+        engineType: selectedEngineVersion.engineType,
+        versionTag: selectedEngineVersion.version,
+      });
 
       setSelectedEngineVersionTag(result.engine.version);
       setEngineFeedback({
         tone: "success",
         title: "Version activated",
-        text: `Activated ${result.engine.version}. Future launches will use that llama.cpp binary.`,
+        text: `Activated ${result.engine.version}. Future launches will use that ${result.engine.engineType} runtime.`,
       });
     } catch (error) {
       setEngineFeedback({
         tone: "error",
         title: "Action blocked",
         text: error instanceof Error ? error.message : "Unable to activate the selected version.",
+      });
+    } finally {
+      setPendingEngineAction(null);
+    }
+  };
+
+  const handleInstallMlxRuntime = async () => {
+    setEngineFeedback(null);
+    setPendingEngineAction("install-mlx");
+
+    try {
+      const result = await onInstallEngineBinary({
+        engineType: "mlx",
+        action: "install-managed-runtime",
+      });
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: "Runtime installed",
+        text: `Installed managed MLX runtime ${result.engine.version}.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Install blocked",
+        text: error instanceof Error ? error.message : "Unable to install the MLX runtime.",
       });
     } finally {
       setPendingEngineAction(null);
@@ -712,27 +755,35 @@ export function ModelsScreen({
         1,
         Number.parseInt(configDraft.defaultTtlMinutes, 10) || 15,
       );
+      const basePayload: DesktopModelConfigUpdateRequest = {
+        pinned: configDraft.pinned,
+        defaultTtlMs: defaultTtlMinutes * 60_000,
+        capabilityOverrides: toCapabilityOverrides(configDraft.capabilityOverrides),
+      };
       const batchSize = configDraft.batchSize.trim()
         ? Number.parseInt(configDraft.batchSize, 10)
         : 3072;
-      if (batchSize % 512 !== 0) {
+      if (selectedModel.engineType === "llama.cpp" && batchSize % 512 !== 0) {
         throw new Error("Batch size must be a multiple of 512.");
       }
+
       const result = await onUpdateModelConfig(selectedModel.id, {
-        pinned: configDraft.pinned,
-        defaultTtlMs: defaultTtlMinutes * 60_000,
-        ...(configDraft.contextLength.trim()
-          ? { contextLength: Number.parseInt(configDraft.contextLength, 10) }
+        ...basePayload,
+        ...(selectedModel.engineType === "llama.cpp"
+          ? {
+              ...(configDraft.contextLength.trim()
+                ? { contextLength: Number.parseInt(configDraft.contextLength, 10) }
+                : {}),
+              batchSize,
+              ...(configDraft.gpuLayers.trim()
+                ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
+                : {}),
+              ...(configDraft.parallelSlots.trim()
+                ? { parallelSlots: Number.parseInt(configDraft.parallelSlots, 10) }
+                : {}),
+              flashAttentionType: configDraft.flashAttentionType,
+            }
           : {}),
-        batchSize,
-        ...(configDraft.gpuLayers.trim()
-          ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
-          : {}),
-        ...(configDraft.parallelSlots.trim()
-          ? { parallelSlots: Number.parseInt(configDraft.parallelSlots, 10) }
-          : {}),
-        flashAttentionType: configDraft.flashAttentionType,
-        capabilityOverrides: toCapabilityOverrides(configDraft.capabilityOverrides),
       });
       setConfigDraft({
         pinned: result.model.pinned,
@@ -747,7 +798,10 @@ export function ModelsScreen({
       });
       setFeedback({
         tone: "success",
-        text: `Saved cold-start settings for ${selectedModel.displayName}. Changes apply on the next preload.`,
+        text:
+          selectedModel.engineType === "llama.cpp"
+            ? `Saved cold-start settings for ${selectedModel.displayName}. Changes apply on the next preload.`
+            : `Saved shared runtime settings for ${selectedModel.displayName}.`,
       });
     } catch (error) {
       setFeedback({
@@ -795,7 +849,9 @@ export function ModelsScreen({
             <div className="empty-panel">
               <strong>No local models registered yet.</strong>
               <p>
-                Pick a GGUF and register it to unlock the runtime detail view and preload controls.
+                {mlxSupported
+                  ? "Pick a GGUF file or MLX model directory and register it to unlock the runtime detail view and preload controls."
+                  : "Pick a GGUF and register it to unlock the runtime detail view and preload controls."}
               </p>
             </div>
           ) : (
@@ -917,7 +973,11 @@ export function ModelsScreen({
                 <div className="panel-header">
                   <div>
                     <span className="section-label">Advanced configuration</span>
-                    <h3>Safe cold-start overrides</h3>
+                    <h3>
+                      {selectedModelUsesLlamaRuntime
+                        ? "Safe cold-start overrides"
+                        : "Shared runtime settings"}
+                    </h3>
                   </div>
                   <span
                     className={
@@ -930,8 +990,9 @@ export function ModelsScreen({
                   </span>
                 </div>
                 <p>
-                  These settings persist to the model profile and apply on the next preload.
-                  Loaded workers must be evicted first so the runtime key stays consistent.
+                  {selectedModelUsesLlamaRuntime
+                    ? "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
+                    : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
                 </p>
 
                 <div className="settings-grid">
@@ -951,89 +1012,93 @@ export function ModelsScreen({
                       value={configDraft.defaultTtlMinutes}
                     />
                   </label>
-                  <label className="field-stack">
-                    <span className="section-label">Context length</span>
-                    <input
-                      className="text-input"
-                      disabled={!canSaveConfig}
-                      min="1"
-                      onChange={(event) =>
-                        setConfigDraft((current) => ({
-                          ...current,
-                          contextLength: event.target.value,
-                        }))
-                      }
-                      type="number"
-                      value={configDraft.contextLength}
-                    />
-                  </label>
-                  <label className="field-stack">
-                    <span className="section-label">Batch size</span>
-                    <input
-                      className="text-input"
-                      disabled={!canSaveConfig}
-                      min="512"
-                      step="512"
-                      onChange={(event) =>
-                        setConfigDraft((current) => ({
-                          ...current,
-                          batchSize: event.target.value,
-                        }))
-                      }
-                      type="number"
-                      value={configDraft.batchSize}
-                    />
-                  </label>
-                  <label className="field-stack">
-                    <span className="section-label">GPU layers</span>
-                    <input
-                      className="text-input"
-                      disabled={!canSaveConfig}
-                      min="1"
-                      onChange={(event) =>
-                        setConfigDraft((current) => ({
-                          ...current,
-                          gpuLayers: event.target.value,
-                        }))
-                      }
-                      type="number"
-                      value={configDraft.gpuLayers}
-                    />
-                  </label>
-                  <label className="field-stack">
-                    <span className="section-label">Parallel slots</span>
-                    <input
-                      className="text-input"
-                      disabled={!canSaveConfig}
-                      min="1"
-                      onChange={(event) =>
-                        setConfigDraft((current) => ({
-                          ...current,
-                          parallelSlots: event.target.value,
-                        }))
-                      }
-                      type="number"
-                      value={configDraft.parallelSlots}
-                    />
-                  </label>
-                  <label className="field-stack">
-                    <span className="section-label">Flash attention</span>
-                    <select
-                      className="text-input"
-                      disabled={!canSaveConfig}
-                      onChange={(event) =>
-                        setConfigDraft((current) => ({
-                          ...current,
-                          flashAttentionType: event.target.value as FlashAttentionValue,
-                        }))
-                      }
-                      value={configDraft.flashAttentionType}
-                    >
-                      <option value="auto">Auto</option>
-                      <option value="enabled">Enabled</option>
-                      <option value="disabled">Disabled</option>
-                    </select>
-                  </label>
+                  {selectedModelUsesLlamaRuntime ? (
+                    <>
+                      <label className="field-stack">
+                        <span className="section-label">Context length</span>
+                        <input
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          min="1"
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              contextLength: event.target.value,
+                            }))
+                          }
+                          type="number"
+                          value={configDraft.contextLength}
+                        />
+                      </label>
+                      <label className="field-stack">
+                        <span className="section-label">Batch size</span>
+                        <input
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          min="512"
+                          step="512"
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              batchSize: event.target.value,
+                            }))
+                          }
+                          type="number"
+                          value={configDraft.batchSize}
+                        />
+                      </label>
+                      <label className="field-stack">
+                        <span className="section-label">GPU layers</span>
+                        <input
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          min="1"
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              gpuLayers: event.target.value,
+                            }))
+                          }
+                          type="number"
+                          value={configDraft.gpuLayers}
+                        />
+                      </label>
+                      <label className="field-stack">
+                        <span className="section-label">Parallel slots</span>
+                        <input
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          min="1"
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              parallelSlots: event.target.value,
+                            }))
+                          }
+                          type="number"
+                          value={configDraft.parallelSlots}
+                        />
+                      </label>
+                      <label className="field-stack">
+                        <span className="section-label">Flash attention</span>
+                        <select
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              flashAttentionType: event.target.value as FlashAttentionValue,
+                            }))
+                          }
+                          value={configDraft.flashAttentionType}
+                        >
+                          <option value="auto">Auto</option>
+                          <option value="enabled">Enabled</option>
+                          <option value="disabled">Disabled</option>
+                        </select>
+                      </label>
+                    </>
+                  ) : null}
                 </div>
 
                 <label className="checkbox-row">
@@ -1080,8 +1145,8 @@ export function ModelsScreen({
                 </div>
                 <p>
                   Leave a capability on <strong>Auto</strong> to keep the detected default from
-                  the GGUF artifact. Explicit overrides are saved to the profile and apply on the
-                  next preload.
+                  the registered model metadata. Explicit overrides are saved to the profile and
+                  apply on the next preload.
                 </p>
 
                 <div className="capability-override-list">
@@ -1165,15 +1230,21 @@ export function ModelsScreen({
       <div className="screen-grid">
         <article className="info-card">
           <span className="section-label">Import and register</span>
-          <h3>Local GGUF intake</h3>
+          <h3>{mlxSupported ? "Local model intake" : "Local GGUF intake"}</h3>
           <p>
-            The desktop shell only asks the gateway to register artifacts after you pick them
-            through the preload-safe dialog.
+            {mlxSupported
+              ? "The desktop shell only asks the gateway to register artifacts after you pick a GGUF file or MLX model directory through the preload-safe dialog."
+              : "The desktop shell only asks the gateway to register artifacts after you pick them through the preload-safe dialog."}
           </p>
 
           <div className="import-preview">
-            <strong>Selected artifact</strong>
-            <span>{importFilePath ?? "No local GGUF selected yet."}</span>
+            <strong>Selected model</strong>
+            <span>
+              {importFilePath ??
+                (mlxSupported
+                  ? "No local GGUF file or MLX model directory selected yet."
+                  : "No local GGUF selected yet.")}
+            </span>
           </div>
 
           <label className="field-stack">
@@ -1193,7 +1264,7 @@ export function ModelsScreen({
               onClick={() => void handlePickImport()}
               type="button"
             >
-              Choose GGUF
+              {mlxSupported ? "Choose model" : "Choose GGUF"}
             </button>
             <button
               className="primary-button"
@@ -1208,10 +1279,10 @@ export function ModelsScreen({
 
         <article className="info-card">
           <span className="section-label">Engine versions</span>
-          <h3>Resolved runtime binaries</h3>
+          <h3>Resolved runtimes</h3>
           <p>
             The gateway records the engine version that actually served the worker so the desktop
-            detail view can show what is running.
+            detail view can show what is running across both `llama.cpp` and MLX.
           </p>
 
           <div className="button-row">
@@ -1223,6 +1294,16 @@ export function ModelsScreen({
             >
               {pendingEngineAction === "download" ? "Downloading..." : "Download Metal build"}
             </button>
+            {mlxSupported ? (
+              <button
+                className="secondary-button"
+                disabled={!connected || pendingEngineAction !== null}
+                onClick={() => void handleInstallMlxRuntime()}
+                type="button"
+              >
+                {pendingEngineAction === "install-mlx" ? "Installing..." : "Install MLX runtime"}
+              </button>
+            ) : null}
             <button
               className="secondary-button"
               disabled={!connected || pendingEngineAction !== null}
@@ -1234,23 +1315,25 @@ export function ModelsScreen({
           </div>
 
           <p className="search-detail-note">
-            Downloaded Metal builds are copied into the app support engines directory. Local binary
-            imports are packaged the same way so the app owns the installed executable. Use the
-            picker below to switch the active version for future launches.
+            Downloaded Metal builds and managed MLX runtimes are copied into the app support
+            engines directory. Local binary imports are packaged the same way so the app owns the
+            installed executable. Use the picker below to switch the active version for future
+            launches.
           </p>
 
           {engines.length > 0 ? (
             <>
               <label className="field-stack">
-                <span className="section-label">Active llama.cpp version</span>
+                <span className="section-label">Active engine version</span>
                 <select
                   className="text-input"
                   disabled={!connected || pendingEngineAction !== null}
                   onChange={(event) => setSelectedEngineVersionTag(event.target.value)}
-                  value={selectedEngineVersion ?? ""}
+                  value={selectedEngineVersion?.version ?? ""}
                 >
                   {engines.map((engine) => (
                     <option key={engine.id} value={engine.version}>
+                      {engine.engineType} /{" "}
                       {engine.version}
                       {engine.active ? " (active)" : ""}
                     </option>
@@ -1294,7 +1377,7 @@ export function ModelsScreen({
           {engines.length === 0 ? (
             <div className="empty-panel compact-empty">
               <strong>No engine versions recorded yet.</strong>
-              <p>The first preload will materialize the resolved llama.cpp harness here.</p>
+              <p>The first preload or runtime install will materialize the resolved engine here.</p>
             </div>
           ) : (
             <div className="engine-list">

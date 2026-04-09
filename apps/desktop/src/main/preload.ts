@@ -20,6 +20,7 @@ import type {
   DesktopModelLibrary,
   DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
+  DesktopRuntimeContext,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -28,7 +29,6 @@ import type {
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./channels";
 import type { DesktopSystemPaths } from "./gateway-manager";
-import type { DesktopRuntimeContext } from "./index";
 
 type FileDialogResult = {
   canceled: boolean;

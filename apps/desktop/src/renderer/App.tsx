@@ -1,5 +1,4 @@
 import type {
-  ControlAuthHeaderName,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
   DesktopEngineRecord,
@@ -8,6 +7,7 @@ import type {
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
+  DesktopRuntimeContext,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -29,33 +29,6 @@ type DesktopSystemPaths = {
   logsDir: string;
   sessionLogFile: string;
   discoveryFile: string;
-};
-
-type DesktopRuntimeContext = {
-  desktop: {
-    closeToTray: boolean;
-    autoLaunchGateway: boolean;
-    theme: "system" | "light" | "dark";
-    controlAuthHeaderName: ControlAuthHeaderName;
-    controlAuthToken?: string;
-  };
-  gateway: {
-    enableLan: boolean;
-    authRequired: boolean;
-    publicHost: string;
-    publicPort: number;
-    controlHost: string;
-    corsAllowlist: string[];
-    defaultModelTtlMs: number;
-    maxActiveModelsInMemory: number;
-    localModelsDir: string;
-    publicAuthToken?: string;
-    controlAuthHeaderName: ControlAuthHeaderName;
-  };
-  files: {
-    desktopConfigFile: string;
-    gatewayConfigFile: string;
-  };
 };
 
 const initialShellState: DesktopShellState = {
@@ -299,12 +272,14 @@ export function App() {
     return result;
   };
 
-  const activateEngineVersion = async (
-    versionTag: string,
-  ): Promise<DesktopEngineInstallResponse> => {
+  const activateEngineVersion = async (payload: {
+    engineType: "llama.cpp" | "mlx";
+    versionTag: string;
+  }): Promise<DesktopEngineInstallResponse> => {
     const result = await window.desktopApi.gateway.installEngineBinary({
+      engineType: payload.engineType,
       action: "activate-installed-version",
-      versionTag,
+      versionTag: payload.versionTag,
     });
     requestRefresh();
     return result;
@@ -480,6 +455,7 @@ export function App() {
                 <ModelsScreen
                   engines={engines}
                   models={modelLibrary}
+                  runtimeContext={runtimeContext}
                   onEvictModel={evictModel}
                   onPickImportFile={pickLocalModel}
                   onPickEngineBinaryFile={pickEngineBinary}

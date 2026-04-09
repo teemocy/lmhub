@@ -373,7 +373,7 @@ async function registerControlApp(
     if (!parsed.success) {
       return reply.code(400).send({
         error: "validation_error",
-        message: parsed.error.issues[0]?.message ?? "A local GGUF path is required.",
+        message: parsed.error.issues[0]?.message ?? "A local model file or directory path is required.",
         requestId: request.id,
       });
     }

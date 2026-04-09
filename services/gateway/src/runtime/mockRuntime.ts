@@ -1068,15 +1068,23 @@ export class MockGatewayRuntime {
     input: DesktopEngineInstallRequest,
     _traceId?: string,
   ): DesktopEngineInstallResponse {
+    const engineType =
+      "engineType" in input && input.engineType === "mlx" ? "mlx" : "llama.cpp";
     const versionTag =
-      input.action === "download-latest-metal"
+      input.action === "install-managed-runtime"
+        ? "mock-mlx-runtime"
+        : input.action === "download-latest-metal"
         ? "mock-metal-latest"
         : input.action === "import-local-binary"
           ? `mock-local-${slugifyFileName(input.filePath) || "binary"}`
           : input.versionTag;
-    const existingRecord = this.#engines.find((record) => record.version === versionTag);
+    const existingRecord = this.#engines.find(
+      (record) => record.engineType === engineType && record.version === versionTag,
+    );
     const binaryName =
-      input.action === "download-latest-metal"
+      input.action === "install-managed-runtime"
+        ? "python"
+        : input.action === "download-latest-metal"
         ? "llama-server"
         : input.action === "import-local-binary"
           ? path.basename(input.filePath)
@@ -1084,22 +1092,26 @@ export class MockGatewayRuntime {
             ? path.basename(existingRecord.binaryPath)
             : "llama-server";
     const binaryPath =
-      input.action === "download-latest-metal"
+      input.action === "install-managed-runtime"
+        ? `/mock/support/engines/mlx/versions/${versionTag}/venv/bin/python`
+        : input.action === "download-latest-metal"
         ? `/mock/support/engines/llama.cpp/versions/${versionTag}/llama-server`
         : input.action === "import-local-binary"
           ? `/mock/support/engines/llama.cpp/versions/${versionTag}/${binaryName}`
           : (existingRecord?.binaryPath ??
-            `/mock/support/engines/llama.cpp/versions/${versionTag}/${binaryName}`);
+            `/mock/support/engines/${engineType}/versions/${versionTag}/${binaryName}`);
     const engine: EngineRecord = {
-      id: `llama.cpp:${versionTag}`,
-      engineType: "llama.cpp",
+      id: `${engineType}:${versionTag}`,
+      engineType,
       version: versionTag,
       channel: "stable",
       installed: true,
       active: true,
       binaryPath,
       compatibilityNotes:
-        input.action === "download-latest-metal"
+        input.action === "install-managed-runtime"
+          ? "Mock managed MLX runtime install."
+          : input.action === "download-latest-metal"
           ? "Mock packaged Metal binary install."
           : input.action === "import-local-binary"
             ? `Mock local binary import from ${input.filePath}.`
@@ -1107,7 +1119,9 @@ export class MockGatewayRuntime {
       installedAt: new Date().toISOString(),
     };
 
-    const existingIndex = this.#engines.findIndex((record) => record.version === versionTag);
+    const existingIndex = this.#engines.findIndex(
+      (record) => record.engineType === engineType && record.version === versionTag,
+    );
     if (existingIndex >= 0) {
       this.#engines.splice(existingIndex, 1, engine);
     } else {
@@ -1115,18 +1129,22 @@ export class MockGatewayRuntime {
     }
 
     for (const record of this.#engines) {
-      record.active = record.version === versionTag;
+      if (record.engineType === engineType) {
+        record.active = record.version === versionTag;
+      }
     }
 
     return {
       accepted: true,
       engine: structuredClone(engine),
       notes: [
-        input.action === "download-latest-metal"
+        input.action === "install-managed-runtime"
+          ? "Mock installed a managed MLX runtime."
+          : input.action === "download-latest-metal"
           ? "Mock downloaded a packaged Metal llama.cpp binary."
           : input.action === "import-local-binary"
             ? `Mock imported local llama.cpp binary from ${input.filePath}.`
-            : `Mock activated installed llama.cpp version ${input.versionTag}.`,
+            : `Mock activated installed ${engineType} version ${input.versionTag}.`,
       ],
     };
   }

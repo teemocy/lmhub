@@ -1,4 +1,4 @@
-import type { ControlAuthHeaderName, DesktopShellState } from "@localhub/shared-contracts";
+import type { DesktopRuntimeContext, DesktopShellState } from "@localhub/shared-contracts";
 import { useEffect, useState } from "react";
 
 type DesktopSystemPaths = {
@@ -7,32 +7,6 @@ type DesktopSystemPaths = {
   logsDir: string;
   sessionLogFile: string;
   discoveryFile: string;
-};
-
-type DesktopRuntimeContext = {
-  desktop: {
-    closeToTray: boolean;
-    autoLaunchGateway: boolean;
-    theme: "system" | "light" | "dark";
-    controlAuthHeaderName: ControlAuthHeaderName;
-    controlAuthToken?: string;
-  };
-  gateway: {
-    enableLan: boolean;
-    authRequired: boolean;
-    publicHost: string;
-    publicPort: number;
-    controlHost: string;
-    corsAllowlist: string[];
-    defaultModelTtlMs: number;
-    maxActiveModelsInMemory: number;
-    localModelsDir: string;
-    publicAuthToken?: string;
-  };
-  files: {
-    desktopConfigFile: string;
-    gatewayConfigFile: string;
-  };
 };
 
 type SettingsScreenProps = {

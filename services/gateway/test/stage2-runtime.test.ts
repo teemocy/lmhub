@@ -84,6 +84,27 @@ async function writeSampleGgufFile(targetPath: string): Promise<void> {
   await writeFile(targetPath, payload);
 }
 
+async function writeSampleMlxModelDirectory(targetPath: string): Promise<void> {
+  await mkdir(targetPath, { recursive: true });
+  await writeFile(
+    path.join(targetPath, "config.json"),
+    `${JSON.stringify(
+      {
+        _name_or_path: "Gateway Stage2 MLX Chat",
+        model_type: "llama",
+        max_position_embeddings: 4096,
+        num_parameters: 123456789,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await writeFile(path.join(targetPath, "tokenizer.json"), "{}\n");
+  await writeFile(path.join(targetPath, "special_tokens_map.json"), "{}\n");
+  await writeFile(path.join(targetPath, "quant_strategy.json"), `${JSON.stringify({ bits: 4 })}\n`);
+  await writeFile(path.join(targetPath, "model.safetensors"), "");
+}
+
 function createDelayedChatResponse(model: string, userMessage: string, delayMs: number): Response {
   const encoder = new TextEncoder();
   const created = Math.floor(Date.now() / 1000);
@@ -205,6 +226,7 @@ interface Stage2Fixture {
 }
 
 const fixtures: Stage2Fixture[] = [];
+const supportsMlxTests = process.platform === "darwin" && process.arch === "arm64";
 const embeddingsModelArtifact = {
   ...fixtureModelArtifact,
   id: "model_bge_small_embed",
@@ -447,6 +469,131 @@ describe("gateway stage 2 runtime", () => {
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });
+
+  it.runIf(supportsMlxTests)(
+    "installs a managed MLX runtime, registers an MLX directory, and serves chat",
+    async () => {
+      const fixture = await createStage2Fixture();
+      const gateway = await buildGateway({
+        config: createTestConfig(),
+        runtime: fixture.runtime,
+      });
+      const artifactPath = path.join(fixture.appPaths.supportRoot, "models", "gateway-stage2-mlx");
+
+      await writeSampleMlxModelDirectory(artifactPath);
+      await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+      const installResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/engines",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          engineType: "mlx",
+          action: "install-managed-runtime",
+          versionTag: "stage2-mlx-runtime",
+        },
+      });
+
+      expect(installResponse.statusCode).toBe(202);
+      expect(installResponse.json()).toMatchObject({
+        accepted: true,
+        engine: expect.objectContaining({
+          engineType: "mlx",
+          version: "stage2-mlx-runtime",
+          active: true,
+        }),
+        notes: expect.arrayContaining([expect.stringContaining("fake MLX runtime")]),
+      });
+
+      const registerResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/models/register-local",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          filePath: artifactPath,
+          displayName: "Gateway MLX Chat",
+        },
+      });
+
+      expect(registerResponse.statusCode).toBe(201);
+      expect(registerResponse.json()).toMatchObject({
+        created: true,
+        model: expect.objectContaining({
+          displayName: "Gateway MLX Chat",
+          engineType: "mlx",
+          format: "mlx",
+          localPath: artifactPath,
+          architecture: "llama",
+          contextLength: 4096,
+          parameterCount: 123456789,
+          artifactStatus: "available",
+          state: "idle",
+        }),
+      });
+
+      const registeredModel = registerResponse.json().model as {
+        id: string;
+        batchSize?: number;
+        gpuLayers?: number;
+        parallelSlots?: number;
+        flashAttentionType?: string;
+      };
+      expect(registeredModel.batchSize).toBeUndefined();
+      expect(registeredModel.gpuLayers).toBeUndefined();
+      expect(registeredModel.parallelSlots).toBeUndefined();
+      expect(registeredModel.flashAttentionType).toBeUndefined();
+
+      const chatResponse = await gateway.publicApp.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: "Bearer public-secret-stage2",
+        },
+        payload: {
+          model: registeredModel.id,
+          messages: [{ role: "user", content: "Hello from MLX." }],
+        },
+      });
+
+      expect(chatResponse.statusCode).toBe(200);
+      expect(chatResponse.json()).toMatchObject({
+        object: "chat.completion",
+        model: registeredModel.id,
+        choices: [
+          expect.objectContaining({
+            finish_reason: "stop",
+            message: expect.objectContaining({
+              role: "assistant",
+            }),
+          }),
+        ],
+      });
+
+      const embeddingsResponse = await gateway.publicApp.inject({
+        method: "POST",
+        url: "/v1/embeddings",
+        headers: {
+          authorization: "Bearer public-secret-stage2",
+        },
+        payload: {
+          model: registeredModel.id,
+          input: "MLX embeddings should be rejected in the first pass.",
+        },
+      });
+
+      expect(embeddingsResponse.statusCode).toBe(409);
+      expect(embeddingsResponse.json()).toMatchObject({
+        error: "unsupported_model_capability",
+        message: `Model ${registeredModel.id} does not support embeddings requests.`,
+      });
+
+      await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+    },
+  );
 
   it("imports a local llama.cpp binary through the control route and packages it into support", async () => {
     const fixture = await createStage2Fixture();

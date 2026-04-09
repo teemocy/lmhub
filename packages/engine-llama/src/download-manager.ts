@@ -22,7 +22,6 @@ import type {
   ProviderSearchResult,
 } from "@localhub/shared-contracts/foundation-providers";
 
-import type { LlamaCppModelManager } from "./model-manager.js";
 import type { ProviderSearchService } from "./providers.js";
 
 const DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -40,6 +39,8 @@ interface DownloadTaskMetadata {
   autoRegister?: boolean;
   bundleId?: string;
   bundlePrimaryArtifactId?: string;
+  engineType?: string;
+  registrationPath?: string;
 }
 
 export interface Stage3DownloadRecord {
@@ -67,12 +68,24 @@ export interface Stage3DownloadRequest {
   autoRegister?: boolean;
   bundleId?: string;
   bundlePrimaryArtifactId?: string;
+  engineType?: string;
+  registrationPath?: string;
+}
+
+export interface LocalModelRegistrar {
+  registerLocalModel(options: {
+    filePath: string;
+    displayName?: string;
+    expectedChecksumSha256?: string;
+    sourceKind?: "local" | "huggingface" | "modelscope" | "manual" | "unknown";
+    remoteUrl?: string;
+  }): Promise<{ artifact: { id: string; sizeBytes: number }; profile: { displayName: string } }>;
 }
 
 export interface LlamaCppDownloadManagerOptions {
   supportRoot: string;
   downloadsRepository: DownloadTasksRepository;
-  modelManager: LlamaCppModelManager;
+  modelRegistrars: Record<string, LocalModelRegistrar>;
   providerSearch: ProviderSearchService;
   emitEvent?: (event: GatewayEvent) => void;
   fetch?: typeof fetch;
@@ -113,7 +126,7 @@ function buildDestinationPath(
 ): string {
   const modelDirectory = path.join(supportRoot, "models", sanitizePathPart(providerModelId));
   const segments = sanitizeRelativeSegments(fileName);
-  return path.join(modelDirectory, ...(segments.length > 0 ? segments : ["artifact.gguf"]));
+  return path.join(modelDirectory, ...(segments.length > 0 ? segments : ["artifact.bin"]));
 }
 
 function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
@@ -131,6 +144,8 @@ function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
   const autoRegister = toOptionalBoolean(metadata.autoRegister);
   const bundleId = toOptionalString(metadata.bundleId);
   const bundlePrimaryArtifactId = toOptionalString(metadata.bundlePrimaryArtifactId);
+  const engineType = toOptionalString(metadata.engineType);
+  const registrationPath = toOptionalString(metadata.registrationPath);
 
   return {
     providerModelId: metadata.providerModelId,
@@ -157,6 +172,8 @@ function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
     ...(autoRegister !== undefined ? { autoRegister } : {}),
     ...(bundleId ? { bundleId } : {}),
     ...(bundlePrimaryArtifactId ? { bundlePrimaryArtifactId } : {}),
+    ...(engineType ? { engineType } : {}),
+    ...(registrationPath ? { registrationPath } : {}),
   };
 }
 
@@ -181,7 +198,7 @@ async function computeFileSha256(filePath: string): Promise<string> {
 export class LlamaCppDownloadManager {
   readonly #supportRoot: string;
   readonly #downloadsRepository: DownloadTasksRepository;
-  readonly #modelManager: LlamaCppModelManager;
+  readonly #modelRegistrars: Map<string, LocalModelRegistrar>;
   readonly #providerSearch: ProviderSearchService;
   readonly #emitEvent: ((event: GatewayEvent) => void) | undefined;
   readonly #fetch: typeof fetch;
@@ -196,7 +213,7 @@ export class LlamaCppDownloadManager {
   constructor(options: LlamaCppDownloadManagerOptions) {
     this.#supportRoot = options.supportRoot;
     this.#downloadsRepository = options.downloadsRepository;
-    this.#modelManager = options.modelManager;
+    this.#modelRegistrars = new Map(Object.entries(options.modelRegistrars));
     this.#providerSearch = options.providerSearch;
     this.#emitEvent = options.emitEvent;
     this.#fetch = options.fetch ?? fetch;
@@ -271,6 +288,8 @@ export class LlamaCppDownloadManager {
         ...(request.bundlePrimaryArtifactId
           ? { bundlePrimaryArtifactId: request.bundlePrimaryArtifactId }
           : {}),
+        ...(request.engineType ? { engineType: request.engineType } : {}),
+        ...(request.registrationPath ? { registrationPath: request.registrationPath } : {}),
       },
       createdAt: now,
       updatedAt: now,
@@ -563,8 +582,27 @@ export class LlamaCppDownloadManager {
     task: DownloadTask,
     metadata: DownloadTaskMetadata,
   ): Promise<Stage3DownloadRecord> {
-    const registered = await this.#modelManager.registerLocalModel({
-      filePath: metadata.destinationPath,
+    const engineType = metadata.engineType ?? "llama.cpp";
+    const registrar = this.#modelRegistrars.get(engineType);
+    if (!registrar) {
+      throw new Error(`No local model registrar is available for engine ${engineType}.`);
+    }
+
+    const registrationPath =
+      metadata.registrationPath === undefined
+        ? engineType === "mlx"
+          ? path.dirname(metadata.destinationPath)
+          : metadata.destinationPath
+        : path.isAbsolute(metadata.registrationPath)
+          ? metadata.registrationPath
+          : path.join(
+              this.#supportRoot,
+              "models",
+              sanitizePathPart(metadata.providerModelId),
+              metadata.registrationPath,
+            );
+    const registered = await registrar.registerLocalModel({
+      filePath: registrationPath,
       ...(metadata.displayName ? { displayName: metadata.displayName } : {}),
       ...(task.checksumSha256 ? { expectedChecksumSha256: task.checksumSha256 } : {}),
       sourceKind: task.provider,

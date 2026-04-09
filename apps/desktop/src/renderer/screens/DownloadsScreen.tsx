@@ -277,6 +277,10 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
               const selectedVariant =
                 detail?.variants.find((variant) => variant.id === selectedVariants[item.id]) ??
                 detail?.variants[0];
+              const selectedVariantIsMlx =
+                selectedVariant?.files.some(
+                  (file) => (file.metadata?.engineType as string | undefined) === "mlx",
+                ) ?? false;
 
               return (
                 <article className="search-result-item" key={item.id}>
@@ -304,7 +308,7 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
 
                     {detail && detail.variants.length > 0 ? (
                       <div className="field-stack search-result-selector">
-                        <label htmlFor={`variant-${item.id}`}>Quant method</label>
+                        <label htmlFor={`variant-${item.id}`}>Variant</label>
                         <select
                           id={`variant-${item.id}`}
                           onChange={(event) =>
@@ -354,7 +358,8 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
                           <div>
                             <dt>Files</dt>
                             <dd>
-                              {selectedVariant.files.length} GGUF file
+                              {selectedVariant.files.length}{" "}
+                              {selectedVariantIsMlx ? "bundle file" : "GGUF file"}
                               {selectedVariant.files.length === 1 ? "" : "s"}
                             </dd>
                           </div>
@@ -389,7 +394,7 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
                             : "Download"}
                         </button>
                       ) : (
-                        <span className="status-pill status-pill-neutral">No GGUF variants</span>
+                        <span className="status-pill status-pill-neutral">No supported variants</span>
                       )}
                     </div>
                   </div>

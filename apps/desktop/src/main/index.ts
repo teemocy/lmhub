@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -8,7 +8,7 @@ import {
   resolveAppPaths,
   writeConfigFile,
 } from "@localhub/platform";
-import type { ControlAuthHeaderName } from "@localhub/shared-contracts";
+import type { ControlAuthHeaderName, DesktopRuntimeContext } from "@localhub/shared-contracts";
 import {
   BrowserWindow,
   type Event as ElectronEvent,
@@ -24,33 +24,6 @@ import {
 import { loadGatewayConfig } from "../../../../services/gateway/src/config";
 import { IPC_CHANNELS } from "./channels";
 import { GatewayManager, resolveDesktopRuntimeEnvironment } from "./gateway-manager";
-
-export type DesktopRuntimeContext = {
-  desktop: {
-    closeToTray: boolean;
-    autoLaunchGateway: boolean;
-    theme: "system" | "light" | "dark";
-    controlAuthHeaderName: ControlAuthHeaderName;
-    controlAuthToken?: string;
-  };
-  gateway: {
-    enableLan: boolean;
-    authRequired: boolean;
-    publicHost: string;
-    publicPort: number;
-    controlHost: string;
-    corsAllowlist: string[];
-    defaultModelTtlMs: number;
-    maxActiveModelsInMemory: number;
-    localModelsDir: string;
-    publicAuthToken?: string;
-    controlAuthHeaderName: ControlAuthHeaderName;
-  };
-  files: {
-    desktopConfigFile: string;
-    gatewayConfigFile: string;
-  };
-};
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -146,6 +119,51 @@ const normalizeLocalModelsDir = (value: string): string => {
   return path.isAbsolute(expanded) ? expanded : path.resolve(appPaths.supportRoot, expanded);
 };
 
+const isMlxSupportedPlatform = (): boolean => process.platform === "darwin" && process.arch === "arm64";
+
+const getDesktopPlatform = (): "darwin" | "linux" | "win32" => {
+  if (process.platform === "darwin" || process.platform === "linux" || process.platform === "win32") {
+    return process.platform;
+  }
+
+  return "linux";
+};
+
+const readInstalledMlxRuntime = (): {
+  installed: boolean;
+  activeVersion?: string;
+  statusMessage?: string;
+} => {
+  const registryFile = path.join(appPaths.supportRoot, "engines", "mlx", "registry.json");
+  if (!existsSync(registryFile)) {
+    return {
+      installed: false,
+      statusMessage: isMlxSupportedPlatform()
+        ? "Managed MLX runtime not installed yet."
+        : "MLX requires Apple Silicon macOS.",
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(registryFile, "utf8")) as {
+      activeVersionTag?: string;
+      versions?: Array<unknown>;
+    };
+    const versionCount = Array.isArray(parsed.versions) ? parsed.versions.length : 0;
+    return {
+      installed: versionCount > 0,
+      ...(typeof parsed.activeVersionTag === "string" ? { activeVersion: parsed.activeVersionTag } : {}),
+      ...(versionCount > 0 ? {} : { statusMessage: "Managed MLX runtime not installed yet." }),
+    };
+  } catch (error) {
+    return {
+      installed: false,
+      statusMessage:
+        error instanceof Error ? error.message : "Unable to read the MLX runtime registry.",
+    };
+  }
+};
+
 const buildRuntimeContext = (): DesktopRuntimeContext => ({
   desktop: {
     closeToTray: desktopConfig.value.closeToTray,
@@ -170,6 +188,14 @@ const buildRuntimeContext = (): DesktopRuntimeContext => ({
       ? { publicAuthToken: sharedGatewayConfig.value.publicAuthToken }
       : {}),
     controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
+  },
+  system: {
+    platform: getDesktopPlatform(),
+    arch: process.arch,
+  },
+  mlx: {
+    supported: isMlxSupportedPlatform(),
+    ...readInstalledMlxRuntime(),
   },
   files: {
     desktopConfigFile: appPaths.desktopConfigFile,
@@ -492,7 +518,9 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelDialog, async () => {
     const options = {
       title: "Pick a local model artifact",
-      properties: ["openFile"] as Array<"openFile">,
+      properties: isMlxSupportedPlatform()
+        ? (["openFile", "openDirectory"] as Array<"openFile" | "openDirectory">)
+        : (["openFile"] as Array<"openFile">),
       filters: [
         {
           name: "Model Artifacts",

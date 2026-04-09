@@ -13,7 +13,7 @@ import {
   type StoredModelRecord,
   openDatabase,
 } from "@localhub/db";
-import { runtimeKeyToString } from "@localhub/engine-core";
+import { runtimeKeyToString, type EngineAdapter, type EngineInstallResult } from "@localhub/engine-core";
 import {
   LlamaCppDownloadManager,
   LlamaCppModelManager,
@@ -22,6 +22,12 @@ import {
   createLlamaCppAdapter,
   createLlamaCppHarness,
 } from "@localhub/engine-llama";
+import {
+  MlxModelManager,
+  createMlxAdapter,
+  isMlxModelDirectoryPath,
+  launchMlxSession,
+} from "@localhub/engine-mlx";
 import { classifyStderrLogLevel, resolveAppPaths } from "@localhub/platform";
 import {
   type ChatCompletionsChunk,
@@ -149,6 +155,27 @@ const QUANTIZATION_TOKEN_PATTERN =
   /^(?:Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4)$/i;
 const SHARD_SUFFIX_PATTERN = /^(.*?)-(\d{5})-of-(\d{5})$/i;
 const AUXILIARY_GGUF_PATTERN = /^mmproj(?:[-_.]|$)/i;
+const MLX_CONFIG_FILE = "config.json";
+
+interface WorkerHarness {
+  readonly child: {
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    stdout: NodeJS.ReadableStream;
+    stderr: NodeJS.ReadableStream;
+    once: (event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void) => void;
+  };
+  readonly command: {
+    command: string;
+    managedBy: "binary" | "fake-worker";
+    healthUrl?: string;
+    transport?: "http" | "filesystem";
+    versionTag?: string;
+    notes?: string[];
+  };
+  waitForReady: (timeoutMs?: number) => Promise<unknown>;
+  stop: (timeoutMs?: number) => Promise<void>;
+}
 
 interface StreamedAssistantAccumulator {
   responseId?: string;
@@ -338,6 +365,9 @@ function toDesktopProviderSearchItem(
 
 function toDesktopProviderCatalogDetail(
   item: ProviderModelSummary,
+  options: {
+    preferMlxVariants?: boolean;
+  } = {},
 ): DesktopProviderCatalogDetailResponse["data"] {
   const baseGroups = new Map<
     string,
@@ -347,8 +377,36 @@ function toDesktopProviderCatalogDetail(
       variants: Map<string, CatalogVariantArtifact[]>;
     }
   >();
+  const mlxGroups = new Map<
+    string,
+    {
+      label: string;
+      files: ProviderArtifactDescriptor[];
+    }
+  >();
 
   for (const artifact of item.artifacts) {
+    if (artifact.format === "mlx") {
+      const normalizedPath = artifact.fileName.replace(/\\/g, "/");
+      const pathSegments = normalizedPath.split("/").filter((segment) => segment.length > 0);
+      const parentSegments = pathSegments.slice(0, -1);
+      const bundleKey = parentSegments.join("/") || "__root__";
+      const bundleLabel =
+        parentSegments.length === 0
+          ? "MLX"
+          : `${parentSegments.at(-1)?.replace(/[_-]+/g, " ") ?? "MLX"} / MLX`;
+      const bundle = mlxGroups.get(bundleKey) ?? {
+        label: bundleLabel,
+        files: [],
+      };
+      if (!mlxGroups.has(bundleKey)) {
+        mlxGroups.set(bundleKey, bundle);
+      }
+
+      bundle.files.push(artifact);
+      continue;
+    }
+
     const file = toCatalogVariantArtifact(artifact);
     const baseKey = file.baseModelName.toLowerCase();
     const baseGroup = baseGroups.get(baseKey) ?? {
@@ -410,14 +468,69 @@ function toDesktopProviderCatalogDetail(
           ...(file.artifact.checksum?.algorithm === "sha256"
             ? { checksumSha256: file.artifact.checksum.value }
             : {}),
-          metadata: file.artifact.metadata ?? {},
+          metadata: {
+            ...(file.artifact.metadata ?? {}),
+            engineType: "llama.cpp",
+          },
         })),
         ...(totalSizeBytes !== undefined ? { totalSizeBytes } : {}),
       });
     }
   }
 
+  for (const [bundleKey, bundle] of mlxGroups.entries()) {
+    const files = [...bundle.files].sort((left, right) => left.fileName.localeCompare(right.fileName));
+    const primary =
+      files.find((file) => file.fileName.replace(/\\/g, "/").split("/").at(-1) === MLX_CONFIG_FILE) ??
+      files[0];
+    if (!primary) {
+      continue;
+    }
+
+    const totalSizeBytes = files.some((file) => file.sizeBytes === undefined)
+      ? undefined
+      : files.reduce((total, file) => total + (file.sizeBytes ?? 0), 0);
+    const registrationPath =
+      bundleKey === "__root__"
+        ? ""
+        : bundleKey
+            .split("/")
+            .filter((segment) => segment.length > 0)
+            .join("/");
+
+    variants.push({
+      id: `${item.provider}:${item.providerModelId}:mlx:${bundleKey}`,
+      label: bundle.label,
+      primaryArtifactId: primary.artifactId,
+      files: files.map((file) => ({
+        id: file.artifactId,
+        artifactId: file.artifactId,
+        artifactName: file.fileName,
+        ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+        ...(file.quantization ? { quantization: file.quantization } : {}),
+        ...(file.architecture ? { architecture: file.architecture } : {}),
+        ...(file.checksum?.algorithm === "sha256" ? { checksumSha256: file.checksum.value } : {}),
+        metadata: {
+          ...(file.metadata ?? {}),
+          engineType: "mlx",
+          ...(registrationPath ? { registrationPath } : {}),
+        },
+      })),
+      ...(totalSizeBytes !== undefined ? { totalSizeBytes } : {}),
+    });
+  }
+
   variants.sort((left, right) => {
+    const leftIsMlx = left.files.some(
+      (file) => (file.metadata?.engineType as string | undefined) === "mlx",
+    );
+    const rightIsMlx = right.files.some(
+      (file) => (file.metadata?.engineType as string | undefined) === "mlx",
+    );
+    if (options.preferMlxVariants && leftIsMlx !== rightIsMlx) {
+      return leftIsMlx ? -1 : 1;
+    }
+
     const leftSize = left.totalSizeBytes ?? 0;
     const rightSize = right.totalSizeBytes ?? 0;
     if (leftSize !== rightSize) {
@@ -456,6 +569,21 @@ interface RepositoryGatewayRuntimeOptions {
   circuitBreakerCooldownMs?: number;
 }
 
+interface EngineBackedModelManager {
+  scanLocalModels(): Promise<unknown[]>;
+  registerLocalModel(options: {
+    filePath: string;
+    displayName?: string;
+    expectedChecksumSha256?: string;
+    sourceKind?: "local" | "huggingface" | "modelscope" | "manual" | "unknown";
+    remoteUrl?: string;
+  }): Promise<{
+    artifact: ModelArtifact;
+    profile: ModelProfile;
+  }>;
+  activateEngineVersion(versionTag: string): Promise<EngineInstallResult>;
+}
+
 interface ResolvedModelRecord {
   stored: StoredModelRecord;
   artifact: ModelArtifact;
@@ -474,9 +602,10 @@ interface RuntimeSnapshot {
 }
 
 interface ManagedWorker {
+  adapter: EngineAdapter;
   artifact: ModelArtifact;
   evictionTimer: NodeJS.Timeout | undefined;
-  harness: Awaited<ReturnType<typeof createLlamaCppHarness>>;
+  harness: WorkerHarness;
   inflightRequests: number;
   intentionalStop: boolean;
   lastUsedAt: number;
@@ -511,6 +640,10 @@ function normalizeTraceId(value: string | undefined): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function isMlxSupportedPlatform(): boolean {
+  return process.platform === "darwin" && process.arch === "arm64";
 }
 
 function normalizeCapabilityOverrides(
@@ -957,7 +1090,7 @@ function createFakeChatCompletionResponse(
     };
   }
 
-  const answer = `Fake response from ${input.model}: ${userContent || "Hello from fake llama.cpp"}`;
+  const answer = `Fake response from ${input.model}: ${userContent || "Hello from fake local runtime"}`;
   const completionTokens = countChatContentTokens(answer);
 
   return {
@@ -1130,8 +1263,9 @@ function toDesktopModelRecord(
 ): DesktopModelRecord {
   const artifactStatus = getArtifactStatus(stored.artifact);
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
-  const batchSize = getEffectiveBatchSize(profile);
-  const flashAttentionType = getEffectiveFlashAttentionType(profile);
+  const llamaRuntimeControls = profile.engineType === "llama.cpp";
+  const batchSize = llamaRuntimeControls ? getEffectiveBatchSize(profile) : undefined;
+  const flashAttentionType = llamaRuntimeControls ? getEffectiveFlashAttentionType(profile) : undefined;
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1157,20 +1291,22 @@ function toDesktopModelRecord(
     ...(stored.artifact.architecture ? { architecture: stored.artifact.architecture } : {}),
     ...(stored.artifact.quantization ? { quantization: stored.artifact.quantization } : {}),
     ...(contextLength !== undefined ? { contextLength } : {}),
-    batchSize,
-    flashAttentionType,
+    ...(batchSize !== undefined ? { batchSize } : {}),
+    ...(flashAttentionType !== undefined ? { flashAttentionType } : {}),
     ...(stored.artifact.metadata.parameterCount !== undefined
       ? { parameterCount: stored.artifact.metadata.parameterCount }
       : {}),
     ...(stored.artifact.metadata.tokenizer
       ? { tokenizer: stored.artifact.metadata.tokenizer }
       : {}),
-    ...(typeof profile.parameterOverrides.gpuLayers === "number" &&
+    ...(llamaRuntimeControls &&
+    typeof profile.parameterOverrides.gpuLayers === "number" &&
     Number.isFinite(profile.parameterOverrides.gpuLayers) &&
     profile.parameterOverrides.gpuLayers > 0
       ? { gpuLayers: Math.floor(profile.parameterOverrides.gpuLayers) }
       : {}),
-    ...(typeof profile.parameterOverrides.parallelSlots === "number" &&
+    ...(llamaRuntimeControls &&
+    typeof profile.parameterOverrides.parallelSlots === "number" &&
     Number.isFinite(profile.parameterOverrides.parallelSlots) &&
     profile.parameterOverrides.parallelSlots > 0
       ? { parallelSlots: Math.floor(profile.parameterOverrides.parallelSlots) }
@@ -1268,14 +1404,15 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
 }
 
 export class RepositoryGatewayRuntime implements GatewayRuntime {
-  readonly #adapter;
+  readonly #adapters: Map<string, EngineAdapter>;
   readonly #chatRepository: ChatRepository;
   readonly #database: DatabaseSync;
   readonly #defaultModelTtlMs: number;
   readonly #downloadsRepository: DownloadTasksRepository;
   readonly #downloadManager: LlamaCppDownloadManager;
   readonly #enginesRepository: EngineVersionsRepository;
-  readonly #modelManager: LlamaCppModelManager;
+  readonly #mlxSupported: boolean;
+  readonly #modelManagers: Map<string, EngineBackedModelManager>;
   readonly #modelsRepository: ModelsRepository;
   readonly #startedAt = Date.now();
   readonly #subscribers = new Set<(event: GatewayEvent) => void>();
@@ -1339,12 +1476,13 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       options.circuitBreakerThreshold ?? DEFAULT_CIRCUIT_BREAKER_THRESHOLD;
     this.#circuitBreakerCooldownMs =
       options.circuitBreakerCooldownMs ?? DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS;
+    this.#mlxSupported = isMlxSupportedPlatform();
     this.#modelsRepository = new ModelsRepository(database);
     this.#enginesRepository = new EngineVersionsRepository(database);
     this.#downloadsRepository = new DownloadTasksRepository(database);
     const promptCachesRepository = new PromptCachesRepository(database);
     this.#chatRepository = new ChatRepository(database);
-    this.#adapter = createLlamaCppAdapter({
+    const llamaAdapter = createLlamaCppAdapter({
       supportRoot: this.#supportRoot,
       ...(options.env ? { env: options.env } : {}),
       ...(options.fakeWorkerStartupDelayMs !== undefined
@@ -1354,18 +1492,43 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         ? { preferFakeWorker: options.preferFakeWorker }
         : {}),
     });
-    this.#modelManager = new LlamaCppModelManager({
+    const llamaModelManager = new LlamaCppModelManager({
       supportRoot: this.#supportRoot,
       localModelsDir: options.localModelsDir,
-      adapter: this.#adapter,
+      adapter: llamaAdapter,
       modelsRepository: this.#modelsRepository,
       engineVersionsRepository: this.#enginesRepository,
       promptCachesRepository,
     });
+    this.#adapters = new Map([["llama.cpp", llamaAdapter]]);
+    this.#modelManagers = new Map([["llama.cpp", llamaModelManager]]);
+
+    if (this.#mlxSupported) {
+      const mlxAdapter = createMlxAdapter({
+        supportRoot: this.#supportRoot,
+        ...(options.env ? { env: options.env } : {}),
+        ...(options.fakeWorkerStartupDelayMs !== undefined
+          ? { fakeWorkerStartupDelayMs: options.fakeWorkerStartupDelayMs }
+          : {}),
+        ...(options.preferFakeWorker !== undefined
+          ? { preferFakeWorker: options.preferFakeWorker }
+          : {}),
+      });
+      const mlxModelManager = new MlxModelManager({
+        supportRoot: this.#supportRoot,
+        localModelsDir: options.localModelsDir,
+        adapter: mlxAdapter,
+        modelsRepository: this.#modelsRepository,
+        engineVersionsRepository: this.#enginesRepository,
+      });
+      this.#adapters.set("mlx", mlxAdapter);
+      this.#modelManagers.set("mlx", mlxModelManager);
+    }
+
     this.#downloadManager = new LlamaCppDownloadManager({
       supportRoot: this.#supportRoot,
       downloadsRepository: this.#downloadsRepository,
-      modelManager: this.#modelManager,
+      modelRegistrars: Object.fromEntries(this.#modelManagers.entries()),
       providerSearch: options.providerSearch ?? createDefaultProviderSearchService(),
       ...(options.downloadFetch ? { fetch: options.downloadFetch } : {}),
       emitEvent: (event: GatewayEvent) => {
@@ -1388,7 +1551,11 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       undefined,
       "system",
     );
-    const discoveredModels = await this.#modelManager.scanLocalModels();
+    const discoveredModels = (
+      await Promise.all(
+        Array.from(this.#modelManagers.values()).map(async (manager) => await manager.scanLocalModels()),
+      )
+    ).flat();
     if (discoveredModels.length > 0) {
       this.publishLog(
         "info",
@@ -1834,7 +2001,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   async searchCatalog(query: string): Promise<DesktopProviderSearchResult> {
     const result = await this.#downloadManager.search({
       text: query,
-      formats: ["gguf"],
+      formats: this.#mlxSupported ? ["mlx", "gguf"] : ["gguf"],
       limit: 20,
     });
 
@@ -1850,11 +2017,18 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     providerModelId: string,
   ): Promise<DesktopProviderCatalogDetailResponse> {
     const item = await this.#downloadManager.getCatalogModel(provider, providerModelId);
+    const supportedFormats = this.#mlxSupported ? ["mlx", "gguf"] : ["gguf"];
+    const variants = toDesktopProviderCatalogDetail(item, {
+      preferMlxVariants: this.#mlxSupported,
+    });
 
     return {
       object: "model",
-      data: toDesktopProviderCatalogDetail(item),
-      warnings: item.artifacts.length === 0 ? ["No GGUF variants found for this repository."] : [],
+      data: variants,
+      warnings:
+        item.artifacts.length === 0 || !item.formats.some((format) => supportedFormats.includes(format))
+          ? ["No supported downloadable variants were found for this repository."]
+          : [],
     };
   }
 
@@ -1881,6 +2055,12 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       ...(typeof metadata.bundlePrimaryArtifactId === "string" &&
       metadata.bundlePrimaryArtifactId.length > 0
         ? { bundlePrimaryArtifactId: metadata.bundlePrimaryArtifactId }
+        : {}),
+      ...(typeof metadata.engineType === "string" && metadata.engineType.length > 0
+        ? { engineType: metadata.engineType }
+        : {}),
+      ...(typeof metadata.registrationPath === "string" && metadata.registrationPath.length > 0
+        ? { registrationPath: metadata.registrationPath }
         : {}),
     });
 
@@ -1916,31 +2096,50 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   ): Promise<DesktopEngineInstallResponse> {
     this.assertAcceptingNewWork();
     const normalizedTraceId = normalizeTraceId(traceId);
+    const engineType =
+      "engineType" in input && typeof input.engineType === "string"
+        ? input.engineType
+        : DEFAULT_ENGINE_TYPE;
 
-    const installResult =
-      input.action === "download-latest-metal"
-        ? await this.#modelManager.downloadPackagedMetalBinary({
-            ...(input.versionTag ? { versionTag: input.versionTag } : {}),
-          })
-        : input.action === "import-local-binary"
-          ? await this.#modelManager.importLocalEngineBinary({
-              sourcePath: input.filePath,
-              ...(input.versionTag ? { versionTag: input.versionTag } : {}),
-            })
-          : await this.#modelManager.activateEngineVersion(input.versionTag);
+    let installResult: EngineInstallResult;
+    if (engineType === "mlx") {
+      const mlxManager = this.getModelManager("mlx") as MlxModelManager;
+      if (input.action === "activate-installed-version") {
+        installResult = await mlxManager.activateEngineVersion(input.versionTag);
+      } else {
+        installResult = await mlxManager.installManagedRuntime({
+          ...("versionTag" in input && input.versionTag ? { versionTag: input.versionTag } : {}),
+        });
+      }
+    } else {
+      const llamaManager = this.getModelManager(DEFAULT_ENGINE_TYPE) as LlamaCppModelManager;
+      if (input.action === "download-latest-metal") {
+        installResult = await llamaManager.downloadPackagedMetalBinary({
+          ...(input.versionTag ? { versionTag: input.versionTag } : {}),
+        });
+      } else if (input.action === "import-local-binary") {
+        installResult = await llamaManager.importLocalEngineBinary({
+          sourcePath: input.filePath,
+          ...(input.versionTag ? { versionTag: input.versionTag } : {}),
+        });
+      } else {
+        if (!input.versionTag) {
+          throw new Error("A version tag is required to activate an installed llama.cpp runtime.");
+        }
+        installResult = await llamaManager.activateEngineVersion(input.versionTag);
+      }
+    }
 
     const stored = this.#enginesRepository
       .list()
       .find(
         (record) =>
-          record.engineType === DEFAULT_ENGINE_TYPE &&
+          record.engineType === engineType &&
           record.versionTag === installResult.versionTag,
       );
 
     if (!stored) {
-      throw new Error(
-        `Installed llama.cpp version ${installResult.versionTag} could not be recorded.`,
-      );
+      throw new Error(`Installed ${engineType} version ${installResult.versionTag} could not be recorded.`);
     }
 
     this.publishLog("info", installResult.notes.join(" "), normalizedTraceId, undefined, "desktop");
@@ -1975,7 +2174,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       .list()
       .find((stored) => path.resolve(stored.artifact.localPath) === normalizedPath);
     const normalizedTraceId = normalizeTraceId(traceId);
-    const registered = await this.#modelManager.registerLocalModel({
+    const engineType =
+      this.#mlxSupported && isMlxModelDirectoryPath(normalizedPath) ? "mlx" : DEFAULT_ENGINE_TYPE;
+    const registered = await this.getModelManager(engineType).registerLocalModel({
       filePath: parsedInput.filePath,
       ...(parsedInput.displayName ? { displayName: parsedInput.displayName } : {}),
     });
@@ -2027,7 +2228,21 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
-    validateBatchSize(input.batchSize);
+    if (resolved.profile.engineType === "llama.cpp") {
+      validateBatchSize(input.batchSize);
+    } else if (
+      input.contextLength !== undefined ||
+      input.batchSize !== undefined ||
+      input.gpuLayers !== undefined ||
+      input.parallelSlots !== undefined ||
+      input.flashAttentionType !== undefined
+    ) {
+      throw new GatewayRequestError(
+        "unsupported_model_config",
+        "MLX models only support alias, pinning, TTL, and capability override changes in this build.",
+        400,
+      );
+    }
 
     if (
       hasRuntimeAffectingModelConfigChanges(input) &&
@@ -2168,9 +2383,11 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/chat/completions", input);
       const payload = chatCompletionsResponseSchema.parse(
-        this.#adapter.normalizeResponse(await response.json()),
+        worker.adapter.normalizeResponse(await response.json()),
       );
       const usage = getChatUsage(payload);
+      const totalDurationMs = Date.now() - startedAt;
+      const safeDurationMs = Math.max(totalDurationMs, 1);
 
       this.insertApiLog({
         traceId: context.traceId,
@@ -2179,10 +2396,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         requestIp: context.remoteAddress,
         promptTokens: usage.promptTokens,
         completionTokens: usage.completionTokens,
-        totalDurationMs: Date.now() - startedAt,
+        totalDurationMs,
         tokensPerSecond:
-          usage.completionTokens && Date.now() > startedAt
-            ? Number((usage.completionTokens / ((Date.now() - startedAt) / 1000)).toFixed(2))
+          usage.completionTokens && safeDurationMs > 0
+            ? Number(((usage.completionTokens * 1000) / safeDurationMs).toFixed(2))
             : undefined,
         statusCode: response.status,
         createdAt: nowIso(),
@@ -2280,7 +2497,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                   }
 
                   const parsed = chatCompletionsChunkSchema.safeParse(
-                    this.#adapter.normalizeResponse(parsedJson),
+                    worker.adapter.normalizeResponse(parsedJson),
                   );
                   if (parsed.success) {
                     applyChunkToAccumulator(accumulator, parsed.data);
@@ -2306,7 +2523,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                   }
 
                   const parsed = chatCompletionsChunkSchema.safeParse(
-                    this.#adapter.normalizeResponse(parsedJson),
+                    worker.adapter.normalizeResponse(parsedJson),
                   );
                   if (parsed.success) {
                     applyChunkToAccumulator(accumulator, parsed.data);
@@ -2409,7 +2626,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/embeddings", input);
       const payload = embeddingsResponseSchema.parse(
-        normalizeEmbeddingsResponsePayload(this.#adapter.normalizeResponse(await response.json())),
+        normalizeEmbeddingsResponsePayload(worker.adapter.normalizeResponse(await response.json())),
       );
 
       this.insertApiLog({
@@ -2765,6 +2982,24 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private getProfile(stored: StoredModelRecord): ModelProfile {
     return stored.profile ?? createDefaultProfile(stored.artifact, this.#defaultModelTtlMs);
+  }
+
+  private getAdapter(engineType: string): EngineAdapter {
+    const adapter = this.#adapters.get(engineType);
+    if (!adapter) {
+      throw new Error(`Engine ${engineType} is not configured.`);
+    }
+
+    return adapter;
+  }
+
+  private getModelManager(engineType: string): EngineBackedModelManager {
+    const manager = this.#modelManagers.get(engineType);
+    if (!manager) {
+      throw new Error(`Engine ${engineType} does not have a configured model manager.`);
+    }
+
+    return manager;
   }
 
   private findStoredModelRecord(modelId: string): StoredModelRecord | undefined {
@@ -3299,12 +3534,21 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         await this.enforceMaxActiveModelsInMemory(resolved, traceId);
         await this.enforceResidentMemoryBudget(resolved, traceId);
 
-        const harness = await createLlamaCppHarness(this.#adapter, {
-          artifact: resolved.artifact,
-          profile: resolved.profile,
-          runtimeKey: resolved.runtimeKey,
-          supportRoot: this.#supportRoot,
-        });
+        const adapter = this.getAdapter(resolved.profile.engineType);
+        const harness =
+          resolved.profile.engineType === "mlx"
+            ? await launchMlxSession(adapter, {
+                artifact: resolved.artifact,
+                profile: resolved.profile,
+                runtimeKey: resolved.runtimeKey,
+                supportRoot: this.#supportRoot,
+              })
+            : await createLlamaCppHarness(adapter, {
+                artifact: resolved.artifact,
+                profile: resolved.profile,
+                runtimeKey: resolved.runtimeKey,
+                supportRoot: this.#supportRoot,
+              });
 
         if (this.#stopping) {
           await harness.stop(this.#workerStopTimeoutMs).catch(() => undefined);
@@ -3316,6 +3560,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         }
 
         worker = {
+          adapter,
           artifact: resolved.artifact,
           evictionTimer: undefined,
           harness,
@@ -3333,7 +3578,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         releaseReservation();
         this.attachWorkerLogging(worker);
         this.attachWorkerExitListener(worker);
-        this.persistEngineRecord(harness.command);
+        this.persistEngineRecord(resolved.profile.engineType, harness.command);
 
         if (this.#stopping) {
           await this.stopWorker(
@@ -3593,27 +3838,43 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
   }
 
-  private persistEngineRecord(command: {
+  private persistEngineRecord(engineType: string, command: {
     command: string;
     managedBy: "binary" | "fake-worker";
     versionTag?: string;
+    notes?: string[];
   }): void {
     const versionTag = command.versionTag ?? "stage2-runtime";
+    const normalizedEngineType =
+      engineType === "mlx" ? "mlx" : engineType === "llama.cpp" ? "llama.cpp" : "unknown";
+    const capabilities =
+      normalizedEngineType === "mlx"
+        ? {
+            chat: true,
+            streaming: true,
+          }
+        : ENGINE_RECORD_CAPABILITIES;
+    const compatibilityNotes =
+      command.notes?.join(" ") ||
+      (normalizedEngineType === "mlx"
+        ? command.managedBy === "fake-worker"
+          ? "Using the fake MLX worker harness."
+          : "Using a managed MLX runtime."
+        : command.managedBy === "fake-worker"
+          ? "Using the fake llama.cpp worker harness."
+          : "Using a resolved llama.cpp binary.");
 
     const storedId = this.#enginesRepository.upsert({
-      id: `${DEFAULT_ENGINE_TYPE}:${versionTag}`,
-      engineType: DEFAULT_ENGINE_TYPE,
+      id: `${normalizedEngineType}:${versionTag}`,
+      engineType: normalizedEngineType,
       versionTag,
       binaryPath: command.command,
       isActive: true,
-      capabilities: ENGINE_RECORD_CAPABILITIES,
-      compatibilityNotes:
-        command.managedBy === "fake-worker"
-          ? "Using the fake llama.cpp worker harness."
-          : "Using a resolved llama.cpp binary.",
+      capabilities,
+      compatibilityNotes,
       installedAt: nowIso(),
     });
-    this.#enginesRepository.setActive(DEFAULT_ENGINE_TYPE, storedId);
+    this.#enginesRepository.setActive(normalizedEngineType, storedId);
   }
 
   private createModelStateEvent(

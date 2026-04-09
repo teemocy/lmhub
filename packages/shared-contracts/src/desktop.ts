@@ -71,17 +71,30 @@ export const desktopEngineListSchema = z.object({
   data: z.array(desktopEngineRecordSchema),
 });
 
-export const desktopEngineInstallRequestSchema = z.discriminatedUnion("action", [
+export const desktopEngineInstallRequestSchema = z.union([
   z.object({
+    engineType: z.literal("llama.cpp").optional(),
     action: z.literal("download-latest-metal"),
     versionTag: nonEmptyStringSchema.optional(),
   }),
   z.object({
+    engineType: z.literal("llama.cpp").optional(),
     action: z.literal("import-local-binary"),
     filePath: fileSystemPathSchema,
     versionTag: nonEmptyStringSchema.optional(),
   }),
   z.object({
+    engineType: z.literal("llama.cpp").optional(),
+    action: z.literal("activate-installed-version"),
+    versionTag: nonEmptyStringSchema,
+  }),
+  z.object({
+    engineType: z.literal("mlx"),
+    action: z.literal("install-managed-runtime"),
+    versionTag: nonEmptyStringSchema.optional(),
+  }),
+  z.object({
+    engineType: z.literal("mlx"),
     action: z.literal("activate-installed-version"),
     versionTag: nonEmptyStringSchema,
   }),
@@ -335,6 +348,43 @@ export const desktopDownloadActionResponseSchema = z.object({
   task: desktopDownloadTaskSchema,
 });
 
+export const desktopRuntimeContextSchema = z.object({
+  desktop: z.object({
+    closeToTray: z.boolean(),
+    autoLaunchGateway: z.boolean(),
+    theme: z.enum(["system", "light", "dark"]),
+    controlAuthHeaderName: z.enum(["authorization", "x-api-key", "api-key"]),
+    controlAuthToken: nonEmptyStringSchema.optional(),
+  }),
+  gateway: z.object({
+    enableLan: z.boolean(),
+    authRequired: z.boolean(),
+    publicHost: nonEmptyStringSchema,
+    publicPort: positiveIntegerSchema,
+    controlHost: nonEmptyStringSchema,
+    corsAllowlist: z.array(nonEmptyStringSchema).default([]),
+    defaultModelTtlMs: positiveIntegerSchema,
+    maxActiveModelsInMemory: z.number().int().nonnegative(),
+    localModelsDir: fileSystemPathSchema,
+    publicAuthToken: nonEmptyStringSchema.optional(),
+    controlAuthHeaderName: z.enum(["authorization", "x-api-key", "api-key"]),
+  }),
+  system: z.object({
+    platform: z.enum(["darwin", "linux", "win32"]),
+    arch: nonEmptyStringSchema,
+  }),
+  mlx: z.object({
+    supported: z.boolean(),
+    installed: z.boolean(),
+    activeVersion: nonEmptyStringSchema.optional(),
+    statusMessage: z.string().optional(),
+  }),
+  files: z.object({
+    desktopConfigFile: fileSystemPathSchema,
+    gatewayConfigFile: fileSystemPathSchema,
+  }),
+});
+
 export const gatewayDiscoverySchema = gatewayDiscoveryFileSchema;
 export const rendererDiscoverySchema = gatewayDiscoveryFileSchema;
 
@@ -396,5 +446,6 @@ export type DesktopDownloadTask = z.infer<typeof desktopDownloadTaskSchema>;
 export type DesktopDownloadList = z.infer<typeof desktopDownloadListSchema>;
 export type DesktopDownloadCreateRequest = z.infer<typeof desktopDownloadCreateRequestSchema>;
 export type DesktopDownloadActionResponse = z.infer<typeof desktopDownloadActionResponseSchema>;
+export type DesktopRuntimeContext = z.infer<typeof desktopRuntimeContextSchema>;
 export type DesktopShellPhase = z.infer<typeof desktopShellPhaseSchema>;
 export type DesktopShellState = z.infer<typeof desktopShellStateSchema>;

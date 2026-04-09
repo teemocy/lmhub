@@ -36,6 +36,7 @@
       "@localhub/db": ["packages/db/src/index.ts"],
       "@localhub/engine-core": ["packages/engine-core/src/index.ts"],
       "@localhub/engine-llama": ["packages/engine-llama/src/index.ts"],
+      "@localhub/engine-mlx": ["packages/engine-mlx/src/index.ts"],
       "@localhub/ui": ["packages/ui/src/index.ts"]
     }
   }

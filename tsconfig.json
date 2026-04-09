@@ -17,7 +17,13 @@
       "path": "./packages/engine-llama"
     },
     {
+      "path": "./packages/engine-mlx"
+    },
+    {
       "path": "./packages/ui"
+    },
+    {
+      "path": "./services/gateway"
     }
   ]
 }
