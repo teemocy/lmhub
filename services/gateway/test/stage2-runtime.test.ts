@@ -595,6 +595,85 @@ describe("gateway stage 2 runtime", () => {
     },
   );
 
+  it.runIf(supportsMlxTests)(
+    "auto-discovers GGUF files and MLX directories from the same local models path",
+    async () => {
+      const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stage2-mixed-"));
+      const localModelsDir = path.join(supportRoot, "models");
+      const ggufPath = path.join(localModelsDir, "nested", "gateway-stage2-mixed.gguf");
+      const mlxPath = path.join(localModelsDir, "gateway-stage2-mixed-mlx");
+
+      await writeSampleGgufFile(ggufPath);
+      await writeSampleMlxModelDirectory(mlxPath);
+
+      const runtime = createRepositoryGatewayRuntime({
+        cwd: process.cwd(),
+        defaultModelTtlMs: 1_000,
+        env: {
+          ...process.env,
+          LOCAL_LLM_HUB_ENV: "test",
+        },
+        fakeWorkerStartupDelayMs: 25,
+        preferFakeWorker: true,
+        supportRoot,
+        localModelsDir,
+        telemetryIntervalMs: 50,
+      });
+      const fixture = {
+        appPaths: resolveAppPaths({
+          cwd: process.cwd(),
+          environment: "test",
+          supportRoot,
+        }),
+        artifactPaths: {},
+        async cleanup() {
+          await runtime.stop();
+          await rm(supportRoot, { recursive: true, force: true });
+        },
+        runtime,
+      };
+      fixtures.push(fixture);
+
+      await runtime.start();
+
+      const gateway = await buildGateway({
+        config: createTestConfig({
+          localModelsDir,
+        }),
+        runtime,
+      });
+
+      await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+      const desktopModelsResponse = await gateway.controlApp.inject({
+        method: "GET",
+        url: "/control/models",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+      });
+
+      expect(desktopModelsResponse.statusCode).toBe(200);
+      expect(desktopModelsResponse.json()).toMatchObject({
+        object: "list",
+        data: expect.arrayContaining([
+          expect.objectContaining({
+            localPath: ggufPath,
+            engineType: "llama.cpp",
+            format: "gguf",
+          }),
+          expect.objectContaining({
+            localPath: mlxPath,
+            engineType: "mlx",
+            format: "mlx",
+          }),
+        ]),
+      });
+
+      await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+    },
+  );
+
   it("imports a local llama.cpp binary through the control route and packages it into support", async () => {
     const fixture = await createStage2Fixture();
     const gateway = await buildGateway({

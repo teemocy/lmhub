@@ -4,8 +4,8 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  type EngineAdapter,
   type EngineActivationResult,
+  type EngineAdapter,
   type EngineHealthCheck,
   type EngineInstallResult,
   type EngineProbeResult,
@@ -30,16 +30,24 @@ import type {
 import type { RuntimeKey } from "@localhub/shared-contracts/foundation-runtime";
 
 import { buildFakeMlxWorkerProgram, derivePort } from "./runtime.js";
+import {
+  DEFAULT_MLX_LM_VERSION,
+  DEFAULT_MLX_PYTHON_VERSION,
+  DEFAULT_MLX_VERSION,
+  buildMlxVersionTag,
+} from "./versioning.js";
 
 export * from "./model-manager.js";
 export * from "./runtime.js";
 export * from "./session.js";
+export * from "./versioning.js";
 
 const MLX_ENGINE_TYPE = "mlx";
-const DEFAULT_PYTHON_VERSION = "3.12";
-const DEFAULT_MLX_VERSION = "0.31.1";
-const DEFAULT_MLX_LM_VERSION = "0.31.2";
-const DEFAULT_VERSION_TAG = `py${DEFAULT_PYTHON_VERSION.replace(/\./g, "")}-mlx${DEFAULT_MLX_VERSION}-mlx-lm${DEFAULT_MLX_LM_VERSION}`;
+const DEFAULT_VERSION_TAG = buildMlxVersionTag({
+  pythonVersion: DEFAULT_MLX_PYTHON_VERSION,
+  mlxVersion: DEFAULT_MLX_VERSION,
+  mlxLmVersion: DEFAULT_MLX_LM_VERSION,
+});
 const DEFAULT_FAKE_BASE_PORT = 47_500;
 
 const PYTHON_CANDIDATES = ["python3", "python"] as const;
@@ -223,18 +231,13 @@ async function spawnAndCapture(
       }
 
       reject(
-        new Error(
-          `Command failed (${command} ${args.join(" ")}).\n${stdout}${stderr}`.trim(),
-        ),
+        new Error(`Command failed (${command} ${args.join(" ")}).\n${stdout}${stderr}`.trim()),
       );
     });
   });
 }
 
-function toVersionRecord(
-  manifest: MlxInstallManifest,
-  notes: string[],
-): EngineVersionRecord {
+function toVersionRecord(manifest: MlxInstallManifest, notes: string[]): EngineVersionRecord {
   return {
     versionTag: manifest.versionTag,
     installPath: manifest.installPath,
@@ -303,7 +306,7 @@ export function createMlxAdapter(options: MlxAdapterOptions = {}): EngineAdapter
       };
     }
 
-    const pythonVersion = options.pythonVersion ?? DEFAULT_PYTHON_VERSION;
+    const pythonVersion = options.pythonVersion ?? DEFAULT_MLX_PYTHON_VERSION;
     const mlxVersion = options.mlxVersion ?? DEFAULT_MLX_VERSION;
     const mlxLmVersion = options.mlxLmVersion ?? DEFAULT_MLX_LM_VERSION;
 
@@ -524,7 +527,9 @@ export function createMlxAdapter(options: MlxAdapterOptions = {}): EngineAdapter
       supportRootOverride?: string,
     ): Promise<EngineActivationResult> {
       const { paths, registry } = loadRegistry(supportRootOverride);
-      const existingVersion = registry.versions.find((candidate) => candidate.versionTag === versionTag);
+      const existingVersion = registry.versions.find(
+        (candidate) => candidate.versionTag === versionTag,
+      );
 
       if (!existingVersion || !existsSync(existingVersion.binaryPath)) {
         const installResult = await ensureInstalledVersion(versionTag, supportRootOverride);

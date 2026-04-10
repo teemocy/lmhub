@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import type { DatabaseSync } from "node:sqlite";
@@ -13,7 +14,11 @@ import {
   type StoredModelRecord,
   openDatabase,
 } from "@localhub/db";
-import { runtimeKeyToString, type EngineAdapter, type EngineInstallResult } from "@localhub/engine-core";
+import {
+  runtimeKeyToString,
+  type EngineAdapter,
+  type EngineInstallResult,
+} from "@localhub/engine-core";
 import {
   LlamaCppDownloadManager,
   LlamaCppModelManager,
@@ -163,7 +168,10 @@ interface WorkerHarness {
     signalCode: NodeJS.Signals | null;
     stdout: NodeJS.ReadableStream;
     stderr: NodeJS.ReadableStream;
-    once: (event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void) => void;
+    once: (
+      event: "exit",
+      listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+    ) => void;
   };
   readonly command: {
     command: string;
@@ -479,10 +487,13 @@ function toDesktopProviderCatalogDetail(
   }
 
   for (const [bundleKey, bundle] of mlxGroups.entries()) {
-    const files = [...bundle.files].sort((left, right) => left.fileName.localeCompare(right.fileName));
+    const files = [...bundle.files].sort((left, right) =>
+      left.fileName.localeCompare(right.fileName),
+    );
     const primary =
-      files.find((file) => file.fileName.replace(/\\/g, "/").split("/").at(-1) === MLX_CONFIG_FILE) ??
-      files[0];
+      files.find(
+        (file) => file.fileName.replace(/\\/g, "/").split("/").at(-1) === MLX_CONFIG_FILE,
+      ) ?? files[0];
     if (!primary) {
       continue;
     }
@@ -646,6 +657,65 @@ function isMlxSupportedPlatform(): boolean {
   return process.platform === "darwin" && process.arch === "arm64";
 }
 
+type LocalModelCandidate = {
+  engineType: "llama.cpp" | "mlx";
+  filePath: string;
+};
+
+function isGgufModelPath(filePath: string): boolean {
+  const fileName = path.basename(filePath);
+  return path.extname(filePath).toLowerCase() === ".gguf" && !/^mmproj(?:[-_.]|$)/i.test(fileName);
+}
+
+function resolveModelEngineTypeFromPath(filePath: string): "llama.cpp" | "mlx" {
+  return isMlxSupportedPlatform() && isMlxModelDirectoryPath(filePath)
+    ? "mlx"
+    : DEFAULT_ENGINE_TYPE;
+}
+
+function collectLocalModelCandidates(rootDir: string): LocalModelCandidate[] {
+  const candidates: LocalModelCandidate[] = [];
+
+  const visit = (directory: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    if (resolveModelEngineTypeFromPath(directory) === "mlx") {
+      candidates.push({
+        engineType: "mlx",
+        filePath: directory,
+      });
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath);
+        continue;
+      }
+
+      if (entry.isFile() && isGgufModelPath(fullPath)) {
+        candidates.push({
+          engineType: "llama.cpp",
+          filePath: fullPath,
+        });
+      }
+    }
+  };
+
+  visit(rootDir);
+  return candidates.sort(
+    (left, right) =>
+      left.engineType.localeCompare(right.engineType) ||
+      left.filePath.localeCompare(right.filePath),
+  );
+}
+
 function normalizeCapabilityOverrides(
   overrides: ModelProfile["capabilityOverrides"],
 ): CapabilityOverrides {
@@ -679,7 +749,7 @@ function applyCapabilityOverrides(
     audioTranscription: normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
     audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
     rerank: normalizedOverrides.rerank ?? capabilities.rerank,
-    promptCache: true,
+    promptCache: capabilities.promptCache,
   };
 }
 
@@ -726,13 +796,14 @@ function hashConfig(profile: ModelProfile): string {
 
 function createDefaultProfile(artifact: ModelArtifact, defaultModelTtlMs: number): ModelProfile {
   const timestamp = artifact.updatedAt;
+  const engineType = artifact.format === "mlx" ? "mlx" : DEFAULT_ENGINE_TYPE;
 
   return {
     schemaVersion: artifact.schemaVersion,
     id: `${artifact.id}::default`,
     modelId: artifact.id,
     displayName: artifact.name,
-    engineType: DEFAULT_ENGINE_TYPE,
+    engineType,
     pinned: false,
     defaultTtlMs: defaultModelTtlMs,
     role: getModelRole(artifact),
@@ -1265,7 +1336,9 @@ function toDesktopModelRecord(
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
   const llamaRuntimeControls = profile.engineType === "llama.cpp";
   const batchSize = llamaRuntimeControls ? getEffectiveBatchSize(profile) : undefined;
-  const flashAttentionType = llamaRuntimeControls ? getEffectiveFlashAttentionType(profile) : undefined;
+  const flashAttentionType = llamaRuntimeControls
+    ? getEffectiveFlashAttentionType(profile)
+    : undefined;
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1411,6 +1484,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   readonly #downloadsRepository: DownloadTasksRepository;
   readonly #downloadManager: LlamaCppDownloadManager;
   readonly #enginesRepository: EngineVersionsRepository;
+  readonly #localModelsDir: string;
   readonly #mlxSupported: boolean;
   readonly #modelManagers: Map<string, EngineBackedModelManager>;
   readonly #modelsRepository: ModelsRepository;
@@ -1458,6 +1532,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
 
     this.#database = database;
+    this.#localModelsDir = options.localModelsDir;
     this.#supportRoot = appPaths.supportRoot;
     this.#telemetryIntervalMs = options.telemetryIntervalMs;
     this.#defaultModelTtlMs = options.defaultModelTtlMs;
@@ -1551,11 +1626,27 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       undefined,
       "system",
     );
-    const discoveredModels = (
-      await Promise.all(
-        Array.from(this.#modelManagers.values()).map(async (manager) => await manager.scanLocalModels()),
-      )
-    ).flat();
+    const existingPaths = new Set(
+      this.#modelsRepository.list().map((stored) => path.resolve(stored.artifact.localPath)),
+    );
+    const discoveredModels: unknown[] = [];
+
+    for (const candidate of collectLocalModelCandidates(this.#localModelsDir)) {
+      const normalizedPath = path.resolve(candidate.filePath);
+      if (existingPaths.has(normalizedPath)) {
+        continue;
+      }
+
+      try {
+        const registered = await this.getModelManager(candidate.engineType).registerLocalModel({
+          filePath: normalizedPath,
+        });
+        discoveredModels.push(registered);
+        existingPaths.add(normalizedPath);
+      } catch {
+        // Ignore unreadable or invalid local artifacts while auto-discovering on startup.
+      }
+    }
     if (discoveredModels.length > 0) {
       this.publishLog(
         "info",
@@ -2026,7 +2117,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       object: "model",
       data: variants,
       warnings:
-        item.artifacts.length === 0 || !item.formats.some((format) => supportedFormats.includes(format))
+        item.artifacts.length === 0 ||
+        !item.formats.some((format) => supportedFormats.includes(format))
           ? ["No supported downloadable variants were found for this repository."]
           : [],
     };
@@ -2134,12 +2226,13 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       .list()
       .find(
         (record) =>
-          record.engineType === engineType &&
-          record.versionTag === installResult.versionTag,
+          record.engineType === engineType && record.versionTag === installResult.versionTag,
       );
 
     if (!stored) {
-      throw new Error(`Installed ${engineType} version ${installResult.versionTag} could not be recorded.`);
+      throw new Error(
+        `Installed ${engineType} version ${installResult.versionTag} could not be recorded.`,
+      );
     }
 
     this.publishLog("info", installResult.notes.join(" "), normalizedTraceId, undefined, "desktop");
@@ -2174,8 +2267,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       .list()
       .find((stored) => path.resolve(stored.artifact.localPath) === normalizedPath);
     const normalizedTraceId = normalizeTraceId(traceId);
-    const engineType =
-      this.#mlxSupported && isMlxModelDirectoryPath(normalizedPath) ? "mlx" : DEFAULT_ENGINE_TYPE;
+    const engineType = resolveModelEngineTypeFromPath(normalizedPath);
     const registered = await this.getModelManager(engineType).registerLocalModel({
       filePath: parsedInput.filePath,
       ...(parsedInput.displayName ? { displayName: parsedInput.displayName } : {}),
@@ -3838,12 +3930,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
   }
 
-  private persistEngineRecord(engineType: string, command: {
-    command: string;
-    managedBy: "binary" | "fake-worker";
-    versionTag?: string;
-    notes?: string[];
-  }): void {
+  private persistEngineRecord(
+    engineType: string,
+    command: {
+      command: string;
+      managedBy: "binary" | "fake-worker";
+      versionTag?: string;
+      notes?: string[];
+    },
+  ): void {
     const versionTag = command.versionTag ?? "stage2-runtime";
     const normalizedEngineType =
       engineType === "mlx" ? "mlx" : engineType === "llama.cpp" ? "llama.cpp" : "unknown";

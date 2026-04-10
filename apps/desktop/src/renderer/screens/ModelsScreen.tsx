@@ -350,14 +350,20 @@ export function ModelsScreen({
     (selectedModelId ? models.find((model) => model.id === selectedModelId) : undefined) ??
     models[0];
   const mlxSupported = runtimeContext?.mlx.supported ?? false;
+  const mlxInstalled = runtimeContext?.mlx.installed ?? false;
+  const mlxUpdateAvailable = runtimeContext?.mlx.updateAvailable ?? false;
+  const latestMlxRuntimeLabel =
+    runtimeContext?.mlx.latestMlxVersion && runtimeContext?.mlx.latestMlxLmVersion
+      ? `mlx ${runtimeContext.mlx.latestMlxVersion} / mlx-lm ${runtimeContext.mlx.latestMlxLmVersion}`
+      : null;
   const connected = shellState.phase === "connected";
   const activeEngineVersionTag =
     engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
   const selectedEngineVersion =
     selectedEngineVersionTag &&
     engines.some((engine) => engine.version === selectedEngineVersionTag)
-      ? engines.find((engine) => engine.version === selectedEngineVersionTag) ?? null
-      : engines.find((engine) => engine.version === activeEngineVersionTag) ?? null;
+      ? (engines.find((engine) => engine.version === selectedEngineVersionTag) ?? null)
+      : (engines.find((engine) => engine.version === activeEngineVersionTag) ?? null);
   const canRegister = connected && Boolean(importFilePath) && !pendingImport;
   const canPreload =
     connected &&
@@ -484,10 +490,7 @@ export function ModelsScreen({
     setIsConfigModalOpen(false);
   };
 
-  const handleModelCardKeyDown = (
-    event: ReactKeyboardEvent<HTMLDivElement>,
-    modelId: string,
-  ) => {
+  const handleModelCardKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>, modelId: string) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       selectModel(modelId);
@@ -610,7 +613,8 @@ export function ModelsScreen({
   const handleActivateEngineVersion = async () => {
     if (
       !selectedEngineVersion ||
-      (selectedEngineVersion.engineType !== "llama.cpp" && selectedEngineVersion.engineType !== "mlx")
+      (selectedEngineVersion.engineType !== "llama.cpp" &&
+        selectedEngineVersion.engineType !== "mlx")
     ) {
       return;
     }
@@ -644,6 +648,11 @@ export function ModelsScreen({
   const handleInstallMlxRuntime = async () => {
     setEngineFeedback(null);
     setPendingEngineAction("install-mlx");
+    const actionLabel = !mlxInstalled
+      ? "Downloaded"
+      : mlxUpdateAvailable
+        ? "Updated"
+        : "Reinstalled";
 
     try {
       const result = await onInstallEngineBinary({
@@ -654,8 +663,8 @@ export function ModelsScreen({
       setSelectedEngineVersionTag(result.engine.version);
       setEngineFeedback({
         tone: "success",
-        title: "Runtime installed",
-        text: `Installed managed MLX runtime ${result.engine.version}.`,
+        title: mlxUpdateAvailable ? "Runtime updated" : "Runtime ready",
+        text: `${actionLabel} managed MLX runtime ${result.engine.version}.`,
       });
     } catch (error) {
       setEngineFeedback({
@@ -856,54 +865,69 @@ export function ModelsScreen({
             </div>
           ) : (
             <>
-            <div className="model-list">
-              {models.map((model) => {
-                const summary = formatModelCardSummary(model);
+              <div className="model-list">
+                {models.map((model) => {
+                  const summary = formatModelCardSummary(model);
+                  const usesMlxRuntime = model.engineType === "mlx";
 
-                return (
-                  <div
-                    className={
-                      model.id === selectedModel?.id
-                        ? "model-list-item model-list-item-active"
-                        : "model-list-item"
-                    }
-                    key={model.id}
-                    onClick={() => selectModel(model.id)}
-                    onKeyDown={(event) => handleModelCardKeyDown(event, model.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="model-card-head">
-                      <div className="model-card-title">
-                        <div className="model-card-title-row">
-                          <h4>{model.displayName}</h4>
-                          <span
-                            className={`status-pill status-pill-compact ${getStateToneClass(model.state)}`}
-                          >
-                            {humanize(model.state)}
-                          </span>
+                  return (
+                    <div
+                      className={
+                        model.id === selectedModel?.id
+                          ? "model-list-item model-list-item-active"
+                          : "model-list-item"
+                      }
+                      key={model.id}
+                      onClick={() => selectModel(model.id)}
+                      onKeyDown={(event) => handleModelCardKeyDown(event, model.id)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="model-card-head">
+                        <div className="model-card-title">
+                          <div className="model-card-title-row">
+                            <h4>{model.displayName}</h4>
+                            <span
+                              className={`status-pill status-pill-compact ${getStateToneClass(model.state)}`}
+                            >
+                              {humanize(model.state)}
+                            </span>
+                          </div>
+                          <div className="pill-row model-card-pill-row">
+                            <span
+                              className={
+                                usesMlxRuntime
+                                  ? "meta-pill meta-pill-mlx"
+                                  : "meta-pill meta-pill-muted"
+                              }
+                            >
+                              {usesMlxRuntime ? "MLX runtime" : "llama.cpp runtime"}
+                            </span>
+                            <span className="meta-pill meta-pill-muted">
+                              {model.format === "mlx" ? "MLX model" : model.format.toUpperCase()}
+                            </span>
+                          </div>
                         </div>
                       </div>
+                      <div className="model-card-metadata-line" aria-label="Model metadata">
+                        <span className="model-card-summary-text" title={summary}>
+                          {summary}
+                        </span>
+                        <button
+                          className="secondary-button model-card-config-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openModelConfigPanel(model.id);
+                          }}
+                          type="button"
+                        >
+                          Config
+                        </button>
+                      </div>
                     </div>
-                    <div className="model-card-metadata-line" aria-label="Model metadata">
-                      <span className="model-card-summary-text" title={summary}>
-                        {summary}
-                      </span>
-                      <button
-                        className="secondary-button model-card-config-button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          openModelConfigPanel(model.id);
-                        }}
-                        type="button"
-                      >
-                        Config
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
             </>
           )}
         </article>
@@ -1144,9 +1168,9 @@ export function ModelsScreen({
                   </span>
                 </div>
                 <p>
-                  Leave a capability on <strong>Auto</strong> to keep the detected default from
-                  the registered model metadata. Explicit overrides are saved to the profile and
-                  apply on the next preload.
+                  Leave a capability on <strong>Auto</strong> to keep the detected default from the
+                  registered model metadata. Explicit overrides are saved to the profile and apply
+                  on the next preload.
                 </p>
 
                 <div className="capability-override-list">
@@ -1212,7 +1236,8 @@ export function ModelsScreen({
                           const value = selectedModel.capabilityOverrides[key];
                           return (
                             <span className="meta-pill" key={key}>
-                              {label}: {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
+                              {label}:{" "}
+                              {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
                             </span>
                           );
                         })
@@ -1301,7 +1326,15 @@ export function ModelsScreen({
                 onClick={() => void handleInstallMlxRuntime()}
                 type="button"
               >
-                {pendingEngineAction === "install-mlx" ? "Installing..." : "Install MLX runtime"}
+                {pendingEngineAction === "install-mlx"
+                  ? mlxUpdateAvailable
+                    ? "Updating..."
+                    : "Downloading..."
+                  : !mlxInstalled
+                    ? "Download latest MLX runtime"
+                    : mlxUpdateAvailable
+                      ? "Update MLX runtime"
+                      : "Reinstall latest MLX runtime"}
               </button>
             ) : null}
             <button
@@ -1315,11 +1348,19 @@ export function ModelsScreen({
           </div>
 
           <p className="search-detail-note">
-            Downloaded Metal builds and managed MLX runtimes are copied into the app support
-            engines directory. Local binary imports are packaged the same way so the app owns the
-            installed executable. Use the picker below to switch the active version for future
-            launches.
+            Downloaded Metal builds and managed MLX runtimes are copied into the app support engines
+            directory. Local binary imports are packaged the same way so the app owns the installed
+            executable. Use the picker below to switch the active version for future launches.
           </p>
+          {mlxSupported && latestMlxRuntimeLabel ? (
+            <p className="search-detail-note">
+              Latest managed MLX runtime: {latestMlxRuntimeLabel}
+              {runtimeContext?.mlx.activeMlxVersion && runtimeContext?.mlx.activeMlxLmVersion
+                ? ` · active stack: mlx ${runtimeContext.mlx.activeMlxVersion} / mlx-lm ${runtimeContext.mlx.activeMlxLmVersion}`
+                : ""}
+              {runtimeContext?.mlx.updateAvailable ? " · update available" : ""}
+            </p>
+          ) : null}
 
           {engines.length > 0 ? (
             <>
@@ -1333,8 +1374,7 @@ export function ModelsScreen({
                 >
                   {engines.map((engine) => (
                     <option key={engine.id} value={engine.version}>
-                      {engine.engineType} /{" "}
-                      {engine.version}
+                      {engine.engineType} / {engine.version}
                       {engine.active ? " (active)" : ""}
                     </option>
                   ))}

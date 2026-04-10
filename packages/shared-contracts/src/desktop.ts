@@ -377,6 +377,11 @@ export const desktopRuntimeContextSchema = z.object({
     supported: z.boolean(),
     installed: z.boolean(),
     activeVersion: nonEmptyStringSchema.optional(),
+    activeMlxVersion: nonEmptyStringSchema.optional(),
+    activeMlxLmVersion: nonEmptyStringSchema.optional(),
+    latestMlxVersion: nonEmptyStringSchema.optional(),
+    latestMlxLmVersion: nonEmptyStringSchema.optional(),
+    updateAvailable: z.boolean().default(false),
     statusMessage: z.string().optional(),
   }),
   files: z.object({

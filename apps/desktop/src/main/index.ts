@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DEFAULT_MLX_LM_VERSION, DEFAULT_MLX_VERSION } from "@localhub/engine-mlx";
 import {
   ensureAppPaths,
   loadDesktopConfig,
@@ -119,10 +120,15 @@ const normalizeLocalModelsDir = (value: string): string => {
   return path.isAbsolute(expanded) ? expanded : path.resolve(appPaths.supportRoot, expanded);
 };
 
-const isMlxSupportedPlatform = (): boolean => process.platform === "darwin" && process.arch === "arm64";
+const isMlxSupportedPlatform = (): boolean =>
+  process.platform === "darwin" && process.arch === "arm64";
 
 const getDesktopPlatform = (): "darwin" | "linux" | "win32" => {
-  if (process.platform === "darwin" || process.platform === "linux" || process.platform === "win32") {
+  if (
+    process.platform === "darwin" ||
+    process.platform === "linux" ||
+    process.platform === "win32"
+  ) {
     return process.platform;
   }
 
@@ -132,12 +138,20 @@ const getDesktopPlatform = (): "darwin" | "linux" | "win32" => {
 const readInstalledMlxRuntime = (): {
   installed: boolean;
   activeVersion?: string;
+  activeMlxVersion?: string;
+  activeMlxLmVersion?: string;
+  latestMlxVersion?: string;
+  latestMlxLmVersion?: string;
+  updateAvailable: boolean;
   statusMessage?: string;
 } => {
   const registryFile = path.join(appPaths.supportRoot, "engines", "mlx", "registry.json");
   if (!existsSync(registryFile)) {
     return {
       installed: false,
+      latestMlxVersion: DEFAULT_MLX_VERSION,
+      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
+      updateAvailable: false,
       statusMessage: isMlxSupportedPlatform()
         ? "Managed MLX runtime not installed yet."
         : "MLX requires Apple Silicon macOS.",
@@ -147,17 +161,60 @@ const readInstalledMlxRuntime = (): {
   try {
     const parsed = JSON.parse(readFileSync(registryFile, "utf8")) as {
       activeVersionTag?: string;
-      versions?: Array<unknown>;
+      versions?: Array<{
+        versionTag?: string;
+        installPath?: string;
+      }>;
     };
-    const versionCount = Array.isArray(parsed.versions) ? parsed.versions.length : 0;
+    const versions = Array.isArray(parsed.versions) ? parsed.versions : [];
+    const versionCount = versions.length;
+    const activeVersionTag =
+      typeof parsed.activeVersionTag === "string" ? parsed.activeVersionTag : undefined;
+    const activeVersionRecord = activeVersionTag
+      ? versions.find((candidate) => candidate.versionTag === activeVersionTag)
+      : undefined;
+    const activeManifestPath =
+      activeVersionRecord && typeof activeVersionRecord.installPath === "string"
+        ? path.join(activeVersionRecord.installPath, "manifest.json")
+        : undefined;
+    const activeManifest =
+      activeManifestPath && existsSync(activeManifestPath)
+        ? (JSON.parse(readFileSync(activeManifestPath, "utf8")) as {
+            mlxVersion?: string;
+            mlxLmVersion?: string;
+          })
+        : undefined;
+    const activeVersionMatch = activeVersionTag
+      ? /-mlx(?<mlxVersion>[0-9.]+)-mlx-lm(?<mlxLmVersion>[0-9.]+)/.exec(activeVersionTag)
+      : undefined;
+    const activeMlxVersion =
+      typeof activeManifest?.mlxVersion === "string"
+        ? activeManifest.mlxVersion
+        : activeVersionMatch?.groups?.mlxVersion;
+    const activeMlxLmVersion =
+      typeof activeManifest?.mlxLmVersion === "string"
+        ? activeManifest.mlxLmVersion
+        : activeVersionMatch?.groups?.mlxLmVersion;
+
     return {
       installed: versionCount > 0,
-      ...(typeof parsed.activeVersionTag === "string" ? { activeVersion: parsed.activeVersionTag } : {}),
+      latestMlxVersion: DEFAULT_MLX_VERSION,
+      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
+      updateAvailable:
+        versionCount > 0 &&
+        ((activeMlxVersion !== undefined && activeMlxVersion !== DEFAULT_MLX_VERSION) ||
+          (activeMlxLmVersion !== undefined && activeMlxLmVersion !== DEFAULT_MLX_LM_VERSION)),
+      ...(activeVersionTag ? { activeVersion: activeVersionTag } : {}),
+      ...(activeMlxVersion ? { activeMlxVersion } : {}),
+      ...(activeMlxLmVersion ? { activeMlxLmVersion } : {}),
       ...(versionCount > 0 ? {} : { statusMessage: "Managed MLX runtime not installed yet." }),
     };
   } catch (error) {
     return {
       installed: false,
+      latestMlxVersion: DEFAULT_MLX_VERSION,
+      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
+      updateAvailable: false,
       statusMessage:
         error instanceof Error ? error.message : "Unable to read the MLX runtime registry.",
     };

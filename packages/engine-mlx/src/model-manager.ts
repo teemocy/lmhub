@@ -1,11 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import path from "node:path";
 
@@ -21,7 +15,6 @@ import type { EngineVersionRecord } from "@localhub/shared-contracts/foundation-
 import type { EngineAdapter, EngineInstallResult } from "@localhub/engine-core";
 
 const MLX_ENGINE_TYPE = "mlx";
-const DEFAULT_MLX_VERSION_TAG = "py312-mlx0.31.1-mlx-lm0.31.2";
 
 export interface IndexedModelRecord {
   artifactId: string;
@@ -205,7 +198,9 @@ function getArchitecture(config: Record<string, unknown>): string | undefined {
 
   const architectures = config.architectures;
   if (Array.isArray(architectures)) {
-    return architectures.find((value): value is string => typeof value === "string" && value.length > 0);
+    return architectures.find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
   }
 
   return undefined;
@@ -340,8 +335,7 @@ function applyCapabilityOverrides(
     tools: normalizedOverrides.tools ?? capabilities.tools,
     streaming: normalizedOverrides.streaming ?? capabilities.streaming,
     vision: normalizedOverrides.vision ?? capabilities.vision,
-    audioTranscription:
-      normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
+    audioTranscription: normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
     audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
     rerank: normalizedOverrides.rerank ?? capabilities.rerank,
     promptCache: false,
@@ -380,7 +374,10 @@ function toIndexedRecord(
   loadCount: number,
   lastLoadedAt: string | undefined,
 ): IndexedModelRecord {
-  const capabilities = applyCapabilityOverrides(artifact.capabilities, profile?.capabilityOverrides);
+  const capabilities = applyCapabilityOverrides(
+    artifact.capabilities,
+    profile?.capabilityOverrides,
+  );
   const role = profile?.role ?? deriveRole(capabilities);
   const record: IndexedModelRecord = {
     artifactId: artifact.id,
@@ -504,9 +501,12 @@ export class MlxModelManager {
       .find((record) => path.resolve(record.artifact.localPath) === directoryPath);
     const inspected = inspectDirectory(directoryPath);
     const now = this.#now();
-    const displayName = options.displayName ?? existing?.profile?.displayName ?? inspected.displayName;
+    const displayName =
+      options.displayName ?? existing?.profile?.displayName ?? inspected.displayName;
     const capabilities = deriveCapabilities();
-    const capabilityOverrides = normalizeCapabilityOverrides(existing?.profile?.capabilityOverrides);
+    const capabilityOverrides = normalizeCapabilityOverrides(
+      existing?.profile?.capabilityOverrides,
+    );
     const effectiveCapabilities = applyCapabilityOverrides(capabilities, capabilityOverrides);
     const role = deriveRole(effectiveCapabilities);
     const artifactId =
@@ -590,8 +590,8 @@ export class MlxModelManager {
     };
   }
 
-  async ensureEngineVersion(versionTag = DEFAULT_MLX_VERSION_TAG): Promise<EngineInstallResult> {
-    const installResult = await this.#adapter.install(versionTag);
+  async ensureEngineVersion(versionTag?: string): Promise<EngineInstallResult> {
+    const installResult = await this.#adapter.install(versionTag ?? "");
     const record = toEngineVersionRecord(installResult, this.#now());
     if (record && this.#engineVersionsRepository) {
       const storedId = this.#engineVersionsRepository.upsert(record);
@@ -604,7 +604,7 @@ export class MlxModelManager {
   }
 
   async installManagedRuntime(options: { versionTag?: string } = {}): Promise<EngineInstallResult> {
-    return await this.ensureEngineVersion(options.versionTag ?? DEFAULT_MLX_VERSION_TAG);
+    return await this.ensureEngineVersion(options.versionTag);
   }
 
   async activateEngineVersion(versionTag: string): Promise<EngineInstallResult> {
