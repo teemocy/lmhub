@@ -3,6 +3,7 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -134,16 +135,48 @@ function hasCompletedMlxTokenizerAssets(tasks: readonly DownloadTask[]): boolean
     .filter((task) => task.status === "completed")
     .map((task) => toTaskMetadata(task).fileName);
 
-  return (
-    completedNames.some((fileName) => isMlxTokenizerCoreAsset(fileName)) ||
-    (completedNames.some((fileName) => /^vocab\.json$/i.test(fileName)) &&
-      completedNames.some((fileName) => /^merges\.txt$/i.test(fileName)))
-  );
+  return hasRequiredMlxTokenizerAssets(completedNames);
 }
 
 function hasCompletedMlxWeightShards(tasks: readonly DownloadTask[]): boolean {
   const shardTasks = tasks.filter((task) => isMlxSafetensorShard(toTaskMetadata(task).fileName));
   return shardTasks.length > 0 && shardTasks.every((task) => task.status === "completed");
+}
+
+function hasRequiredMlxTokenizerAssets(fileNames: Iterable<string>): boolean {
+  let hasTokenizerCoreAsset = false;
+  let hasVocabJson = false;
+  let hasMergesTxt = false;
+
+  for (const fileName of fileNames) {
+    if (isMlxTokenizerCoreAsset(fileName)) {
+      hasTokenizerCoreAsset = true;
+    }
+    if (/^vocab\.json$/i.test(fileName)) {
+      hasVocabJson = true;
+    }
+    if (/^merges\.txt$/i.test(fileName)) {
+      hasMergesTxt = true;
+    }
+  }
+
+  return hasTokenizerCoreAsset || (hasVocabJson && hasMergesTxt);
+}
+
+function isRepairableMlxBundleDirectory(directory: string): boolean {
+  let fileNames: string[];
+  try {
+    fileNames = readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name);
+  } catch {
+    return false;
+  }
+
+  return (
+    fileNames.some((fileName) => isMlxSafetensorShard(fileName)) &&
+    hasRequiredMlxTokenizerAssets(fileNames)
+  );
 }
 
 function buildDestinationPath(
@@ -154,6 +187,24 @@ function buildDestinationPath(
   const modelDirectory = path.join(localModelsDir, sanitizePathPart(providerModelId));
   const segments = sanitizeRelativeSegments(fileName);
   return path.join(modelDirectory, ...(segments.length > 0 ? segments : ["artifact.bin"]));
+}
+
+function resolveRegistrationPath(
+  localModelsDir: string,
+  metadata: DownloadTaskMetadata,
+): string {
+  const engineType = metadata.engineType ?? "llama.cpp";
+  if (metadata.registrationPath === undefined) {
+    return engineType === "mlx" ? path.dirname(metadata.destinationPath) : metadata.destinationPath;
+  }
+
+  return path.isAbsolute(metadata.registrationPath)
+    ? metadata.registrationPath
+    : path.join(
+        localModelsDir,
+        sanitizePathPart(metadata.providerModelId),
+        metadata.registrationPath,
+      );
 }
 
 function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
@@ -274,6 +325,7 @@ export class LlamaCppDownloadManager {
   }
 
   listDownloads(): Stage3DownloadRecord[] {
+    this.repairStaleMlxBundleTaskErrors();
     return this.#downloadsRepository.list().map((task) => this.toRecord(task));
   }
 
@@ -588,6 +640,38 @@ export class LlamaCppDownloadManager {
     };
   }
 
+  private repairStaleMlxBundleTaskErrors(): void {
+    const tasks = this.#downloadsRepository.list();
+    for (const task of tasks) {
+      if (task.status !== "error") {
+        continue;
+      }
+
+      const metadata = toTaskMetadata(task);
+      if (metadata.engineType !== "mlx" || !metadata.bundleId) {
+        continue;
+      }
+      if (!existsSync(metadata.destinationPath)) {
+        continue;
+      }
+
+      const registrationPath = resolveRegistrationPath(this.#localModelsDir, metadata);
+      if (!isRepairableMlxBundleDirectory(registrationPath)) {
+        continue;
+      }
+
+      const fileSize = statSync(metadata.destinationPath).size;
+      this.#downloadsRepository.upsert({
+        ...task,
+        status: "completed",
+        errorMessage: undefined,
+        downloadedBytes: fileSize,
+        totalBytes: task.totalBytes ?? fileSize,
+        updatedAt: this.#now(),
+      });
+    }
+  }
+
   private publishProgress(task: DownloadTask, message?: string): void {
     if (!this.#emitEvent) {
       return;
@@ -618,18 +702,7 @@ export class LlamaCppDownloadManager {
       throw new Error(`No local model registrar is available for engine ${engineType}.`);
     }
 
-    const registrationPath =
-      metadata.registrationPath === undefined
-        ? engineType === "mlx"
-          ? path.dirname(metadata.destinationPath)
-          : metadata.destinationPath
-        : path.isAbsolute(metadata.registrationPath)
-          ? metadata.registrationPath
-          : path.join(
-              this.#localModelsDir,
-              sanitizePathPart(metadata.providerModelId),
-              metadata.registrationPath,
-            );
+    const registrationPath = resolveRegistrationPath(this.#localModelsDir, metadata);
     const registered = await registrar.registerLocalModel({
       filePath: registrationPath,
       ...(metadata.displayName ? { displayName: metadata.displayName } : {}),
