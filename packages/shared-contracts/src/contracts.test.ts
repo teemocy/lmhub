@@ -9,8 +9,8 @@ import {
   deserializeGatewayEvent,
   deserializeRequestTrace,
   deserializeToolCalls,
-  desktopDownloadCreateRequestSchema,
   desktopChatRunRequestSchema,
+  desktopDownloadCreateRequestSchema,
   desktopProviderSearchItemSchema,
   downloadTaskSchema,
   embeddingsRequestSchema,
@@ -147,10 +147,19 @@ describe("shared contracts", () => {
       title: item.title,
       artifactName: "gateway-stage3-chat-q4.gguf",
       metadata: {},
+      files: [
+        {
+          artifactId: "gateway-stage3-chat-q4",
+          artifactName: "gateway-stage3-chat-q4.gguf",
+          downloadUrl: "https://example.invalid/artifacts/gateway-stage3-chat-q4.gguf",
+          metadata: {},
+        },
+      ],
     });
 
     expect(createRequest.providerModelId).toBe("acme/stage3-gateway-chat");
     expect(createRequest.artifactId).toBe("gateway-stage3-chat-q4");
+    expect(createRequest.files?.length).toBe(1);
     expect(item.id).not.toBe(item.providerModelId);
   });
 

@@ -1049,27 +1049,44 @@ export class MockGatewayRuntime {
     _traceId?: string,
   ): DesktopDownloadActionResponse {
     const groupId = input.taskGroupId ?? `download-${Date.now()}`;
-    const fileId = `download-file-${Date.now()}`;
-    const nextFile = {
-      id: fileId,
-      artifactId: input.artifactId,
-      artifactName: input.artifactName,
+    const now = new Date().toISOString();
+    const fallbackMetadata =
+      input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+        ? input.metadata
+        : {};
+    const requestedFiles =
+      input.files && input.files.length > 0
+        ? input.files
+        : [
+            {
+              artifactId: input.artifactId,
+              artifactName: input.artifactName,
+              ...(input.sizeBytes !== undefined ? { sizeBytes: input.sizeBytes } : {}),
+              auxiliary: fallbackMetadata.auxiliary === true,
+              ...(typeof fallbackMetadata.auxiliaryKind === "string"
+                ? { auxiliaryKind: fallbackMetadata.auxiliaryKind }
+                : {}),
+              metadata: fallbackMetadata,
+            },
+          ];
+    const nextFiles = requestedFiles.map((file, index) => ({
+      id: `download-file-${Date.now()}-${index}`,
+      artifactId: file.artifactId,
+      artifactName: file.artifactName,
       status: "pending" as const,
       progress: 0,
       downloadedBytes: 0,
-      ...(input.sizeBytes !== undefined ? { totalBytes: input.sizeBytes } : {}),
+      ...(file.sizeBytes !== undefined ? { totalBytes: file.sizeBytes } : {}),
       ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
-      updatedAt: new Date().toISOString(),
-      auxiliary: input.metadata?.auxiliary === true,
-      ...(typeof input.metadata?.auxiliaryKind === "string"
-        ? { auxiliaryKind: input.metadata.auxiliaryKind }
-        : {}),
+      updatedAt: now,
+      auxiliary: file.auxiliary,
+      ...(typeof file.auxiliaryKind === "string" ? { auxiliaryKind: file.auxiliaryKind } : {}),
       metadata: {},
-    };
+    }));
 
     const existingTask = this.#downloads.find((entry) => entry.id === groupId);
     if (existingTask) {
-      existingTask.files = [...existingTask.files, nextFile];
+      existingTask.files = [...existingTask.files, ...nextFiles];
       existingTask.fileCount = existingTask.files.length;
       existingTask.completedFileCount = existingTask.files.filter(
         (file) => file.status === "completed",
@@ -1084,7 +1101,7 @@ export class MockGatewayRuntime {
       existingTask.totalBytes = existingTask.files.every((file) => file.totalBytes !== undefined)
         ? existingTask.files.reduce((total, file) => total + (file.totalBytes ?? 0), 0)
         : undefined;
-      existingTask.updatedAt = nextFile.updatedAt;
+      existingTask.updatedAt = now;
       return {
         accepted: true,
         task: structuredClone(existingTask),
@@ -1096,17 +1113,19 @@ export class MockGatewayRuntime {
       provider: input.provider,
       providerModelId: input.providerModelId,
       title: input.title,
-      artifactName: input.artifactName,
+      artifactName: nextFiles[0]?.artifactName ?? input.artifactName,
       status: "pending" as const,
       progress: 0,
       downloadedBytes: 0,
-      ...(input.sizeBytes !== undefined ? { totalBytes: input.sizeBytes } : {}),
-      fileCount: 1,
+      ...(nextFiles.length > 0 && nextFiles.every((file) => file.totalBytes !== undefined)
+        ? { totalBytes: nextFiles.reduce((total, file) => total + (file.totalBytes ?? 0), 0) }
+        : {}),
+      fileCount: nextFiles.length,
       completedFileCount: 0,
       errorFileCount: 0,
       ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
-      updatedAt: nextFile.updatedAt,
-      files: [nextFile],
+      updatedAt: now,
+      files: nextFiles,
     };
 
     this.#downloads.unshift(task);

@@ -278,6 +278,7 @@ export const desktopProviderCatalogFileSchema = z.object({
   id: nonEmptyStringSchema,
   artifactId: nonEmptyStringSchema,
   artifactName: nonEmptyStringSchema,
+  downloadUrl: z.string().url().optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
   quantization: nonEmptyStringSchema.optional(),
   architecture: nonEmptyStringSchema.optional(),
@@ -353,6 +354,17 @@ export const desktopDownloadListSchema = z.object({
   data: z.array(desktopDownloadTaskSchema),
 });
 
+export const desktopDownloadCreateFileSchema = z.object({
+  artifactId: nonEmptyStringSchema,
+  artifactName: nonEmptyStringSchema,
+  downloadUrl: z.string().url().optional(),
+  checksumSha256: nonEmptyStringSchema.optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  auxiliary: z.boolean().default(false),
+  auxiliaryKind: nonEmptyStringSchema.optional(),
+  metadata: jsonRecordSchema.default({}),
+});
+
 export const desktopDownloadCreateRequestSchema = z.object({
   provider: z.enum(["huggingface", "modelscope"]),
   providerModelId: nonEmptyStringSchema,
@@ -365,6 +377,7 @@ export const desktopDownloadCreateRequestSchema = z.object({
   checksumSha256: nonEmptyStringSchema.optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
   metadata: jsonRecordSchema.default({}),
+  files: z.array(desktopDownloadCreateFileSchema).min(1).optional(),
 });
 
 export const desktopDownloadActionResponseSchema = z.object({
@@ -479,6 +492,7 @@ export type DesktopProviderCatalogDetailResponse = z.infer<
 export type DesktopDownloadFile = z.infer<typeof desktopDownloadFileSchema>;
 export type DesktopDownloadTask = z.infer<typeof desktopDownloadTaskSchema>;
 export type DesktopDownloadList = z.infer<typeof desktopDownloadListSchema>;
+export type DesktopDownloadCreateFile = z.infer<typeof desktopDownloadCreateFileSchema>;
 export type DesktopDownloadCreateRequest = z.infer<typeof desktopDownloadCreateRequestSchema>;
 export type DesktopDownloadActionResponse = z.infer<typeof desktopDownloadActionResponseSchema>;
 export type DesktopDownloadDeleteResponse = z.infer<typeof desktopDownloadDeleteResponseSchema>;

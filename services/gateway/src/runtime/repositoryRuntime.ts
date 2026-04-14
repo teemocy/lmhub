@@ -15,9 +15,9 @@ import {
   openDatabase,
 } from "@localhub/db";
 import {
-  runtimeKeyToString,
   type EngineAdapter,
   type EngineInstallResult,
+  runtimeKeyToString,
 } from "@localhub/engine-core";
 import {
   LlamaCppDownloadManager,
@@ -474,6 +474,7 @@ function toDesktopProviderCatalogDetail(
           id: file.artifact.artifactId,
           artifactId: file.artifact.artifactId,
           artifactName: file.artifact.fileName,
+          ...(file.artifact.downloadUrl ? { downloadUrl: file.artifact.downloadUrl } : {}),
           ...(file.artifact.sizeBytes !== undefined ? { sizeBytes: file.artifact.sizeBytes } : {}),
           ...(file.artifact.quantization ? { quantization: file.artifact.quantization } : {}),
           ...(file.artifact.architecture ? { architecture: file.artifact.architecture } : {}),
@@ -2186,37 +2187,79 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): Promise<DesktopDownloadActionResponse> {
     this.assertAcceptingNewWork();
-    const metadata =
+    const baseMetadata =
       input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
         ? input.metadata
         : {};
-    const task = await this.#downloadManager.startDownload({
-      provider: input.provider,
-      providerModelId: input.providerModelId,
-      artifactId: input.artifactId,
-      ...(input.taskGroupId ? { taskGroupId: input.taskGroupId } : {}),
-      displayName: input.title,
-      ...(typeof metadata.autoRegister === "boolean"
-        ? { autoRegister: metadata.autoRegister }
-        : {}),
-      ...(typeof metadata.bundleId === "string" && metadata.bundleId.length > 0
-        ? { bundleId: metadata.bundleId }
-        : {}),
-      ...(typeof metadata.bundlePrimaryArtifactId === "string" &&
-      metadata.bundlePrimaryArtifactId.length > 0
-        ? { bundlePrimaryArtifactId: metadata.bundlePrimaryArtifactId }
-        : {}),
-      ...(typeof metadata.engineType === "string" && metadata.engineType.length > 0
-        ? { engineType: metadata.engineType }
-        : {}),
-      ...(typeof metadata.registrationPath === "string" && metadata.registrationPath.length > 0
-        ? { registrationPath: metadata.registrationPath }
-        : {}),
-      ...(typeof metadata.auxiliary === "boolean" ? { auxiliary: metadata.auxiliary } : {}),
-      ...(typeof metadata.auxiliaryKind === "string" && metadata.auxiliaryKind.length > 0
-        ? { auxiliaryKind: metadata.auxiliaryKind }
-        : {}),
-    });
+    const requestedFiles =
+      input.files && input.files.length > 0
+        ? input.files.map((file) => ({
+            ...file,
+            metadata:
+              file.metadata && typeof file.metadata === "object" && !Array.isArray(file.metadata)
+                ? { ...baseMetadata, ...file.metadata }
+                : baseMetadata,
+          }))
+        : [
+            {
+              artifactId: input.artifactId,
+              artifactName: input.artifactName,
+              ...(input.downloadUrl ? { downloadUrl: input.downloadUrl } : {}),
+              ...(input.checksumSha256 ? { checksumSha256: input.checksumSha256 } : {}),
+              ...(input.sizeBytes !== undefined ? { sizeBytes: input.sizeBytes } : {}),
+              auxiliary: baseMetadata.auxiliary === true,
+              ...(typeof baseMetadata.auxiliaryKind === "string" &&
+              baseMetadata.auxiliaryKind.length > 0
+                ? { auxiliaryKind: baseMetadata.auxiliaryKind }
+                : {}),
+              metadata: baseMetadata,
+            },
+          ];
+    const taskGroupId =
+      input.taskGroupId ?? (requestedFiles.length > 1 ? `download-${randomUUID()}` : undefined);
+    const started = await Promise.all(
+      requestedFiles.map(async (file) => {
+        const metadata =
+          file.metadata && typeof file.metadata === "object" && !Array.isArray(file.metadata)
+            ? file.metadata
+            : {};
+        return await this.#downloadManager.startDownload({
+          provider: input.provider,
+          providerModelId: input.providerModelId,
+          artifactId: file.artifactId,
+          artifactName: file.artifactName,
+          ...(file.downloadUrl ? { downloadUrl: file.downloadUrl } : {}),
+          ...(file.checksumSha256 ? { checksumSha256: file.checksumSha256 } : {}),
+          ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+          ...(taskGroupId ? { taskGroupId } : {}),
+          displayName: input.title,
+          ...(typeof metadata.autoRegister === "boolean"
+            ? { autoRegister: metadata.autoRegister }
+            : {}),
+          ...(typeof metadata.bundleId === "string" && metadata.bundleId.length > 0
+            ? { bundleId: metadata.bundleId }
+            : {}),
+          ...(typeof metadata.bundlePrimaryArtifactId === "string" &&
+          metadata.bundlePrimaryArtifactId.length > 0
+            ? { bundlePrimaryArtifactId: metadata.bundlePrimaryArtifactId }
+            : {}),
+          ...(typeof metadata.engineType === "string" && metadata.engineType.length > 0
+            ? { engineType: metadata.engineType }
+            : {}),
+          ...(typeof metadata.registrationPath === "string" && metadata.registrationPath.length > 0
+            ? { registrationPath: metadata.registrationPath }
+            : {}),
+          ...(typeof metadata.auxiliary === "boolean" ? { auxiliary: metadata.auxiliary } : {}),
+          ...(typeof metadata.auxiliaryKind === "string" && metadata.auxiliaryKind.length > 0
+            ? { auxiliaryKind: metadata.auxiliaryKind }
+            : {}),
+        });
+      }),
+    );
+    const task = started[started.length - 1];
+    if (!task) {
+      throw new Error("Unable to enqueue download bundle.");
+    }
 
     return desktopDownloadActionResponseSchema.parse({
       accepted: true,
