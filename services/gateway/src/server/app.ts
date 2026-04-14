@@ -373,7 +373,8 @@ async function registerControlApp(
     if (!parsed.success) {
       return reply.code(400).send({
         error: "validation_error",
-        message: parsed.error.issues[0]?.message ?? "A local model file or directory path is required.",
+        message:
+          parsed.error.issues[0]?.message ?? "A local model file or directory path is required.",
         requestId: request.id,
       });
     }
@@ -655,6 +656,26 @@ async function registerControlApp(
       }
 
       return reply.code(202).send(await runtime.resumeDownload(payload.id, request.id));
+    }
+
+    if (action === "delete") {
+      if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: "Download id is required for delete.",
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(202).send(
+        await runtime.deleteDownload(
+          payload.id,
+          {
+            deleteFiles: payload.deleteFiles === true,
+          },
+          request.id,
+        ),
+      );
     }
 
     const parsed = desktopDownloadCreateRequestSchema.safeParse(request.body ?? {});

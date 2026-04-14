@@ -9,6 +9,7 @@ import type {
   DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
+  DesktopDownloadDeleteResponse,
   DesktopDownloadList,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
@@ -131,6 +132,12 @@ const api = {
         IPC_CHANNELS.gatewayResumeDownload,
         id,
       ) as Promise<DesktopDownloadActionResponse>,
+    deleteDownload: (id: string, options?: { deleteFiles?: boolean }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayDeleteDownload,
+        id,
+        options,
+      ) as Promise<DesktopDownloadDeleteResponse>,
     restart: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayRestart) as Promise<void>,
     shutdown: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayShutdown) as Promise<void>,
     subscribeEvents: (listener: Listener<GatewayEvent>) =>

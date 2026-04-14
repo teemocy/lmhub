@@ -640,7 +640,9 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
 
     const completedTasks = downloads.listDownloads();
     expect(completedTasks.filter((task) => task.modelId)).toHaveLength(1);
-    expect(completedTasks.some((task) => task.fileName.endsWith("00002-of-00002.gguf"))).toBe(true);
+    expect(
+      completedTasks[0]?.files.some((file) => file.fileName.endsWith("00002-of-00002.gguf")),
+    ).toBe(true);
   }, 15_000);
 
   it("stores downloads under the configured local models directory", async () => {
@@ -718,7 +720,7 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     const database = createTestDatabase();
     cleanups.push(database.cleanup);
 
-    const tokenizerPayload = Buffer.from("{\"model\":\"bpe\"}\n", "utf8");
+    const tokenizerPayload = Buffer.from('{"model":"bpe"}\n', "utf8");
     const shardPayload = Buffer.from("mlx shard payload", "utf8");
     const registrarCalls: string[] = [];
     const downloads = new LlamaCppDownloadManager({
@@ -832,10 +834,9 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     await waitFor(() => registrarCalls.length === 1);
 
     const tasks = downloads.listDownloads();
-    expect(registrarCalls).toEqual([
-      path.join(supportRoot, "models", "acme-stage3-mlx", "4bit"),
-    ]);
-    expect(tasks.find((task) => task.artifactId === "mlx-config")?.status).toBe("error");
+    expect(registrarCalls).toEqual([path.join(supportRoot, "models", "acme-stage3-mlx", "4bit")]);
+    expect(tasks[0]?.status).toBe("error");
+    expect(tasks[0]?.files.find((file) => file.artifactId === "mlx-config")?.status).toBe("error");
   }, 15_000);
 
   it("repairs stale MLX bundle errors once the bundle exists on disk", async () => {
@@ -949,11 +950,17 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     });
 
     const tasks = downloads.listDownloads();
-    expect(tasks.find((task) => task.artifactId === "mlx-config")).toMatchObject({
+    expect(tasks[0]).toMatchObject({
+      status: "completed",
+      completedFileCount: 3,
+    });
+    expect(tasks[0]?.files.find((file) => file.artifactId === "mlx-config")).toMatchObject({
       status: "completed",
       downloadedBytes: 3,
       totalBytes: 3,
     });
-    expect(tasks.find((task) => task.artifactId === "mlx-config")?.errorMessage).toBeUndefined();
+    expect(
+      tasks[0]?.files.find((file) => file.artifactId === "mlx-config")?.errorMessage,
+    ).toBeUndefined();
   });
 });

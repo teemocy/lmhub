@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -33,6 +34,7 @@ interface DownloadTaskMetadata {
   fileName: string;
   destinationPath: string;
   partialPath: string;
+  taskGroupId?: string;
   requestHeaders?: Record<string, string>;
   displayName?: string;
   remoteUrl?: string;
@@ -42,35 +44,58 @@ interface DownloadTaskMetadata {
   bundlePrimaryArtifactId?: string;
   engineType?: string;
   registrationPath?: string;
+  auxiliary?: boolean;
+  auxiliaryKind?: string;
+}
+
+export interface Stage3DownloadFileRecord {
+  id: string;
+  artifactId: string;
+  fileName: string;
+  status: DownloadTask["status"];
+  progress: number;
+  downloadedBytes: number;
+  totalBytes?: number;
+  errorMessage?: string;
+  destinationPath: string;
+  updatedAt: string;
+  auxiliary: boolean;
+  auxiliaryKind?: string;
 }
 
 export interface Stage3DownloadRecord {
   id: string;
   provider: ProviderId;
   providerModelId: string;
-  artifactId: string;
+  title: string;
   fileName: string;
   modelId?: string;
   status: DownloadTask["status"];
   progress: number;
   downloadedBytes: number;
   totalBytes?: number;
-  checksumSha256?: string;
+  fileCount: number;
+  completedFileCount: number;
+  errorFileCount: number;
   errorMessage?: string;
   destinationPath: string;
   updatedAt: string;
+  files: Stage3DownloadFileRecord[];
 }
 
 export interface Stage3DownloadRequest {
   provider: ProviderId;
   providerModelId: string;
   artifactId: string;
+  taskGroupId?: string;
   displayName?: string;
   autoRegister?: boolean;
   bundleId?: string;
   bundlePrimaryArtifactId?: string;
   engineType?: string;
   registrationPath?: string;
+  auxiliary?: boolean;
+  auxiliaryKind?: string;
 }
 
 export interface LocalModelRegistrar {
@@ -189,10 +214,7 @@ function buildDestinationPath(
   return path.join(modelDirectory, ...(segments.length > 0 ? segments : ["artifact.bin"]));
 }
 
-function resolveRegistrationPath(
-  localModelsDir: string,
-  metadata: DownloadTaskMetadata,
-): string {
+function resolveRegistrationPath(localModelsDir: string, metadata: DownloadTaskMetadata): string {
   const engineType = metadata.engineType ?? "llama.cpp";
   if (metadata.registrationPath === undefined) {
     return engineType === "mlx" ? path.dirname(metadata.destinationPath) : metadata.destinationPath;
@@ -224,6 +246,8 @@ function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
   const bundlePrimaryArtifactId = toOptionalString(metadata.bundlePrimaryArtifactId);
   const engineType = toOptionalString(metadata.engineType);
   const registrationPath = toOptionalString(metadata.registrationPath);
+  const taskGroupId = toOptionalString(metadata.taskGroupId);
+  const auxiliaryKind = toOptionalString(metadata.auxiliaryKind);
 
   return {
     providerModelId: metadata.providerModelId,
@@ -231,6 +255,7 @@ function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
     fileName: metadata.fileName,
     destinationPath: metadata.destinationPath,
     partialPath: metadata.partialPath,
+    ...(taskGroupId ? { taskGroupId } : {}),
     ...(metadata.requestHeaders &&
     typeof metadata.requestHeaders === "object" &&
     !Array.isArray(metadata.requestHeaders)
@@ -252,6 +277,8 @@ function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
     ...(bundlePrimaryArtifactId ? { bundlePrimaryArtifactId } : {}),
     ...(engineType ? { engineType } : {}),
     ...(registrationPath ? { registrationPath } : {}),
+    ...(typeof metadata.auxiliary === "boolean" ? { auxiliary: metadata.auxiliary } : {}),
+    ...(auxiliaryKind ? { auxiliaryKind } : {}),
   };
 }
 
@@ -263,6 +290,43 @@ function computeProgress(task: DownloadTask): number {
   return Math.min(100, Math.round((task.downloadedBytes / task.totalBytes) * 100));
 }
 
+function getTaskGroupId(task: DownloadTask): string {
+  const metadata = toTaskMetadata(task);
+  return metadata.taskGroupId ?? metadata.bundleId ?? task.id;
+}
+
+function computeAggregateProgress(tasks: readonly DownloadTask[]): number {
+  if (tasks.length === 0) {
+    return 0;
+  }
+
+  const totalBytes = tasks.reduce((total, task) => total + (task.totalBytes ?? 0), 0);
+  if (totalBytes > 0 && tasks.every((task) => task.totalBytes !== undefined)) {
+    const downloadedBytes = tasks.reduce((total, task) => total + task.downloadedBytes, 0);
+    return Math.min(100, Math.round((downloadedBytes / totalBytes) * 100));
+  }
+
+  const completedFiles = tasks.filter((task) => task.status === "completed").length;
+  return Math.min(100, Math.round((completedFiles / tasks.length) * 100));
+}
+
+function computeAggregateStatus(tasks: readonly DownloadTask[]): DownloadTask["status"] {
+  if (tasks.some((task) => task.status === "error")) {
+    return "error";
+  }
+  if (tasks.some((task) => task.status === "downloading")) {
+    return "downloading";
+  }
+  if (tasks.some((task) => task.status === "pending")) {
+    return "pending";
+  }
+  if (tasks.some((task) => task.status === "paused")) {
+    return "paused";
+  }
+
+  return "completed";
+}
+
 async function computeFileSha256(filePath: string): Promise<string> {
   const hash = createHash("sha256");
   const file = await import("node:fs").then((fs) => fs.createReadStream(filePath));
@@ -271,6 +335,35 @@ async function computeFileSha256(filePath: string): Promise<string> {
     file.on("end", () => resolve(hash.digest("hex")));
     file.on("error", reject);
   });
+}
+
+function isDirectoryEmpty(directory: string): boolean {
+  try {
+    return readdirSync(directory).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function trimEmptyParentDirectories(directory: string, stopAt: string): void {
+  let current = directory;
+  const resolvedStopAt = path.resolve(stopAt);
+  while (
+    path.resolve(current).startsWith(resolvedStopAt) &&
+    path.resolve(current) !== resolvedStopAt
+  ) {
+    if (!isDirectoryEmpty(current)) {
+      break;
+    }
+
+    try {
+      rmSync(current, { recursive: false, force: true });
+    } catch {
+      break;
+    }
+
+    current = path.dirname(current);
+  }
 }
 
 export class LlamaCppDownloadManager {
@@ -288,12 +381,14 @@ export class LlamaCppDownloadManager {
   readonly #partialsRoot: string;
   readonly #activeControllers = new Map<string, AbortController>();
   readonly #activeRuns = new Map<string, Promise<Stage3DownloadRecord>>();
+  readonly #deletedTaskIds = new Set<string>();
 
   constructor(options: LlamaCppDownloadManagerOptions) {
     this.#supportRoot = options.supportRoot;
     this.#downloadsRepository = options.downloadsRepository;
     const modelRegistrars =
-      options.modelRegistrars ?? (options.modelManager ? { "llama.cpp": options.modelManager } : undefined);
+      options.modelRegistrars ??
+      (options.modelManager ? { "llama.cpp": options.modelManager } : undefined);
     if (!modelRegistrars) {
       throw new Error("At least one local model registrar must be configured.");
     }
@@ -326,7 +421,18 @@ export class LlamaCppDownloadManager {
 
   listDownloads(): Stage3DownloadRecord[] {
     this.repairStaleMlxBundleTaskErrors();
-    return this.#downloadsRepository.list().map((task) => this.toRecord(task));
+    const tasks = this.#downloadsRepository.list();
+    const grouped = new Map<string, DownloadTask[]>();
+    for (const task of tasks) {
+      const groupId = getTaskGroupId(task);
+      const current = grouped.get(groupId) ?? [];
+      current.push(task);
+      grouped.set(groupId, current);
+    }
+
+    return [...grouped.values()]
+      .map((groupTasks) => this.toRecord(groupTasks))
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   }
 
   async startDownload(request: Stage3DownloadRequest): Promise<Stage3DownloadRecord> {
@@ -361,6 +467,7 @@ export class LlamaCppDownloadManager {
         fileName,
         destinationPath,
         partialPath,
+        ...(request.taskGroupId ? { taskGroupId: request.taskGroupId } : {}),
         ...(Object.keys(plan.headers).length > 0 ? { requestHeaders: plan.headers } : {}),
         ...(request.displayName ? { displayName: request.displayName } : {}),
         remoteUrl: plan.url,
@@ -372,6 +479,8 @@ export class LlamaCppDownloadManager {
           : {}),
         ...(request.engineType ? { engineType: request.engineType } : {}),
         ...(request.registrationPath ? { registrationPath: request.registrationPath } : {}),
+        ...(request.auxiliary !== undefined ? { auxiliary: request.auxiliary } : {}),
+        ...(request.auxiliaryKind ? { auxiliaryKind: request.auxiliaryKind } : {}),
       },
       createdAt: now,
       updatedAt: now,
@@ -379,12 +488,65 @@ export class LlamaCppDownloadManager {
 
     this.#downloadsRepository.upsert(task);
     this.publishProgress(task, "Queued download.");
-    void this.resumeDownload(task.id);
+    void this.resumeTask(task.id);
 
-    return this.toRecord(task);
+    return this.getGroupedRecordOrThrow(getTaskGroupId(task));
   }
 
-  async pauseDownload(taskId: string): Promise<Stage3DownloadRecord> {
+  async pauseDownload(id: string): Promise<Stage3DownloadRecord> {
+    const tasks = this.resolveGroupTasks(id);
+    await Promise.all(
+      tasks
+        .filter((task) => task.status === "pending" || task.status === "downloading")
+        .map((task) => this.pauseTask(task.id)),
+    );
+    return this.getGroupedRecordOrThrow(getTaskGroupId(tasks[0]!));
+  }
+
+  async resumeDownload(id: string): Promise<Stage3DownloadRecord> {
+    const tasks = this.resolveGroupTasks(id);
+    await Promise.all(
+      tasks
+        .filter((task) => task.status === "paused" || task.status === "pending")
+        .map((task) => this.resumeTask(task.id).catch(() => undefined)),
+    );
+    return this.getGroupedRecordOrThrow(getTaskGroupId(tasks[0]!));
+  }
+
+  async deleteDownload(
+    id: string,
+    options: { deleteFiles?: boolean } = {},
+  ): Promise<{ id: string }> {
+    const tasks = this.resolveGroupTasks(id);
+    for (const task of tasks) {
+      this.#deletedTaskIds.add(task.id);
+      this.#activeControllers.get(task.id)?.abort("deleted");
+    }
+
+    await Promise.all(tasks.map((task) => this.#activeRuns.get(task.id)?.catch(() => undefined)));
+
+    const latestTasks = this.resolveGroupTasks(id);
+    for (const task of latestTasks) {
+      const metadata = toTaskMetadata(task);
+      await rm(metadata.partialPath, { force: true }).catch(() => undefined);
+      if (options.deleteFiles ?? false) {
+        await rm(metadata.destinationPath, { recursive: true, force: true }).catch(() => undefined);
+        trimEmptyParentDirectories(
+          path.dirname(metadata.destinationPath),
+          path.join(this.#localModelsDir, sanitizePathPart(metadata.providerModelId)),
+        );
+      }
+    }
+
+    this.#downloadsRepository.deleteMany(latestTasks.map((task) => task.id));
+    for (const task of latestTasks) {
+      this.#deletedTaskIds.delete(task.id);
+    }
+
+    return { id: getTaskGroupId(latestTasks[0]!) };
+  }
+
+  private async pauseTask(taskId: string): Promise<Stage3DownloadRecord> {
     const task = this.#downloadsRepository.findById(taskId);
     if (!task) {
       throw new Error(`Unknown download task: ${taskId}`);
@@ -398,10 +560,10 @@ export class LlamaCppDownloadManager {
     };
     this.#downloadsRepository.upsert(nextTask);
     this.publishProgress(nextTask, "Download paused.");
-    return this.toRecord(nextTask);
+    return this.toRecord([nextTask]);
   }
 
-  async resumeDownload(taskId: string): Promise<Stage3DownloadRecord> {
+  private async resumeTask(taskId: string): Promise<Stage3DownloadRecord> {
     const running = this.#activeRuns.get(taskId);
     const currentTask = this.#downloadsRepository.findById(taskId);
 
@@ -415,6 +577,7 @@ export class LlamaCppDownloadManager {
     const run = this.runDownload(taskId).finally(() => {
       this.#activeRuns.delete(taskId);
       this.#activeControllers.delete(taskId);
+      this.#deletedTaskIds.delete(taskId);
     });
     this.#activeRuns.set(taskId, run);
     return run;
@@ -465,7 +628,7 @@ export class LlamaCppDownloadManager {
       const totalBytes = task.totalBytes;
       while (true) {
         if (controller.signal.aborted) {
-          throw new Error("paused");
+          throw new Error(String(controller.signal.reason ?? "paused"));
         }
 
         const rangeEnd =
@@ -527,7 +690,7 @@ export class LlamaCppDownloadManager {
         while (true) {
           if (controller.signal.aborted) {
             await reader.cancel();
-            throw new Error("paused");
+            throw new Error(String(controller.signal.reason ?? "paused"));
           }
 
           const next = await reader.read();
@@ -581,7 +744,7 @@ export class LlamaCppDownloadManager {
       if (metadata.bundleId) {
         const registered = await this.maybeRegisterBundle(metadata.bundleId);
         const latestTask = this.#downloadsRepository.findById(taskId) ?? completedTask;
-        if (registered && registered.id === latestTask.id) {
+        if (registered && registered.id === getTaskGroupId(latestTask)) {
           return registered;
         }
 
@@ -591,13 +754,18 @@ export class LlamaCppDownloadManager {
             ? "Download completed."
             : "Waiting for remaining bundle files.",
         );
-        return this.toRecord(latestTask);
+        return this.getGroupedRecordOrThrow(getTaskGroupId(latestTask));
       }
 
       this.publishProgress(completedTask, "Download completed.");
-      return this.toRecord(completedTask);
+      return this.getGroupedRecordOrThrow(getTaskGroupId(completedTask));
     } catch (error) {
-      if ((error instanceof Error ? error.message : String(error)) === "paused") {
+      const message = error instanceof Error ? error.message : "Download failed.";
+      if (message === "deleted" || this.#deletedTaskIds.has(taskId)) {
+        return this.toRecord([task]);
+      }
+
+      if (message === "paused") {
         const pausedTask: DownloadTask = {
           ...task,
           status: "paused",
@@ -605,38 +773,120 @@ export class LlamaCppDownloadManager {
         };
         this.#downloadsRepository.upsert(pausedTask);
         this.publishProgress(pausedTask, "Download paused.");
-        return this.toRecord(pausedTask);
+        return this.getGroupedRecordOrThrow(getTaskGroupId(pausedTask));
       }
 
       const failedTask: DownloadTask = {
         ...task,
         status: "error",
-        errorMessage: error instanceof Error ? error.message : "Download failed.",
+        errorMessage: message,
         updatedAt: this.#now(),
       };
       this.#downloadsRepository.upsert(failedTask);
       this.publishProgress(failedTask, failedTask.errorMessage);
-      return this.toRecord(failedTask);
+      return this.getGroupedRecordOrThrow(getTaskGroupId(failedTask));
     }
   }
 
-  private toRecord(task: DownloadTask): Stage3DownloadRecord {
+  private resolveGroupTasks(id: string): DownloadTask[] {
+    const tasks = this.#downloadsRepository.list().filter((task) => {
+      const groupId = getTaskGroupId(task);
+      return task.id === id || groupId === id;
+    });
+
+    if (tasks.length === 0) {
+      throw new Error(`Unknown download task: ${id}`);
+    }
+
+    return tasks;
+  }
+
+  private getGroupedRecordOrThrow(id: string): Stage3DownloadRecord {
+    return this.toRecord(this.resolveGroupTasks(id));
+  }
+
+  private pickPrimaryTask(tasks: readonly DownloadTask[]): DownloadTask {
+    const primaryArtifactId = tasks
+      .map((task) => toTaskMetadata(task).bundlePrimaryArtifactId)
+      .find((value): value is string => typeof value === "string" && value.length > 0);
+
+    return (
+      tasks.find((task) => {
+        const metadata = toTaskMetadata(task);
+        return primaryArtifactId
+          ? metadata.artifactId === primaryArtifactId
+          : metadata.autoRegister;
+      }) ??
+      tasks.find((task) => toTaskMetadata(task).autoRegister) ??
+      tasks.find((task) => !toTaskMetadata(task).auxiliary) ??
+      tasks[0]!
+    );
+  }
+
+  private toFileRecord(task: DownloadTask): Stage3DownloadFileRecord {
     const metadata = toTaskMetadata(task);
     return {
       id: task.id,
-      provider: task.provider as ProviderId,
-      providerModelId: metadata.providerModelId,
       artifactId: metadata.artifactId,
       fileName: metadata.fileName,
-      ...(task.modelId ? { modelId: task.modelId } : {}),
       status: task.status,
       progress: computeProgress(task),
       downloadedBytes: task.downloadedBytes,
       ...(task.totalBytes !== undefined ? { totalBytes: task.totalBytes } : {}),
-      ...(task.checksumSha256 ? { checksumSha256: task.checksumSha256 } : {}),
       ...(task.errorMessage ? { errorMessage: task.errorMessage } : {}),
       destinationPath: metadata.destinationPath,
       updatedAt: task.updatedAt,
+      auxiliary: metadata.auxiliary ?? false,
+      ...(metadata.auxiliaryKind ? { auxiliaryKind: metadata.auxiliaryKind } : {}),
+    };
+  }
+
+  private toRecord(tasks: readonly DownloadTask[]): Stage3DownloadRecord {
+    const primaryTask = this.pickPrimaryTask(tasks);
+    const primaryMetadata = toTaskMetadata(primaryTask);
+    const sortedTasks = [...tasks].sort((left, right) => {
+      if (left.id === primaryTask.id) {
+        return -1;
+      }
+      if (right.id === primaryTask.id) {
+        return 1;
+      }
+
+      return toTaskMetadata(left).fileName.localeCompare(toTaskMetadata(right).fileName);
+    });
+    const totalBytes = sortedTasks.every((task) => task.totalBytes !== undefined)
+      ? sortedTasks.reduce((total, task) => total + (task.totalBytes ?? 0), 0)
+      : undefined;
+    const downloadedBytes = sortedTasks.reduce((total, task) => total + task.downloadedBytes, 0);
+    const modelId = sortedTasks.find((task) => task.modelId)?.modelId;
+    const errorTask = [...sortedTasks]
+      .filter((task) => task.errorMessage)
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
+    const updatedAt = [...sortedTasks]
+      .map((task) => task.updatedAt)
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0]!;
+
+    return {
+      id: getTaskGroupId(primaryTask),
+      provider: primaryTask.provider as ProviderId,
+      providerModelId: primaryMetadata.providerModelId,
+      title:
+        primaryMetadata.displayName ??
+        primaryMetadata.providerModelId.split("/").at(-1) ??
+        primaryMetadata.providerModelId,
+      fileName: primaryMetadata.fileName,
+      ...(modelId ? { modelId } : {}),
+      status: computeAggregateStatus(sortedTasks),
+      progress: computeAggregateProgress(sortedTasks),
+      downloadedBytes,
+      ...(totalBytes !== undefined ? { totalBytes } : {}),
+      fileCount: sortedTasks.length,
+      completedFileCount: sortedTasks.filter((task) => task.status === "completed").length,
+      errorFileCount: sortedTasks.filter((task) => task.status === "error").length,
+      ...(errorTask?.errorMessage ? { errorMessage: errorTask.errorMessage } : {}),
+      destinationPath: primaryMetadata.destinationPath,
+      updatedAt,
+      files: sortedTasks.map((task) => this.toFileRecord(task)),
     };
   }
 
@@ -720,7 +970,7 @@ export class LlamaCppDownloadManager {
     };
     this.#downloadsRepository.upsert(registeredTask);
     this.publishProgress(registeredTask, `Indexed ${registered.profile.displayName}.`);
-    return this.toRecord(registeredTask);
+    return this.getGroupedRecordOrThrow(getTaskGroupId(registeredTask));
   }
 
   private async maybeRegisterBundle(bundleId: string): Promise<Stage3DownloadRecord | undefined> {
@@ -765,7 +1015,7 @@ export class LlamaCppDownloadManager {
       return undefined;
     }
     if (primaryTask.modelId) {
-      return this.toRecord(primaryTask);
+      return this.getGroupedRecordOrThrow(getTaskGroupId(primaryTask));
     }
 
     return await this.registerCompletedTask(primaryTask, toTaskMetadata(primaryTask));

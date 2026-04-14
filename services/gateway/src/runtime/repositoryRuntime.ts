@@ -46,6 +46,7 @@ import {
   type DesktopChatSessionUpsertRequest,
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
+  type DesktopDownloadDeleteResponse,
   type DesktopDownloadList,
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
@@ -68,6 +69,7 @@ import {
   desktopChatRunResponseSchema,
   desktopChatSessionListSchema,
   desktopDownloadActionResponseSchema,
+  desktopDownloadDeleteResponseSchema,
   desktopDownloadListSchema,
   desktopEngineInstallResponseSchema,
   desktopLocalModelImportRequestSchema,
@@ -208,6 +210,7 @@ type ChatSettingsMetadata = {
 interface CatalogVariantArtifact {
   artifact: ProviderArtifactDescriptor;
   auxiliary: boolean;
+  auxiliaryKind?: string;
   baseModelName: string;
   basename: string;
   quantizationLabel: string;
@@ -319,6 +322,7 @@ function toCatalogVariantArtifact(artifact: ProviderArtifactDescriptor): Catalog
   return {
     artifact,
     auxiliary: AUXILIARY_GGUF_PATTERN.test(basename),
+    ...(AUXILIARY_GGUF_PATTERN.test(basename) ? { auxiliaryKind: "mmproj" } : {}),
     baseModelName: baseModelName || shardlessStem,
     basename,
     quantizationLabel,
@@ -476,6 +480,8 @@ function toDesktopProviderCatalogDetail(
           ...(file.artifact.checksum?.algorithm === "sha256"
             ? { checksumSha256: file.artifact.checksum.value }
             : {}),
+          auxiliary: file.auxiliary,
+          ...(file.auxiliaryKind ? { auxiliaryKind: file.auxiliaryKind } : {}),
           metadata: {
             ...(file.artifact.metadata ?? {}),
             engineType: "llama.cpp",
@@ -521,6 +527,7 @@ function toDesktopProviderCatalogDetail(
         ...(file.quantization ? { quantization: file.quantization } : {}),
         ...(file.architecture ? { architecture: file.architecture } : {}),
         ...(file.checksum?.algorithm === "sha256" ? { checksumSha256: file.checksum.value } : {}),
+        auxiliary: false,
         metadata: {
           ...(file.metadata ?? {}),
           engineType: "mlx",
@@ -1428,15 +1435,34 @@ function toDownloadRecord(task: ReturnType<LlamaCppDownloadManager["listDownload
     id: task.id,
     ...(task.modelId ? { modelId: task.modelId } : {}),
     provider: task.provider,
-    title: task.providerModelId.split("/").at(-1) ?? task.providerModelId,
+    providerModelId: task.providerModelId,
+    title: task.title,
     artifactName: task.fileName,
     status: task.status,
     progress: task.progress,
     downloadedBytes: task.downloadedBytes,
     ...(task.totalBytes !== undefined ? { totalBytes: task.totalBytes } : {}),
+    fileCount: task.fileCount,
+    completedFileCount: task.completedFileCount,
+    errorFileCount: task.errorFileCount,
     destinationPath: task.destinationPath,
     updatedAt: task.updatedAt,
     ...(task.errorMessage ? { errorMessage: task.errorMessage } : {}),
+    files: task.files.map((file) => ({
+      id: file.id,
+      artifactId: file.artifactId,
+      artifactName: file.fileName,
+      status: file.status,
+      progress: file.progress,
+      downloadedBytes: file.downloadedBytes,
+      ...(file.totalBytes !== undefined ? { totalBytes: file.totalBytes } : {}),
+      destinationPath: file.destinationPath,
+      updatedAt: file.updatedAt,
+      ...(file.errorMessage ? { errorMessage: file.errorMessage } : {}),
+      auxiliary: file.auxiliary,
+      ...(file.auxiliaryKind ? { auxiliaryKind: file.auxiliaryKind } : {}),
+      metadata: {},
+    })),
   };
 }
 
@@ -2168,6 +2194,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       provider: input.provider,
       providerModelId: input.providerModelId,
       artifactId: input.artifactId,
+      ...(input.taskGroupId ? { taskGroupId: input.taskGroupId } : {}),
       displayName: input.title,
       ...(typeof metadata.autoRegister === "boolean"
         ? { autoRegister: metadata.autoRegister }
@@ -2184,6 +2211,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         : {}),
       ...(typeof metadata.registrationPath === "string" && metadata.registrationPath.length > 0
         ? { registrationPath: metadata.registrationPath }
+        : {}),
+      ...(typeof metadata.auxiliary === "boolean" ? { auxiliary: metadata.auxiliary } : {}),
+      ...(typeof metadata.auxiliaryKind === "string" && metadata.auxiliaryKind.length > 0
+        ? { auxiliaryKind: metadata.auxiliaryKind }
         : {}),
     });
 
@@ -2206,6 +2237,18 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     return desktopDownloadActionResponseSchema.parse({
       accepted: true,
       task: toDownloadRecord(task),
+    });
+  }
+
+  async deleteDownload(
+    id: string,
+    options: { deleteFiles?: boolean } = {},
+    _traceId?: string,
+  ): Promise<DesktopDownloadDeleteResponse> {
+    const result = await this.#downloadManager.deleteDownload(id, options);
+    return desktopDownloadDeleteResponseSchema.parse({
+      accepted: true,
+      id: result.id,
     });
   }
 

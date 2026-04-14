@@ -727,6 +727,9 @@ describe("gateway skeleton", () => {
       async resumeDownload() {
         throw new Error("not implemented");
       },
+      async deleteDownload() {
+        throw new Error("not implemented");
+      },
       getHealthSnapshot(plane) {
         return {
           status: "ok",

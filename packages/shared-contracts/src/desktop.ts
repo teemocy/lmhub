@@ -282,6 +282,8 @@ export const desktopProviderCatalogFileSchema = z.object({
   quantization: nonEmptyStringSchema.optional(),
   architecture: nonEmptyStringSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
+  auxiliary: z.boolean().default(false),
+  auxiliaryKind: nonEmptyStringSchema.optional(),
   metadata: jsonRecordSchema.default({}),
 });
 
@@ -309,20 +311,41 @@ export const desktopProviderCatalogDetailResponseSchema = z.object({
   warnings: z.array(z.string()).default([]),
 });
 
+export const desktopDownloadFileSchema = z.object({
+  id: nonEmptyStringSchema,
+  artifactId: nonEmptyStringSchema,
+  artifactName: nonEmptyStringSchema,
+  status: z.enum(["pending", "downloading", "paused", "completed", "error"]),
+  progress: z.number().int().min(0).max(100),
+  downloadedBytes: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative().optional(),
+  destinationPath: fileSystemPathSchema.optional(),
+  updatedAt: isoDatetimeSchema,
+  errorMessage: z.string().optional(),
+  auxiliary: z.boolean().default(false),
+  auxiliaryKind: nonEmptyStringSchema.optional(),
+  metadata: jsonRecordSchema.default({}),
+});
+
 export const desktopDownloadTaskSchema = z.object({
   id: nonEmptyStringSchema,
   modelId: nonEmptyStringSchema.optional(),
   provider: z.enum(["huggingface", "modelscope"]),
+  providerModelId: nonEmptyStringSchema,
   title: nonEmptyStringSchema,
   artifactName: nonEmptyStringSchema,
   status: z.enum(["pending", "downloading", "paused", "completed", "error"]),
   progress: z.number().int().min(0).max(100),
   downloadedBytes: z.number().int().nonnegative(),
   totalBytes: z.number().int().nonnegative().optional(),
+  fileCount: z.number().int().positive(),
+  completedFileCount: z.number().int().nonnegative(),
+  errorFileCount: z.number().int().nonnegative(),
   rateBytesPerSecond: z.number().nonnegative().optional(),
   destinationPath: fileSystemPathSchema.optional(),
   updatedAt: isoDatetimeSchema,
   errorMessage: z.string().optional(),
+  files: z.array(desktopDownloadFileSchema).min(1),
 });
 
 export const desktopDownloadListSchema = z.object({
@@ -336,6 +359,7 @@ export const desktopDownloadCreateRequestSchema = z.object({
   artifactId: nonEmptyStringSchema,
   title: nonEmptyStringSchema,
   artifactName: nonEmptyStringSchema,
+  taskGroupId: nonEmptyStringSchema.optional(),
   downloadUrl: z.string().url().optional(),
   destinationPath: fileSystemPathSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
@@ -346,6 +370,11 @@ export const desktopDownloadCreateRequestSchema = z.object({
 export const desktopDownloadActionResponseSchema = z.object({
   accepted: z.boolean(),
   task: desktopDownloadTaskSchema,
+});
+
+export const desktopDownloadDeleteResponseSchema = z.object({
+  accepted: z.boolean(),
+  id: nonEmptyStringSchema,
 });
 
 export const desktopRuntimeContextSchema = z.object({
@@ -447,10 +476,12 @@ export type DesktopProviderCatalogDetail = z.infer<typeof desktopProviderCatalog
 export type DesktopProviderCatalogDetailResponse = z.infer<
   typeof desktopProviderCatalogDetailResponseSchema
 >;
+export type DesktopDownloadFile = z.infer<typeof desktopDownloadFileSchema>;
 export type DesktopDownloadTask = z.infer<typeof desktopDownloadTaskSchema>;
 export type DesktopDownloadList = z.infer<typeof desktopDownloadListSchema>;
 export type DesktopDownloadCreateRequest = z.infer<typeof desktopDownloadCreateRequestSchema>;
 export type DesktopDownloadActionResponse = z.infer<typeof desktopDownloadActionResponseSchema>;
+export type DesktopDownloadDeleteResponse = z.infer<typeof desktopDownloadDeleteResponseSchema>;
 export type DesktopRuntimeContext = z.infer<typeof desktopRuntimeContextSchema>;
 export type DesktopShellPhase = z.infer<typeof desktopShellPhaseSchema>;
 export type DesktopShellState = z.infer<typeof desktopShellStateSchema>;

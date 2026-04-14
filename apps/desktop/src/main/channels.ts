@@ -24,6 +24,7 @@ export const IPC_CHANNELS = {
   gatewayCreateDownload: "gateway:create-download",
   gatewayPauseDownload: "gateway:pause-download",
   gatewayResumeDownload: "gateway:resume-download",
+  gatewayDeleteDownload: "gateway:delete-download",
   gatewayRestart: "gateway:restart",
   gatewayShutdown: "gateway:shutdown",
   gatewayEvent: "gateway:event",

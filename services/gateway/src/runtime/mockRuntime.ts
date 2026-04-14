@@ -16,6 +16,7 @@ import {
   type DesktopChatSessionUpsertRequest,
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
+  type DesktopDownloadDeleteResponse,
   type DesktopDownloadList,
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
@@ -194,9 +195,7 @@ function createTraceId(traceId?: string): string {
   return traceId?.trim() || randomUUID();
 }
 
-function hasRuntimeAffectingModelConfigChanges(
-  input: DesktopModelConfigUpdateRequest,
-): boolean {
+function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
@@ -269,11 +268,7 @@ function buildAssistantMetadata(options: {
   return metadata;
 }
 
-function getOptionalNumber(
-  value: unknown,
-  min?: number,
-  max?: number,
-): number | undefined {
+function getOptionalNumber(value: unknown, min?: number, max?: number): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;
   }
@@ -536,11 +531,7 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
 const DEFAULT_MODELS: RuntimeModelRecord[] = [
   createModel("localhub/tinyllama-1.1b-chat-q4", 1_717_286_400, ["chat"]),
   createModel("localhub/qwen2.5-7b-instruct-q4", 1_717_372_800, ["chat", "tools"]),
-  createModel("localhub/qwen2.5-vl-7b-instruct-q4", 1_717_414_400, [
-    "chat",
-    "tools",
-    "vision",
-  ]),
+  createModel("localhub/qwen2.5-vl-7b-instruct-q4", 1_717_414_400, ["chat", "tools", "vision"]),
   createModel("localhub/bge-small-en-v1.5", 1_717_459_200, ["embeddings"]),
 ];
 
@@ -548,6 +539,7 @@ const DEFAULT_DOWNLOADS: DesktopDownloadList["data"] = [
   {
     id: "download-demo-1",
     provider: "huggingface",
+    providerModelId: "Qwen/Qwen2.5-7B-Instruct-GGUF",
     title: "Qwen2.5 7B Instruct GGUF",
     artifactName: "qwen2.5-7b-instruct-q4_k_m.gguf",
     modelId: "localhub/qwen2.5-7b-instruct-q4",
@@ -555,8 +547,40 @@ const DEFAULT_DOWNLOADS: DesktopDownloadList["data"] = [
     progress: 42,
     downloadedBytes: 420,
     totalBytes: 1_000,
+    fileCount: 2,
+    completedFileCount: 0,
+    errorFileCount: 0,
     destinationPath: "/tmp/qwen2.5-7b-instruct-q4_k_m.gguf",
     updatedAt: new Date().toISOString(),
+    files: [
+      {
+        id: "download-demo-1-main",
+        artifactId: "download-demo-1-main",
+        artifactName: "qwen2.5-7b-instruct-q4_k_m.gguf",
+        status: "downloading",
+        progress: 42,
+        downloadedBytes: 420,
+        totalBytes: 1_000,
+        destinationPath: "/tmp/qwen2.5-7b-instruct-q4_k_m.gguf",
+        updatedAt: new Date().toISOString(),
+        auxiliary: false,
+        metadata: {},
+      },
+      {
+        id: "download-demo-1-mmproj",
+        artifactId: "download-demo-1-mmproj",
+        artifactName: "mmproj-qwen2.5-7b-instruct-f16.gguf",
+        status: "pending",
+        progress: 0,
+        downloadedBytes: 0,
+        totalBytes: 120,
+        destinationPath: "/tmp/mmproj-qwen2.5-7b-instruct-f16.gguf",
+        updatedAt: new Date().toISOString(),
+        auxiliary: true,
+        auxiliaryKind: "mmproj",
+        metadata: {},
+      },
+    ],
   },
 ];
 
@@ -745,7 +769,9 @@ export class MockGatewayRuntime {
       {
         model: input.model,
         stream: false,
-        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.temperature !== undefined
+          ? { temperature: chatSettings.temperature }
+          : {}),
         ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
         ...((input.maxTokens ?? chatSettings.maxOutputTokens) !== undefined
           ? { max_tokens: input.maxTokens ?? chatSettings.maxOutputTokens }
@@ -780,7 +806,9 @@ export class MockGatewayRuntime {
       id: session.id,
       modelId: input.model,
       ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
-      ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
+      ...(session.title
+        ? { title: session.title }
+        : { title: createChatSessionTitle(input.message) }),
     });
 
     return {
@@ -811,14 +839,19 @@ export class MockGatewayRuntime {
       createdAt: now,
     };
 
-    this.#chatMessages.set(session.id, [...(this.#chatMessages.get(session.id) ?? []), userMessage]);
+    this.#chatMessages.set(session.id, [
+      ...(this.#chatMessages.get(session.id) ?? []),
+      userMessage,
+    ]);
 
     const assistantMessageId = `message_${Date.now() + 1}`;
     const streamResult = this.createChatCompletionStream(
       {
         model: input.model,
         stream: true,
-        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.temperature !== undefined
+          ? { temperature: chatSettings.temperature }
+          : {}),
         ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
         ...((input.maxTokens ?? chatSettings.maxOutputTokens) !== undefined
           ? { max_tokens: input.maxTokens ?? chatSettings.maxOutputTokens }
@@ -864,7 +897,9 @@ export class MockGatewayRuntime {
         id: session.id,
         modelId: input.model,
         ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
-        ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
+        ...(session.title
+          ? { title: session.title }
+          : { title: createChatSessionTitle(input.message) }),
       });
     };
 
@@ -997,6 +1032,7 @@ export class MockGatewayRuntime {
                 quantization: "Q4_K_M",
                 architecture: "llama",
                 checksumSha256: "a".repeat(64),
+                auxiliary: false,
                 metadata: {},
               },
             ],
@@ -1012,10 +1048,11 @@ export class MockGatewayRuntime {
     input: DesktopDownloadCreateRequest,
     _traceId?: string,
   ): DesktopDownloadActionResponse {
-    const task = {
-      id: `download-${Date.now()}`,
-      provider: input.provider,
-      title: input.title,
+    const groupId = input.taskGroupId ?? `download-${Date.now()}`;
+    const fileId = `download-file-${Date.now()}`;
+    const nextFile = {
+      id: fileId,
+      artifactId: input.artifactId,
       artifactName: input.artifactName,
       status: "pending" as const,
       progress: 0,
@@ -1023,6 +1060,53 @@ export class MockGatewayRuntime {
       ...(input.sizeBytes !== undefined ? { totalBytes: input.sizeBytes } : {}),
       ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
       updatedAt: new Date().toISOString(),
+      auxiliary: input.metadata?.auxiliary === true,
+      ...(typeof input.metadata?.auxiliaryKind === "string"
+        ? { auxiliaryKind: input.metadata.auxiliaryKind }
+        : {}),
+      metadata: {},
+    };
+
+    const existingTask = this.#downloads.find((entry) => entry.id === groupId);
+    if (existingTask) {
+      existingTask.files = [...existingTask.files, nextFile];
+      existingTask.fileCount = existingTask.files.length;
+      existingTask.completedFileCount = existingTask.files.filter(
+        (file) => file.status === "completed",
+      ).length;
+      existingTask.errorFileCount = existingTask.files.filter(
+        (file) => file.status === "error",
+      ).length;
+      existingTask.downloadedBytes = existingTask.files.reduce(
+        (total, file) => total + file.downloadedBytes,
+        0,
+      );
+      existingTask.totalBytes = existingTask.files.every((file) => file.totalBytes !== undefined)
+        ? existingTask.files.reduce((total, file) => total + (file.totalBytes ?? 0), 0)
+        : undefined;
+      existingTask.updatedAt = nextFile.updatedAt;
+      return {
+        accepted: true,
+        task: structuredClone(existingTask),
+      };
+    }
+
+    const task = {
+      id: groupId,
+      provider: input.provider,
+      providerModelId: input.providerModelId,
+      title: input.title,
+      artifactName: input.artifactName,
+      status: "pending" as const,
+      progress: 0,
+      downloadedBytes: 0,
+      ...(input.sizeBytes !== undefined ? { totalBytes: input.sizeBytes } : {}),
+      fileCount: 1,
+      completedFileCount: 0,
+      errorFileCount: 0,
+      ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
+      updatedAt: nextFile.updatedAt,
+      files: [nextFile],
     };
 
     this.#downloads.unshift(task);
@@ -1040,6 +1124,11 @@ export class MockGatewayRuntime {
 
     task.status = "paused";
     task.updatedAt = new Date().toISOString();
+    task.files = task.files.map((file) => ({
+      ...file,
+      status: file.status === "completed" ? "completed" : "paused",
+      updatedAt: task.updatedAt,
+    }));
     return {
       accepted: true,
       task: structuredClone(task),
@@ -1054,9 +1143,31 @@ export class MockGatewayRuntime {
 
     task.status = "downloading";
     task.updatedAt = new Date().toISOString();
+    task.files = task.files.map((file) => ({
+      ...file,
+      status: file.status === "completed" ? "completed" : "downloading",
+      updatedAt: task.updatedAt,
+    }));
     return {
       accepted: true,
       task: structuredClone(task),
+    };
+  }
+
+  deleteDownload(
+    id: string,
+    _options?: { deleteFiles?: boolean },
+    _traceId?: string,
+  ): DesktopDownloadDeleteResponse {
+    const index = this.#downloads.findIndex((entry) => entry.id === id);
+    if (index < 0) {
+      throw new Error(`Unknown download: ${id}`);
+    }
+
+    this.#downloads.splice(index, 1);
+    return {
+      accepted: true,
+      id,
     };
   }
 
@@ -1068,16 +1179,15 @@ export class MockGatewayRuntime {
     input: DesktopEngineInstallRequest,
     _traceId?: string,
   ): DesktopEngineInstallResponse {
-    const engineType =
-      "engineType" in input && input.engineType === "mlx" ? "mlx" : "llama.cpp";
+    const engineType = "engineType" in input && input.engineType === "mlx" ? "mlx" : "llama.cpp";
     const versionTag =
       input.action === "install-managed-runtime"
         ? "mock-mlx-runtime"
         : input.action === "download-latest-metal"
-        ? "mock-metal-latest"
-        : input.action === "import-local-binary"
-          ? `mock-local-${slugifyFileName(input.filePath) || "binary"}`
-          : input.versionTag;
+          ? "mock-metal-latest"
+          : input.action === "import-local-binary"
+            ? `mock-local-${slugifyFileName(input.filePath) || "binary"}`
+            : input.versionTag;
     const existingRecord = this.#engines.find(
       (record) => record.engineType === engineType && record.version === versionTag,
     );
@@ -1085,21 +1195,21 @@ export class MockGatewayRuntime {
       input.action === "install-managed-runtime"
         ? "python"
         : input.action === "download-latest-metal"
-        ? "llama-server"
-        : input.action === "import-local-binary"
-          ? path.basename(input.filePath)
-          : existingRecord?.binaryPath
-            ? path.basename(existingRecord.binaryPath)
-            : "llama-server";
+          ? "llama-server"
+          : input.action === "import-local-binary"
+            ? path.basename(input.filePath)
+            : existingRecord?.binaryPath
+              ? path.basename(existingRecord.binaryPath)
+              : "llama-server";
     const binaryPath =
       input.action === "install-managed-runtime"
         ? `/mock/support/engines/mlx/versions/${versionTag}/venv/bin/python`
         : input.action === "download-latest-metal"
-        ? `/mock/support/engines/llama.cpp/versions/${versionTag}/llama-server`
-        : input.action === "import-local-binary"
-          ? `/mock/support/engines/llama.cpp/versions/${versionTag}/${binaryName}`
-          : (existingRecord?.binaryPath ??
-            `/mock/support/engines/${engineType}/versions/${versionTag}/${binaryName}`);
+          ? `/mock/support/engines/llama.cpp/versions/${versionTag}/llama-server`
+          : input.action === "import-local-binary"
+            ? `/mock/support/engines/llama.cpp/versions/${versionTag}/${binaryName}`
+            : (existingRecord?.binaryPath ??
+              `/mock/support/engines/${engineType}/versions/${versionTag}/${binaryName}`);
     const engine: EngineRecord = {
       id: `${engineType}:${versionTag}`,
       engineType,
@@ -1112,10 +1222,10 @@ export class MockGatewayRuntime {
         input.action === "install-managed-runtime"
           ? "Mock managed MLX runtime install."
           : input.action === "download-latest-metal"
-          ? "Mock packaged Metal binary install."
-          : input.action === "import-local-binary"
-            ? `Mock local binary import from ${input.filePath}.`
-            : `Mock activated installed version ${input.versionTag}.`,
+            ? "Mock packaged Metal binary install."
+            : input.action === "import-local-binary"
+              ? `Mock local binary import from ${input.filePath}.`
+              : `Mock activated installed version ${input.versionTag}.`,
       installedAt: new Date().toISOString(),
     };
 
@@ -1141,10 +1251,10 @@ export class MockGatewayRuntime {
         input.action === "install-managed-runtime"
           ? "Mock installed a managed MLX runtime."
           : input.action === "download-latest-metal"
-          ? "Mock downloaded a packaged Metal llama.cpp binary."
-          : input.action === "import-local-binary"
-            ? `Mock imported local llama.cpp binary from ${input.filePath}.`
-            : `Mock activated installed ${engineType} version ${input.versionTag}.`,
+            ? "Mock downloaded a packaged Metal llama.cpp binary."
+            : input.action === "import-local-binary"
+              ? `Mock imported local llama.cpp binary from ${input.filePath}.`
+              : `Mock activated installed ${engineType} version ${input.versionTag}.`,
       ],
     };
   }
@@ -1255,8 +1365,8 @@ export class MockGatewayRuntime {
         : {}),
       updatedAt: new Date().toISOString(),
     };
-    const baseCapabilities =
-      this.#modelBaseCapabilities.get(resolvedModelId) ?? current.capabilities ?? ["chat"];
+    const baseCapabilities = this.#modelBaseCapabilities.get(resolvedModelId) ??
+      current.capabilities ?? ["chat"];
     updated.capabilities = applyCapabilityOverridesToLabels(
       baseCapabilities,
       updated.capabilityOverrides,
@@ -1354,7 +1464,9 @@ export class MockGatewayRuntime {
     }
 
     const created = Math.floor(Date.now() / 1000);
-    const lastUserMessage = [...input.messages].reverse().find((message) => message.role === "user");
+    const lastUserMessage = [...input.messages]
+      .reverse()
+      .find((message) => message.role === "user");
     const normalizedUserText = formatChatContentSummary(lastUserMessage?.content ?? "");
     const promptTokens = countChatContentTokens(lastUserMessage?.content ?? "");
 
@@ -1557,11 +1669,9 @@ export class MockGatewayRuntime {
     const model = this.#models.get(modelId);
     const existing = this.#modelDetails.get(modelId);
     const defaultName = prettifyModelName(modelId);
-    const baseCapabilities =
-      this.#modelBaseCapabilities.get(modelId) ??
+    const baseCapabilities = this.#modelBaseCapabilities.get(modelId) ??
       model?.capabilities ??
-      existing?.capabilities ??
-      ["chat"];
+      existing?.capabilities ?? ["chat"];
     if (!this.#modelBaseCapabilities.has(modelId)) {
       this.#modelBaseCapabilities.set(modelId, [...baseCapabilities]);
     }
@@ -1633,7 +1743,8 @@ export class MockGatewayRuntime {
     }
 
     for (const candidateId of this.#models.keys()) {
-      const existing = this.#modelDetails.get(candidateId) ?? this.createDesktopModelRecord(candidateId);
+      const existing =
+        this.#modelDetails.get(candidateId) ?? this.createDesktopModelRecord(candidateId);
       if (existing.displayName === modelId) {
         return candidateId;
       }

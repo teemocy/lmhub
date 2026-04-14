@@ -10,6 +10,7 @@ import type {
   DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
+  DesktopDownloadDeleteResponse,
   DesktopDownloadList,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
@@ -82,6 +83,10 @@ type DesktopApi = {
     createDownload(payload: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse>;
     pauseDownload(id: string): Promise<DesktopDownloadActionResponse>;
     resumeDownload(id: string): Promise<DesktopDownloadActionResponse>;
+    deleteDownload(
+      id: string,
+      options?: { deleteFiles?: boolean },
+    ): Promise<DesktopDownloadDeleteResponse>;
     restart(): Promise<void>;
     shutdown(): Promise<void>;
     subscribeEvents(listener: (event: GatewayEvent) => void): Unsubscribe;

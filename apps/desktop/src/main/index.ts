@@ -388,6 +388,11 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayResumeDownload, (_event, id: string) =>
     gatewayManager.resumeDownload(id),
   );
+  ipcMain.handle(
+    IPC_CHANNELS.gatewayDeleteDownload,
+    (_event, id: string, options?: { deleteFiles?: boolean }) =>
+      gatewayManager.deleteDownload(id, options),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayRestart, () => gatewayManager.restart());
   ipcMain.handle(IPC_CHANNELS.gatewayShutdown, () => gatewayManager.shutdown());
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);

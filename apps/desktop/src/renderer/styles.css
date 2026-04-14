@@ -520,6 +520,86 @@ select {
   padding: 20px;
 }
 
+.download-task-card {
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.download-task-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(184, 111, 34, 0.22);
+}
+
+.download-task-card:focus-visible {
+  outline: 2px solid rgba(184, 111, 34, 0.34);
+  outline-offset: 2px;
+}
+
+.download-task-card-error {
+  border-color: rgba(178, 67, 44, 0.18);
+  background: rgba(255, 246, 243, 0.9);
+}
+
+.download-task-subtitle {
+  margin-top: 4px;
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
+.download-task-actions {
+  margin-top: 12px;
+}
+
+.download-task-delete-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(20, 33, 61, 0.08);
+}
+
+.download-task-error-text {
+  margin-top: 10px;
+  color: #9d2b20;
+}
+
+.download-detail-backdrop {
+  align-items: center;
+  justify-content: center;
+}
+
+.download-detail-modal {
+  width: min(920px, calc(100vw - 64px));
+  max-height: calc(100vh - 64px);
+}
+
+.download-detail-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.download-detail-file-card h4 {
+  margin: 0 0 4px;
+}
+
+.download-detail-file-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.download-detail-path {
+  margin-top: 8px;
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
 .search-result-strip {
   display: flex;
   flex-direction: column;

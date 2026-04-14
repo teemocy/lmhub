@@ -10,6 +10,7 @@ import type {
   DesktopChatSessionUpsertRequest,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
+  DesktopDownloadDeleteResponse,
   DesktopDownloadList,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
@@ -167,6 +168,11 @@ export interface GatewayRuntime {
   ): MaybePromise<DesktopDownloadActionResponse>;
   pauseDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
   resumeDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
+  deleteDownload(
+    id: string,
+    options?: { deleteFiles?: boolean },
+    traceId?: string,
+  ): MaybePromise<DesktopDownloadDeleteResponse>;
   getHealthSnapshot(plane: GatewayPlane): ControlHealthSnapshot;
   registerLocalModel(
     input: DesktopLocalModelImportRequest,
