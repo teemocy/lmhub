@@ -176,7 +176,7 @@ Important files:
 
 Security defaults are intentionally conservative:
 
-- the public listener defaults to `127.0.0.1:1337`
+- the public listener defaults to `127.0.0.1:1337` and can be changed in `config/gateway.json` or the desktop Settings screen
 - the control listener defaults to `127.0.0.1:16384`
 - control routes are loopback-only even when LAN is enabled for the public API
 - bearer auth can be enabled for public and control traffic

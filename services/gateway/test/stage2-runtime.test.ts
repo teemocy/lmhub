@@ -84,6 +84,27 @@ async function writeSampleGgufFile(targetPath: string): Promise<void> {
   await writeFile(targetPath, payload);
 }
 
+async function writeSampleMlxModelDirectory(targetPath: string): Promise<void> {
+  await mkdir(targetPath, { recursive: true });
+  await writeFile(
+    path.join(targetPath, "config.json"),
+    `${JSON.stringify(
+      {
+        _name_or_path: "Gateway Stage2 MLX Chat",
+        model_type: "llama",
+        max_position_embeddings: 4096,
+        num_parameters: 123456789,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  await writeFile(path.join(targetPath, "tokenizer.json"), "{}\n");
+  await writeFile(path.join(targetPath, "special_tokens_map.json"), "{}\n");
+  await writeFile(path.join(targetPath, "quant_strategy.json"), `${JSON.stringify({ bits: 4 })}\n`);
+  await writeFile(path.join(targetPath, "model.safetensors"), "");
+}
+
 function createDelayedChatResponse(model: string, userMessage: string, delayMs: number): Response {
   const encoder = new TextEncoder();
   const created = Math.floor(Date.now() / 1000);
@@ -205,6 +226,7 @@ interface Stage2Fixture {
 }
 
 const fixtures: Stage2Fixture[] = [];
+const supportsMlxTests = process.platform === "darwin" && process.arch === "arm64";
 const embeddingsModelArtifact = {
   ...fixtureModelArtifact,
   id: "model_bge_small_embed",
@@ -250,6 +272,7 @@ interface CreateStage2FixtureOptions {
 function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
     defaultModelTtlMs: 1_000,
+    maxActiveModelsInMemory: 0,
     publicHost: "127.0.0.1",
     publicPort: 11434,
     controlHost: "127.0.0.1",
@@ -446,6 +469,262 @@ describe("gateway stage 2 runtime", () => {
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });
+
+  it.runIf(supportsMlxTests)(
+    "installs a managed MLX runtime, registers an MLX directory, and serves chat",
+    async () => {
+      const fixture = await createStage2Fixture();
+      const gateway = await buildGateway({
+        config: createTestConfig(),
+        runtime: fixture.runtime,
+      });
+      const artifactPath = path.join(fixture.appPaths.supportRoot, "models", "gateway-stage2-mlx");
+
+      await writeSampleMlxModelDirectory(artifactPath);
+      await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+      const installResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/engines",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          engineType: "mlx",
+          action: "install-managed-runtime",
+          versionTag: "stage2-mlx-runtime",
+        },
+      });
+
+      expect(installResponse.statusCode).toBe(202);
+      expect(installResponse.json()).toMatchObject({
+        accepted: true,
+        engine: expect.objectContaining({
+          engineType: "mlx",
+          version: "stage2-mlx-runtime",
+          active: true,
+        }),
+        notes: expect.arrayContaining([expect.stringContaining("fake MLX runtime")]),
+      });
+
+      const registerResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/models/register-local",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          filePath: artifactPath,
+          displayName: "Gateway MLX Chat",
+        },
+      });
+
+      expect(registerResponse.statusCode).toBe(201);
+      expect(registerResponse.json()).toMatchObject({
+        created: true,
+        model: expect.objectContaining({
+          displayName: "Gateway MLX Chat",
+          engineType: "mlx",
+          format: "mlx",
+          localPath: artifactPath,
+          architecture: "llama",
+          contextLength: 4096,
+          parameterCount: 123456789,
+          artifactStatus: "available",
+          state: "idle",
+        }),
+      });
+
+      const registeredModel = registerResponse.json().model as {
+        id: string;
+        batchSize?: number;
+        gpuLayers?: number;
+        parallelSlots?: number;
+        flashAttentionType?: string;
+      };
+      expect(registeredModel.batchSize).toBeUndefined();
+      expect(registeredModel.gpuLayers).toBeUndefined();
+      expect(registeredModel.parallelSlots).toBeUndefined();
+      expect(registeredModel.flashAttentionType).toBeUndefined();
+
+      const chatResponse = await gateway.publicApp.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: "Bearer public-secret-stage2",
+        },
+        payload: {
+          model: registeredModel.id,
+          messages: [{ role: "user", content: "Hello from MLX." }],
+        },
+      });
+
+      expect(chatResponse.statusCode).toBe(200);
+      expect(chatResponse.json()).toMatchObject({
+        object: "chat.completion",
+        model: registeredModel.id,
+        choices: [
+          expect.objectContaining({
+            finish_reason: "stop",
+            message: expect.objectContaining({
+              role: "assistant",
+            }),
+          }),
+        ],
+      });
+
+      const embeddingsResponse = await gateway.publicApp.inject({
+        method: "POST",
+        url: "/v1/embeddings",
+        headers: {
+          authorization: "Bearer public-secret-stage2",
+        },
+        payload: {
+          model: registeredModel.id,
+          input: "MLX embeddings should be rejected in the first pass.",
+        },
+      });
+
+      expect(embeddingsResponse.statusCode).toBe(409);
+      expect(embeddingsResponse.json()).toMatchObject({
+        error: "unsupported_model_capability",
+        message: `Model ${registeredModel.id} does not support embeddings requests.`,
+      });
+
+      await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+    },
+  );
+
+  it.runIf(supportsMlxTests)(
+    "auto-discovers GGUF files and MLX directories from the same local models path",
+    async () => {
+      const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stage2-mixed-"));
+      const localModelsDir = path.join(supportRoot, "models");
+      const ggufPath = path.join(localModelsDir, "nested", "gateway-stage2-mixed.gguf");
+      const mlxPath = path.join(localModelsDir, "gateway-stage2-mixed-mlx");
+
+      await writeSampleGgufFile(ggufPath);
+      await writeSampleMlxModelDirectory(mlxPath);
+
+      const runtime = createRepositoryGatewayRuntime({
+        cwd: process.cwd(),
+        defaultModelTtlMs: 1_000,
+        env: {
+          ...process.env,
+          LOCAL_LLM_HUB_ENV: "test",
+        },
+        fakeWorkerStartupDelayMs: 25,
+        preferFakeWorker: true,
+        supportRoot,
+        localModelsDir,
+        telemetryIntervalMs: 50,
+      });
+      const fixture = {
+        appPaths: resolveAppPaths({
+          cwd: process.cwd(),
+          environment: "test",
+          supportRoot,
+        }),
+        artifactPaths: {},
+        async cleanup() {
+          await runtime.stop();
+          await rm(supportRoot, { recursive: true, force: true });
+        },
+        runtime,
+      };
+      fixtures.push(fixture);
+
+      await runtime.start();
+
+      const gateway = await buildGateway({
+        config: createTestConfig({
+          localModelsDir,
+        }),
+        runtime,
+      });
+
+      await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+      const desktopModelsResponse = await gateway.controlApp.inject({
+        method: "GET",
+        url: "/control/models",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+      });
+
+      expect(desktopModelsResponse.statusCode).toBe(200);
+      expect(desktopModelsResponse.json()).toMatchObject({
+        object: "list",
+        data: expect.arrayContaining([
+          expect.objectContaining({
+            localPath: ggufPath,
+            engineType: "llama.cpp",
+            format: "gguf",
+          }),
+          expect.objectContaining({
+            localPath: mlxPath,
+            engineType: "mlx",
+            format: "mlx",
+          }),
+        ]),
+      });
+
+      await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+    },
+  );
+
+  it.runIf(supportsMlxTests)(
+    "auto-discovers legacy managed MLX downloads when the configured models path differs",
+    async () => {
+      const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stage2-legacy-"));
+      const configuredModelsDir = path.join(supportRoot, "external-models");
+      const legacyManagedModelsDir = path.join(supportRoot, "models");
+      const mlxPath = path.join(legacyManagedModelsDir, "gateway-stage2-legacy-mlx");
+
+      await writeSampleMlxModelDirectory(mlxPath);
+
+      const runtime = createRepositoryGatewayRuntime({
+        cwd: process.cwd(),
+        defaultModelTtlMs: 1_000,
+        env: {
+          ...process.env,
+          LOCAL_LLM_HUB_ENV: "test",
+        },
+        fakeWorkerStartupDelayMs: 25,
+        preferFakeWorker: true,
+        supportRoot,
+        localModelsDir: configuredModelsDir,
+        telemetryIntervalMs: 50,
+      });
+      fixtures.push({
+        appPaths: resolveAppPaths({
+          cwd: process.cwd(),
+          environment: "test",
+          supportRoot,
+        }),
+        artifactPaths: {},
+        async cleanup() {
+          await runtime.stop();
+          await rm(supportRoot, { recursive: true, force: true });
+        },
+        runtime,
+      });
+
+      await runtime.start();
+
+      const models = await runtime.listDesktopModels();
+      expect(models).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            localPath: mlxPath,
+            engineType: "mlx",
+            format: "mlx",
+          }),
+        ]),
+      );
+    },
+  );
 
   it("imports a local llama.cpp binary through the control route and packages it into support", async () => {
     const fixture = await createStage2Fixture();
@@ -775,6 +1054,33 @@ describe("gateway stage 2 runtime", () => {
       setTimeout(resolve, 20);
     });
     await fixture.runtime.preloadModel(secondaryChatModelArtifact.id, "trace-lru-2");
+
+    const runtimeModels = fixture.runtime.listRuntimeModels();
+    expect(runtimeModels.find((model) => model.id === fixtureModelArtifact.id)?.loaded).toBe(false);
+    expect(runtimeModels.find((model) => model.id === secondaryChatModelArtifact.id)?.loaded).toBe(
+      true,
+    );
+  });
+
+  it("evicts the least recently used idle model when the active model limit is reached", async () => {
+    const fixture = await createStage2Fixture({
+      extraSeedModels: [
+        {
+          artifact: secondaryChatModelArtifact,
+          profile: secondaryChatModelProfile,
+          fileName: "fixture-qwen25-chat-secondary.gguf",
+        },
+      ],
+      runtimeOverrides: {
+        maxActiveModelsInMemory: 1,
+      },
+    });
+
+    await fixture.runtime.preloadModel(fixtureModelArtifact.id, "trace-model-cap-1");
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+    await fixture.runtime.preloadModel(secondaryChatModelArtifact.id, "trace-model-cap-2");
 
     const runtimeModels = fixture.runtime.listRuntimeModels();
     expect(runtimeModels.find((model) => model.id === fixtureModelArtifact.id)?.loaded).toBe(false);
@@ -1139,7 +1445,8 @@ describe("gateway stage 2 runtime", () => {
     const log = chat
       .listRecentApiLogs()
       .find(
-        (entry) => entry.endpoint === "/v1/chat/completions" && entry.modelId === fixtureModelArtifact.id,
+        (entry) =>
+          entry.endpoint === "/v1/chat/completions" && entry.modelId === fixtureModelArtifact.id,
       );
     reopened.database.close();
 

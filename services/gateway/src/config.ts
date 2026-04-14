@@ -5,6 +5,7 @@ import {
 
 export interface GatewayConfig {
   defaultModelTtlMs: number;
+  maxActiveModelsInMemory: number;
   publicHost: string;
   publicPort: number;
   controlHost: string;
@@ -48,6 +49,7 @@ export function loadGatewayConfig(options: LoadConfigOptions = {}): GatewayConfi
   const publicBearerToken = pickFirstNonEmpty(
     env.LOCAL_LLM_HUB_GATEWAY_PUBLIC_BEARER_TOKEN,
     env.GATEWAY_PUBLIC_BEARER_TOKEN,
+    loaded.value.publicAuthToken,
     sharedToken,
   );
   const controlBearerToken = pickFirstNonEmpty(
@@ -65,6 +67,7 @@ export function loadGatewayConfig(options: LoadConfigOptions = {}): GatewayConfi
 
   return {
     defaultModelTtlMs: loaded.value.defaultModelTtlMs,
+    maxActiveModelsInMemory: loaded.value.maxActiveModelsInMemory,
     publicHost: loaded.value.publicHost,
     publicPort: loaded.value.publicPort,
     controlHost: loaded.value.controlHost,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -640,6 +640,327 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
 
     const completedTasks = downloads.listDownloads();
     expect(completedTasks.filter((task) => task.modelId)).toHaveLength(1);
-    expect(completedTasks.some((task) => task.fileName.endsWith("00002-of-00002.gguf"))).toBe(true);
+    expect(
+      completedTasks[0]?.files.some((file) => file.fileName.endsWith("00002-of-00002.gguf")),
+    ).toBe(true);
   }, 15_000);
+
+  it("stores downloads under the configured local models directory", async () => {
+    const supportRoot = await createSupportRoot();
+    const localModelsDir = path.join(supportRoot, "custom-models");
+    const payload = createSampleGgufBuffer("Configured Models Dir");
+    const checksumSha256 = createSha256(payload);
+    const server = createServer((request, response) => {
+      if (request.url === "/configured.gguf") {
+        handleArtifactRequest(request, response, payload);
+        return;
+      }
+
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => server.close());
+    const port = (server.address() as { port: number }).port;
+
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const modelsRepository = new ModelsRepository(database.database);
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      localModelsDir,
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+      }),
+      modelsRepository,
+      engineVersionsRepository: new EngineVersionsRepository(database.database),
+    });
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      localModelsDir,
+      downloadsRepository: new DownloadTasksRepository(database.database),
+      modelManager: manager,
+      providerSearch: new ProviderSearchService([
+        new FakeProvider({
+          provider: "huggingface",
+          artifactId: "configured-dir-chat-q4",
+          url: `http://127.0.0.1:${port}/configured.gguf`,
+          headers: {},
+          fileName: "configured-dir-chat-q4.gguf",
+          checksum: {
+            algorithm: "sha256",
+            value: checksumSha256,
+            source: "provider",
+            status: "verified",
+          },
+          supportsRange: true,
+          estimatedSizeBytes: payload.length,
+        }),
+      ]),
+    });
+
+    const started = await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/configured-dir-chat",
+      artifactId: "configured-dir-chat-q4",
+      displayName: "Configured Models Dir",
+    });
+    const completed = await downloads.resumeDownload(started.id);
+
+    expect(completed.status).toBe("completed");
+    expect(modelsRepository.list()).toHaveLength(1);
+    expect(modelsRepository.list()[0]?.artifact.localPath).toBe(
+      path.join(localModelsDir, "acme-configured-dir-chat", "configured-dir-chat-q4.gguf"),
+    );
+  }, 15_000);
+
+  it("registers an MLX bundle once core files complete even if config.json fails", async () => {
+    const supportRoot = await createSupportRoot();
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const tokenizerPayload = Buffer.from('{"model":"bpe"}\n', "utf8");
+    const shardPayload = Buffer.from("mlx shard payload", "utf8");
+    const registrarCalls: string[] = [];
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      downloadsRepository: new DownloadTasksRepository(database.database),
+      modelRegistrars: {
+        mlx: {
+          async registerLocalModel(options) {
+            registrarCalls.push(options.filePath);
+            return {
+              artifact: {
+                id: "model_stage3_mlx",
+                sizeBytes: tokenizerPayload.length + shardPayload.length,
+              },
+              profile: {
+                displayName: "Stage3 MLX",
+              },
+            };
+          },
+        },
+      },
+      providerSearch: new ProviderSearchService([
+        new FakeProvider([
+          {
+            provider: "huggingface",
+            artifactId: "mlx-config",
+            url: "https://example.invalid/mlx/config.json",
+            headers: {},
+            fileName: "4bit/config.json",
+            supportsRange: false,
+            estimatedSizeBytes: 32,
+          },
+          {
+            provider: "huggingface",
+            artifactId: "mlx-tokenizer",
+            url: "https://example.invalid/mlx/tokenizer.json",
+            headers: {},
+            fileName: "4bit/tokenizer.json",
+            supportsRange: false,
+            estimatedSizeBytes: tokenizerPayload.length,
+          },
+          {
+            provider: "huggingface",
+            artifactId: "mlx-shard",
+            url: "https://example.invalid/mlx/model.safetensors",
+            headers: {},
+            fileName: "4bit/model.safetensors",
+            supportsRange: false,
+            estimatedSizeBytes: shardPayload.length,
+          },
+        ]),
+      ]),
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/config.json")) {
+          return new Response(null, { status: 500 });
+        }
+        if (url.endsWith("/tokenizer.json")) {
+          return new Response(tokenizerPayload, {
+            status: 200,
+            headers: {
+              "content-length": String(tokenizerPayload.length),
+            },
+          });
+        }
+        if (url.endsWith("/model.safetensors")) {
+          return new Response(shardPayload, {
+            status: 200,
+            headers: {
+              "content-length": String(shardPayload.length),
+            },
+          });
+        }
+
+        return new Response(null, { status: 404 });
+      },
+    });
+
+    const bundleId = "stage3-mlx-bundle";
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/stage3-mlx",
+      artifactId: "mlx-config",
+      displayName: "Stage3 MLX",
+      bundleId,
+      bundlePrimaryArtifactId: "mlx-config",
+      engineType: "mlx",
+      registrationPath: "4bit",
+    });
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/stage3-mlx",
+      artifactId: "mlx-tokenizer",
+      displayName: "Stage3 MLX",
+      bundleId,
+      bundlePrimaryArtifactId: "mlx-config",
+      engineType: "mlx",
+      registrationPath: "4bit",
+    });
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/stage3-mlx",
+      artifactId: "mlx-shard",
+      displayName: "Stage3 MLX",
+      bundleId,
+      bundlePrimaryArtifactId: "mlx-config",
+      engineType: "mlx",
+      registrationPath: "4bit",
+    });
+
+    await waitFor(() => registrarCalls.length === 1);
+
+    const tasks = downloads.listDownloads();
+    expect(registrarCalls).toEqual([path.join(supportRoot, "models", "acme-stage3-mlx", "4bit")]);
+    expect(tasks[0]?.status).toBe("error");
+    expect(tasks[0]?.files.find((file) => file.artifactId === "mlx-config")?.status).toBe("error");
+  }, 15_000);
+
+  it("repairs stale MLX bundle errors once the bundle exists on disk", async () => {
+    const supportRoot = await createSupportRoot();
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const downloadsRepository = new DownloadTasksRepository(database.database);
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      downloadsRepository,
+      modelRegistrars: {
+        mlx: {
+          async registerLocalModel() {
+            return {
+              artifact: {
+                id: "model_stage3_mlx_ready",
+                sizeBytes: 0,
+              },
+              profile: {
+                displayName: "Stage3 MLX Ready",
+              },
+            };
+          },
+        },
+      },
+      providerSearch: new ProviderSearchService([
+        new FakeProvider({
+          provider: "huggingface",
+          artifactId: "unused",
+          url: "https://example.invalid/unused",
+          headers: {},
+          fileName: "unused.bin",
+          supportsRange: false,
+          estimatedSizeBytes: 0,
+        }),
+      ]),
+    });
+
+    const modelDir = path.join(supportRoot, "models", "acme-stage3-mlx", "4bit");
+    await mkdir(modelDir, { recursive: true });
+    await writeFile(path.join(modelDir, "config.json"), "{}\n");
+    await writeFile(path.join(modelDir, "tokenizer.json"), "{}\n");
+    await writeFile(path.join(modelDir, "model.safetensors"), "weights\n");
+
+    const now = new Date().toISOString();
+    const bundleId = "stage3-mlx-ready";
+    downloadsRepository.upsert({
+      id: "mlx-config-task",
+      provider: "huggingface",
+      url: "https://example.invalid/mlx/config.json",
+      totalBytes: 3,
+      downloadedBytes: 3,
+      status: "error",
+      errorMessage: `Expected an MLX model directory, received ${modelDir}.`,
+      metadata: {
+        providerModelId: "acme/stage3-mlx",
+        artifactId: "mlx-config",
+        fileName: "config.json",
+        destinationPath: path.join(modelDir, "config.json"),
+        partialPath: path.join(supportRoot, "downloads", "partials", "mlx-config-task.part"),
+        bundleId,
+        bundlePrimaryArtifactId: "mlx-config",
+        engineType: "mlx",
+        registrationPath: "4bit",
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    downloadsRepository.upsert({
+      id: "mlx-tokenizer-task",
+      provider: "huggingface",
+      url: "https://example.invalid/mlx/tokenizer.json",
+      totalBytes: 3,
+      downloadedBytes: 3,
+      status: "completed",
+      metadata: {
+        providerModelId: "acme/stage3-mlx",
+        artifactId: "mlx-tokenizer",
+        fileName: "tokenizer.json",
+        destinationPath: path.join(modelDir, "tokenizer.json"),
+        partialPath: path.join(supportRoot, "downloads", "partials", "mlx-tokenizer-task.part"),
+        bundleId,
+        bundlePrimaryArtifactId: "mlx-config",
+        engineType: "mlx",
+        registrationPath: "4bit",
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    downloadsRepository.upsert({
+      id: "mlx-shard-task",
+      provider: "huggingface",
+      url: "https://example.invalid/mlx/model.safetensors",
+      totalBytes: 8,
+      downloadedBytes: 8,
+      status: "completed",
+      metadata: {
+        providerModelId: "acme/stage3-mlx",
+        artifactId: "mlx-shard",
+        fileName: "model.safetensors",
+        destinationPath: path.join(modelDir, "model.safetensors"),
+        partialPath: path.join(supportRoot, "downloads", "partials", "mlx-shard-task.part"),
+        bundleId,
+        bundlePrimaryArtifactId: "mlx-config",
+        engineType: "mlx",
+        registrationPath: "4bit",
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const tasks = downloads.listDownloads();
+    expect(tasks[0]).toMatchObject({
+      status: "completed",
+      completedFileCount: 3,
+    });
+    expect(tasks[0]?.files.find((file) => file.artifactId === "mlx-config")).toMatchObject({
+      status: "completed",
+      downloadedBytes: 3,
+      totalBytes: 3,
+    });
+    expect(
+      tasks[0]?.files.find((file) => file.artifactId === "mlx-config")?.errorMessage,
+    ).toBeUndefined();
+  });
 });

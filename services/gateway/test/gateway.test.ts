@@ -1,9 +1,9 @@
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import type { AddressInfo } from "node:net";
 
 import { type GatewayEvent, gatewayEventSchema } from "@localhub/shared-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +24,7 @@ const activeGateways: TestGateway[] = [];
 function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
     defaultModelTtlMs: 1_000,
+    maxActiveModelsInMemory: 0,
     publicHost: "127.0.0.1",
     publicPort: 11434,
     controlHost: "127.0.0.1",
@@ -724,6 +725,9 @@ describe("gateway skeleton", () => {
         throw new Error("not implemented");
       },
       async resumeDownload() {
+        throw new Error("not implemented");
+      },
+      async deleteDownload() {
         throw new Error("not implemented");
       },
       getHealthSnapshot(plane) {

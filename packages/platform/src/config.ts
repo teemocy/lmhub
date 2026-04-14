@@ -1,6 +1,6 @@
-import path, { dirname } from "node:path";
-import os from "node:os";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path, { dirname } from "node:path";
 
 import {
   type DesktopConfigRecord,
@@ -98,6 +98,14 @@ export function loadGatewayConfig(
     env.LOCAL_LLM_HUB_LOG_LEVEL as GatewayConfigRecord["logLevel"] | undefined,
   );
   setIfDefined(envValues, "defaultModelTtlMs", pickNumber(env.LOCAL_LLM_HUB_DEFAULT_MODEL_TTL_MS));
+  setIfDefined(
+    envValues,
+    "maxActiveModelsInMemory",
+    pickNumber(
+      env.LOCAL_LLM_HUB_GATEWAY_MAX_ACTIVE_MODELS_IN_MEMORY ??
+        env.LOCAL_LLM_HUB_MAX_ACTIVE_MODELS_IN_MEMORY,
+    ),
+  );
   setIfDefined(
     envValues,
     "requestTraceRetentionDays",

@@ -87,7 +87,9 @@ export class DownloadTasksRepository {
 
   list(): DownloadTask[] {
     return (
-      this.#database.prepare("SELECT * FROM download_tasks ORDER BY updated_at DESC").all() as Array<{
+      this.#database
+        .prepare("SELECT * FROM download_tasks ORDER BY updated_at DESC")
+        .all() as Array<{
         id: string;
         model_id: string | null;
         provider: string;
@@ -130,6 +132,31 @@ export class DownloadTasksRepository {
         updated_at: string;
       }>
     ).map((row) => this.parseRow(row));
+  }
+
+  delete(id: string): boolean {
+    const result = this.#database.prepare("DELETE FROM download_tasks WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  deleteMany(ids: readonly string[]): number {
+    if (ids.length === 0) {
+      return 0;
+    }
+
+    const statement = this.#database.prepare("DELETE FROM download_tasks WHERE id = ?");
+    let deleted = 0;
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const id of ids) {
+        deleted += Number(statement.run(id).changes);
+      }
+      this.#database.exec("COMMIT");
+      return deleted;
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private parseRow(row: {

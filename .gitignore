@@ -20,3 +20,8 @@ coverage/
 *.tsbuildinfo
 .local/
 apps/desktop/dist-electron/
+/models/
+/packages/*/src/**/*.js
+/packages/*/src/**/*.js.map
+/packages/*/src/**/*.d.ts
+/packages/*/src/**/*.d.ts.map

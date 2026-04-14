@@ -1,4 +1,4 @@
-import type { ControlAuthHeaderName, DesktopShellState } from "@localhub/shared-contracts";
+import type { DesktopRuntimeContext, DesktopShellState } from "@localhub/shared-contracts";
 import { useEffect, useState } from "react";
 
 type DesktopSystemPaths = {
@@ -9,30 +9,6 @@ type DesktopSystemPaths = {
   discoveryFile: string;
 };
 
-type DesktopRuntimeContext = {
-  desktop: {
-    closeToTray: boolean;
-    autoLaunchGateway: boolean;
-    theme: "system" | "light" | "dark";
-    controlAuthHeaderName: ControlAuthHeaderName;
-    controlAuthToken?: string;
-  };
-  gateway: {
-    enableLan: boolean;
-    authRequired: boolean;
-    publicHost: string;
-    controlHost: string;
-    corsAllowlist: string[];
-    defaultModelTtlMs: number;
-    localModelsDir: string;
-    authConfigured: boolean;
-  };
-  files: {
-    desktopConfigFile: string;
-    gatewayConfigFile: string;
-  };
-};
-
 type SettingsScreenProps = {
   shellState: DesktopShellState;
   paths: DesktopSystemPaths | null;
@@ -40,14 +16,21 @@ type SettingsScreenProps = {
   onPickModelsDirectory(): Promise<string | null>;
   onRestartGateway(): Promise<void>;
   onShutdownGateway(): Promise<void>;
-  onUpdateControlAuthSettings(payload: {
-    headerName: ControlAuthHeaderName;
-    token: string;
+  onUpdateGatewaySettings(payload: {
+    publicHost: string;
+    publicPort: number;
+    maxActiveModelsInMemory: number;
+    apiAuthToken: string;
   }): Promise<void>;
   onUpdateModelsDirectory(modelsDir: string): Promise<void>;
 };
 
 const FIRST_RUN_KEY = "localhub.desktop.stage4.firstRunDismissed";
+
+const isLoopbackHost = (host: string): boolean => {
+  const normalized = host.trim().toLowerCase();
+  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+};
 
 export function SettingsScreen({
   shellState,
@@ -56,25 +39,27 @@ export function SettingsScreen({
   onPickModelsDirectory,
   onRestartGateway,
   onShutdownGateway,
-  onUpdateControlAuthSettings,
+  onUpdateGatewaySettings,
   onUpdateModelsDirectory,
 }: SettingsScreenProps) {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [busyAction, setBusyAction] = useState<
-    "restart" | "shutdown" | "models-dir" | "auth-settings" | null
+    "restart" | "shutdown" | "gateway-settings" | "models-dir" | null
   >(null);
   const [pathFeedback, setPathFeedback] = useState<{
     tone: "success" | "error";
     text: string;
   } | null>(null);
-  const [authHeaderFeedback, setAuthHeaderFeedback] = useState<{
+  const [gatewaySettingsFeedback, setGatewaySettingsFeedback] = useState<{
     tone: "success" | "error";
     text: string;
   } | null>(null);
   const [modelsDirDraft, setModelsDirDraft] = useState("");
-  const [controlAuthHeaderDraft, setControlAuthHeaderDraft] =
-    useState<ControlAuthHeaderName>("authorization");
-  const [controlAuthTokenDraft, setControlAuthTokenDraft] = useState("");
+  const [publicHostDraft, setPublicHostDraft] = useState("");
+  const [publicPortDraft, setPublicPortDraft] = useState("");
+  const [maxActiveModelsDraft, setMaxActiveModelsDraft] = useState("");
+  const [apiAuthTokenDraft, setApiAuthTokenDraft] = useState("");
+  const currentMaxActiveModelsInMemory = runtimeContext?.gateway.maxActiveModelsInMemory;
 
   useEffect(() => {
     const dismissed = window.localStorage.getItem(FIRST_RUN_KEY) === "true";
@@ -88,14 +73,23 @@ export function SettingsScreen({
   }, [runtimeContext?.gateway.localModelsDir]);
 
   useEffect(() => {
-    if (runtimeContext?.desktop.controlAuthHeaderName) {
-      setControlAuthHeaderDraft(runtimeContext.desktop.controlAuthHeaderName);
+    if (runtimeContext?.gateway.publicHost) {
+      setPublicHostDraft(runtimeContext.gateway.publicHost);
+      setPublicPortDraft(String(runtimeContext.gateway.publicPort));
     }
-  }, [runtimeContext?.desktop.controlAuthHeaderName]);
+  }, [runtimeContext?.gateway.publicHost, runtimeContext?.gateway.publicPort]);
 
   useEffect(() => {
-    setControlAuthTokenDraft(runtimeContext?.desktop.controlAuthToken ?? "");
-  }, [runtimeContext?.desktop.controlAuthToken]);
+    if (currentMaxActiveModelsInMemory !== undefined) {
+      setMaxActiveModelsDraft(String(currentMaxActiveModelsInMemory));
+    }
+  }, [currentMaxActiveModelsInMemory]);
+
+  useEffect(() => {
+    setApiAuthTokenDraft(
+      runtimeContext?.gateway.publicAuthToken ?? runtimeContext?.desktop.controlAuthToken ?? "",
+    );
+  }, [runtimeContext?.desktop.controlAuthToken, runtimeContext?.gateway.publicAuthToken]);
 
   const dismissOnboarding = () => {
     window.localStorage.setItem(FIRST_RUN_KEY, "true");
@@ -153,27 +147,58 @@ export function SettingsScreen({
     }
   };
 
-  const saveControlAuthSettings = async () => {
-    if (!runtimeContext) {
+  const saveGatewaySettings = async () => {
+    const nextPublicHost = publicHostDraft.trim();
+    const nextPublicPort = Number.parseInt(publicPortDraft, 10);
+    const parsedMaxActiveModels = Number.parseInt(maxActiveModelsDraft.trim(), 10);
+
+    setGatewaySettingsFeedback(null);
+
+    if (!nextPublicHost) {
+      setGatewaySettingsFeedback({
+        tone: "error",
+        text: "Choose a listening address before saving.",
+      });
       return;
     }
 
-    setBusyAction("auth-settings");
-    setAuthHeaderFeedback(null);
+    if (!Number.isInteger(nextPublicPort) || nextPublicPort < 1 || nextPublicPort > 65535) {
+      setGatewaySettingsFeedback({
+        tone: "error",
+        text: "Choose a port between 1 and 65535.",
+      });
+      return;
+    }
+
+    if (
+      maxActiveModelsDraft.trim().length === 0 ||
+      !Number.isInteger(parsedMaxActiveModels) ||
+      parsedMaxActiveModels < 0
+    ) {
+      setGatewaySettingsFeedback({
+        tone: "error",
+        text: "Use 0 for unlimited, or enter a positive whole number.",
+      });
+      return;
+    }
+
+    setBusyAction("gateway-settings");
 
     try {
-      await onUpdateControlAuthSettings({
-        headerName: controlAuthHeaderDraft,
-        token: controlAuthTokenDraft,
+      await onUpdateGatewaySettings({
+        publicHost: nextPublicHost,
+        publicPort: nextPublicPort,
+        maxActiveModelsInMemory: parsedMaxActiveModels,
+        apiAuthToken: apiAuthTokenDraft,
       });
-      setAuthHeaderFeedback({
+      setGatewaySettingsFeedback({
         tone: "success",
-        text: "Desktop requests now use the selected auth header and token.",
+        text: "Gateway settings were saved and restarted.",
       });
     } catch (error) {
-      setAuthHeaderFeedback({
+      setGatewaySettingsFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Unable to update auth settings.",
+        text: error instanceof Error ? error.message : "Unable to update gateway settings.",
       });
     } finally {
       setBusyAction(null);
@@ -186,18 +211,42 @@ export function SettingsScreen({
     modelsDirDraft.trim().length > 0 &&
     modelsDirDraft.trim() !== runtimeContext.gateway.localModelsDir;
 
-  const canSaveControlAuthHeader =
+  const normalizedPublicHost = publicHostDraft.trim();
+  const parsedPublicPort = Number.parseInt(publicPortDraft, 10);
+  const publicListenerIsLoopback = runtimeContext
+    ? isLoopbackHost(runtimeContext.gateway.publicHost)
+    : true;
+  const publicListenerExposed = runtimeContext ? !publicListenerIsLoopback : false;
+  const parsedMaxActiveModels = Number.parseInt(maxActiveModelsDraft.trim(), 10);
+  const maxActiveModelsValid =
+    maxActiveModelsDraft.trim().length > 0 &&
+    Number.isInteger(parsedMaxActiveModels) &&
+    parsedMaxActiveModels >= 0;
+  const canSaveGatewaySettings =
     runtimeContext !== null &&
     busyAction === null &&
-    (controlAuthHeaderDraft !== runtimeContext.desktop.controlAuthHeaderName ||
-      controlAuthTokenDraft !== (runtimeContext.desktop.controlAuthToken ?? ""));
+    normalizedPublicHost.length > 0 &&
+    Number.isInteger(parsedPublicPort) &&
+    parsedPublicPort >= 1 &&
+    parsedPublicPort <= 65535 &&
+    maxActiveModelsValid &&
+    (normalizedPublicHost !== runtimeContext.gateway.publicHost ||
+      parsedPublicPort !== runtimeContext.gateway.publicPort ||
+      parsedMaxActiveModels !== runtimeContext.gateway.maxActiveModelsInMemory ||
+      "api-key" !== runtimeContext.desktop.controlAuthHeaderName ||
+      apiAuthTokenDraft !==
+        (runtimeContext.gateway.publicAuthToken ?? runtimeContext.desktop.controlAuthToken ?? ""));
 
-  const lanRisk =
-    runtimeContext?.gateway.enableLan && !runtimeContext.gateway.authRequired
-      ? "LAN exposure is enabled without bearer auth. Treat this as unsafe outside a trusted network."
-      : runtimeContext?.gateway.enableLan
-        ? "LAN exposure is enabled. Keep the bearer token private and review your allowlist before sharing access."
-        : "Gateway access remains loopback-only by default.";
+  const exposureRisk =
+    runtimeContext === null
+      ? "Loading gateway exposure settings."
+      : publicListenerIsLoopback
+        ? runtimeContext.gateway.enableLan
+          ? "LAN mode is enabled in config, but the public listener is still loopback-only."
+          : "Public listener is loopback-only. The gateway is not exposed beyond this machine."
+        : runtimeContext.gateway.authRequired
+          ? "Public listener is exposed beyond loopback. Keep the API auth key private and review your allowlist before sharing access."
+          : "Public listener is exposed beyond loopback without API auth. Treat this as unsafe outside a trusted network.";
 
   return (
     <section className="screen-stack">
@@ -227,88 +276,139 @@ export function SettingsScreen({
 
       <article
         className={
-          runtimeContext?.gateway.enableLan
+          runtimeContext !== null && publicListenerExposed && !runtimeContext.gateway.authRequired
             ? "wide-card feedback-card feedback-card-error"
-            : "wide-card"
+            : runtimeContext !== null && publicListenerExposed
+              ? "wide-card feedback-card"
+              : "wide-card"
         }
       >
-        <span className="section-label">Security posture</span>
-        <h3>LAN and bearer auth</h3>
-        <p>{lanRisk}</p>
-        <dl className="settings-grid">
+        <span className="section-label">Runtime info</span>
+        <h3>Gateway and desktop state</h3>
+        <p>{exposureRisk}</p>
+        <dl className="settings-grid runtime-status-grid">
           <div>
             <dt>LAN enabled</dt>
             <dd>{runtimeContext?.gateway.enableLan ? "Yes" : "No"}</dd>
           </div>
           <div>
-            <dt>Auth required</dt>
-            <dd>{runtimeContext?.gateway.authRequired ? "Yes" : "No"}</dd>
+            <dt>Public listener</dt>
+            <dd>{publicListenerIsLoopback ? "Loopback-only" : "LAN-exposed"}</dd>
           </div>
           <div>
-            <dt>Token configured</dt>
-            <dd>{runtimeContext?.gateway.authConfigured ? "Yes" : "No"}</dd>
+            <dt>Public auth</dt>
+            <dd>{runtimeContext?.gateway.authRequired ? "Enabled" : "Disabled"}</dd>
           </div>
           <div>
             <dt>CORS allowlist</dt>
             <dd>{runtimeContext?.gateway.corsAllowlist.join(", ") ?? "Loading"}</dd>
           </div>
+          <div>
+            <dt>Close to tray</dt>
+            <dd>{runtimeContext?.desktop.closeToTray ? "Enabled" : "Disabled"}</dd>
+          </div>
+          <div>
+            <dt>Auto launch gateway</dt>
+            <dd>{runtimeContext?.desktop.autoLaunchGateway ? "Enabled" : "Disabled"}</dd>
+          </div>
+          <div>
+            <dt>Theme</dt>
+            <dd>{runtimeContext?.desktop.theme ?? "Loading"}</dd>
+          </div>
+          <div>
+            <dt>Default model TTL</dt>
+            <dd>
+              {runtimeContext
+                ? `${Math.round(runtimeContext.gateway.defaultModelTtlMs / 60_000)} min`
+                : "Loading"}
+            </dd>
+          </div>
+          <div>
+            <dt>Active model cap</dt>
+            <dd>
+              {runtimeContext
+                ? runtimeContext.gateway.maxActiveModelsInMemory === 0
+                  ? "Unlimited"
+                  : `${runtimeContext.gateway.maxActiveModelsInMemory} model${runtimeContext.gateway.maxActiveModelsInMemory === 1 ? "" : "s"}`
+                : "Loading"}
+            </dd>
+          </div>
         </dl>
       </article>
 
       <article className="wide-card">
-        <span className="section-label">Control-plane headers</span>
-        <h3>Outbound auth header</h3>
-        <p>
-          Choose the header name and secret the desktop sends when it talks to the gateway. The
-          gateway accepts bearer and API-key style headers either way.
-        </p>
-        <div className="settings-grid">
+        <span className="section-label">Gateway</span>
+        <h3>Runtime</h3>
+        <div className="runtime-envelope-fields">
           <label className="field-stack">
-            <span className="section-label">Header format</span>
-            <select
+            <span className="section-label">Listening address</span>
+            <input
               className="text-input"
-              onChange={(event) =>
-                setControlAuthHeaderDraft(event.target.value as ControlAuthHeaderName)
-              }
-              value={controlAuthHeaderDraft}
-            >
-              <option value="authorization">Authorization: Bearer</option>
-              <option value="x-api-key">x-api-key</option>
-              <option value="api-key">api-key</option>
-            </select>
+              onChange={(event) => setPublicHostDraft(event.target.value)}
+              placeholder="127.0.0.1"
+              type="text"
+              value={publicHostDraft}
+            />
           </label>
           <label className="field-stack">
-            <span className="section-label">API key</span>
+            <span className="section-label">Listening port</span>
+            <input
+              className="text-input"
+              min={1}
+              max={65535}
+              onChange={(event) => setPublicPortDraft(event.target.value)}
+              placeholder="1337"
+              step={1}
+              type="number"
+              value={publicPortDraft}
+            />
+          </label>
+          <label className="field-stack">
+            <span className="section-label">Active model cap</span>
+            <input
+              className="text-input"
+              min={0}
+              onChange={(event) => setMaxActiveModelsDraft(event.target.value)}
+              placeholder="0"
+              step={1}
+              type="number"
+              value={maxActiveModelsDraft}
+            />
+          </label>
+          <label className="field-stack">
+            <span className="section-label">API auth key</span>
             <input
               autoComplete="off"
               className="text-input"
-              onChange={(event) => setControlAuthTokenDraft(event.target.value)}
-              placeholder="Paste your API key here"
+              onChange={(event) => setApiAuthTokenDraft(event.target.value)}
+              placeholder="Paste your api-key here"
               type="password"
-              value={controlAuthTokenDraft}
+              value={apiAuthTokenDraft}
             />
           </label>
         </div>
-        {authHeaderFeedback ? (
+        {gatewaySettingsFeedback ? (
           <div
             className={
-              authHeaderFeedback.tone === "success"
+              gatewaySettingsFeedback.tone === "success"
                 ? "detail-alert detail-alert-success"
                 : "detail-alert"
             }
           >
-            <strong>{authHeaderFeedback.tone === "success" ? "Saved" : "Unable to save"}</strong>
-            <p>{authHeaderFeedback.text}</p>
+            <strong>
+              {gatewaySettingsFeedback.tone === "success" ? "Saved" : "Unable to save"}
+            </strong>
+            <p>{gatewaySettingsFeedback.text}</p>
           </div>
         ) : null}
-        <div className="button-row">
+        <div className="button-row gateway-runtime-actions">
           <button
             className="primary-button"
-            disabled={!canSaveControlAuthHeader}
-            onClick={() => void saveControlAuthSettings()}
+            disabled={!canSaveGatewaySettings}
+            onClick={() => void saveGatewaySettings()}
             type="button"
           >
-            {busyAction === "auth-settings" ? "Saving..." : "Save auth settings"}
+            {busyAction === "gateway-settings" ? "Saving..." : "Save and restart"}
           </button>
         </div>
       </article>
@@ -419,31 +519,6 @@ export function SettingsScreen({
         </div>
       </article>
 
-      <article className="wide-card">
-        <span className="section-label">Desktop behavior</span>
-        <div className="settings-grid">
-          <div>
-            <dt>Close to tray</dt>
-            <dd>{runtimeContext?.desktop.closeToTray ? "Enabled" : "Disabled"}</dd>
-          </div>
-          <div>
-            <dt>Auto launch gateway</dt>
-            <dd>{runtimeContext?.desktop.autoLaunchGateway ? "Enabled" : "Disabled"}</dd>
-          </div>
-          <div>
-            <dt>Theme</dt>
-            <dd>{runtimeContext?.desktop.theme ?? "Loading"}</dd>
-          </div>
-          <div>
-            <dt>Default model TTL</dt>
-            <dd>
-              {runtimeContext
-                ? `${Math.round(runtimeContext.gateway.defaultModelTtlMs / 60_000)} min`
-                : "Loading"}
-            </dd>
-          </div>
-        </div>
-      </article>
     </section>
   );
 }

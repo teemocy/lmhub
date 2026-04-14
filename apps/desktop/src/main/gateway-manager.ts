@@ -22,6 +22,7 @@ import {
   type DesktopChatStreamEvent,
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
+  type DesktopDownloadDeleteResponse,
   type DesktopDownloadList,
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
@@ -48,6 +49,7 @@ import {
   desktopChatRunResponseSchema,
   desktopChatSessionListSchema,
   desktopDownloadActionResponseSchema,
+  desktopDownloadDeleteResponseSchema,
   desktopDownloadListSchema,
   desktopEngineInstallResponseSchema,
   desktopEngineListSchema,
@@ -407,10 +409,7 @@ const isAbortError = (error: unknown): boolean => {
     return true;
   }
 
-  return (
-    typeof candidate.message === "string" &&
-    /aborted|cancelled/i.test(candidate.message)
-  );
+  return typeof candidate.message === "string" && /aborted|cancelled/i.test(candidate.message);
 };
 
 const getReasoningContent = (metadata: Record<string, unknown> | undefined): string | undefined =>
@@ -854,7 +853,8 @@ export class GatewayManager extends EventEmitter {
           clientRequestId,
         }),
       });
-      const sessionId = response.headers.get("x-localhub-session-id") ?? input.sessionId ?? undefined;
+      const sessionId =
+        response.headers.get("x-localhub-session-id") ?? input.sessionId ?? undefined;
 
       if (controller.signal.aborted) {
         throw new Error(CHAT_REQUEST_CANCELLED_MESSAGE);
@@ -1027,7 +1027,8 @@ export class GatewayManager extends EventEmitter {
         this.listChatMessages(sessionId),
       ]);
       const userMessageId = response.headers.get("x-localhub-user-message-id") ?? undefined;
-      const assistantMessageId = response.headers.get("x-localhub-assistant-message-id") ?? undefined;
+      const assistantMessageId =
+        response.headers.get("x-localhub-assistant-message-id") ?? undefined;
       const session =
         sessions.data.find((candidate) => candidate.id === sessionId) ??
         chatSessionSchema.parse({
@@ -1038,10 +1039,9 @@ export class GatewayManager extends EventEmitter {
           updatedAt: new Date().toISOString(),
           metadata: {},
         });
-      const userMessage =
-        (userMessageId
-          ? messages.data.find((message) => message.id === userMessageId)
-          : undefined) ??
+      const userMessage = (userMessageId
+        ? messages.data.find((message) => message.id === userMessageId)
+        : undefined) ??
         [...messages.data].reverse().find((message) => message.role === "user") ?? {
           id: userMessageId ?? `message_${clientRequestId}`,
           sessionId,
@@ -1051,10 +1051,9 @@ export class GatewayManager extends EventEmitter {
           metadata: {},
           createdAt: new Date().toISOString(),
         };
-      const assistantMessage =
-        (assistantMessageId
-          ? messages.data.find((message) => message.id === assistantMessageId)
-          : undefined) ??
+      const assistantMessage = (assistantMessageId
+        ? messages.data.find((message) => message.id === assistantMessageId)
+        : undefined) ??
         [...messages.data].reverse().find((message) => message.role === "assistant") ?? {
           id: assistantMessageId ?? `message_${clientRequestId}-assistant`,
           sessionId,
@@ -1229,6 +1228,29 @@ export class GatewayManager extends EventEmitter {
     );
 
     return desktopDownloadActionResponseSchema.parse(payload);
+  }
+
+  async deleteDownload(
+    id: string,
+    options: { deleteFiles?: boolean } = {},
+  ): Promise<DesktopDownloadDeleteResponse> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({
+          action: "delete",
+          id,
+          deleteFiles: options.deleteFiles === true,
+        }),
+      }),
+      "Unable to delete download task.",
+    );
+
+    return desktopDownloadDeleteResponseSchema.parse(payload);
   }
 
   async stop(options: { preserveSessionLog?: boolean } = {}): Promise<void> {

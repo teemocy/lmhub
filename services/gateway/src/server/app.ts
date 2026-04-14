@@ -10,8 +10,8 @@ import {
   chatCompletionsRequestSchema,
   desktopChatRunRequestSchema,
   desktopChatSessionUpsertRequestSchema,
-  desktopEngineInstallRequestSchema,
   desktopDownloadCreateRequestSchema,
+  desktopEngineInstallRequestSchema,
   desktopLocalModelImportRequestSchema,
   desktopModelConfigUpdateRequestSchema,
   embeddingsRequestSchema,
@@ -285,7 +285,11 @@ async function registerPublicApp(
         reply.raw.setHeader("cache-control", "no-cache, no-transform");
         reply.raw.setHeader("connection", "keep-alive");
         reply.raw.setHeader("x-request-id", request.id);
-        pipeStreamingResponse(request, reply, result.stream as globalThis.ReadableStream<Uint8Array>);
+        pipeStreamingResponse(
+          request,
+          reply,
+          result.stream as globalThis.ReadableStream<Uint8Array>,
+        );
         return reply;
       }
 
@@ -369,7 +373,8 @@ async function registerControlApp(
     if (!parsed.success) {
       return reply.code(400).send({
         error: "validation_error",
-        message: parsed.error.issues[0]?.message ?? "A local GGUF path is required.",
+        message:
+          parsed.error.issues[0]?.message ?? "A local model file or directory path is required.",
         requestId: request.id,
       });
     }
@@ -653,6 +658,26 @@ async function registerControlApp(
       return reply.code(202).send(await runtime.resumeDownload(payload.id, request.id));
     }
 
+    if (action === "delete") {
+      if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: "Download id is required for delete.",
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(202).send(
+        await runtime.deleteDownload(
+          payload.id,
+          {
+            deleteFiles: payload.deleteFiles === true,
+          },
+          request.id,
+        ),
+      );
+    }
+
     const parsed = desktopDownloadCreateRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       return sendValidationError(
@@ -770,6 +795,7 @@ export async function startGateway(
     cwd: process.cwd(),
     defaultModelTtlMs: config.defaultModelTtlMs,
     localModelsDir: config.localModelsDir,
+    maxActiveModelsInMemory: config.maxActiveModelsInMemory,
     telemetryIntervalMs: config.telemetryIntervalMs,
   }),
 ): Promise<StartedGateway> {

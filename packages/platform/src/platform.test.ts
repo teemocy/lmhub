@@ -100,13 +100,57 @@ describe("platform helpers", () => {
       env: {
         LOCAL_LLM_HUB_GATEWAY_PUBLIC_PORT: "9000",
         LOCAL_LLM_HUB_ENABLE_LAN: "true",
+        LOCAL_LLM_HUB_MAX_ACTIVE_MODELS_IN_MEMORY: "2",
       },
     });
 
     expect(config.value.publicPort).toBe(9000);
     expect(config.value.enableLan).toBe(true);
+    expect(config.value.maxActiveModelsInMemory).toBe(2);
     expect(config.value.localModelsDir).toBe(path.join(os.homedir(), ".llm_hub", "models"));
     expect(config.sources).toContain("env");
+  });
+
+  it("loads gateway config with persisted listener settings", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-gateway-listener-"));
+    tempDirectories.push(root);
+    const filePath = path.join(root, "config", "gateway.json");
+
+    writeConfigFile(filePath, {
+      publicHost: "0.0.0.0",
+      publicPort: 8080,
+    });
+
+    const config = loadGatewayConfig({
+      cwd: root,
+      environment: "development",
+      filePath,
+    });
+
+    expect(config.value.publicHost).toBe("0.0.0.0");
+    expect(config.value.publicPort).toBe(8080);
+    expect(config.sources).toContain("file");
+  });
+
+  it("loads gateway config with a persisted public API auth key", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-gateway-auth-config-"));
+    tempDirectories.push(root);
+    const filePath = path.join(root, "config", "gateway.json");
+
+    writeConfigFile(filePath, {
+      publicAuthToken: "public-api-secret",
+      authRequired: true,
+    });
+
+    const config = loadGatewayConfig({
+      cwd: root,
+      environment: "development",
+      filePath,
+    });
+
+    expect(config.value.publicAuthToken).toBe("public-api-secret");
+    expect(config.value.authRequired).toBe(true);
+    expect(config.sources).toContain("file");
   });
 
   it("loads desktop config with a persisted control auth header preference", () => {

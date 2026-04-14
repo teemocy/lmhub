@@ -53,7 +53,7 @@ pnpm vitest run packages/db/src/repos/model-repo.test.ts
 ### Dual-Listener Gateway
 
 The gateway exposes two HTTP listeners:
-- **Public listener** (`127.0.0.1:1337`): OpenAI-compatible `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, `/healthz`
+- **Public listener** (`127.0.0.1:1337` by default): OpenAI-compatible `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, `/healthz`, configurable through `config/gateway.json` or `LOCAL_LLM_HUB_GATEWAY_PUBLIC_HOST` / `LOCAL_LLM_HUB_GATEWAY_PUBLIC_PORT`
 - **Control listener** (`127.0.0.1:16384`): Loopback-only `/control/*` routes for model lifecycle, chat sessions, downloads, engines, and WebSocket telemetry events
 
 ### Desktop ↔ Gateway
@@ -99,6 +99,7 @@ Cross-package dependencies must not skip layers or introduce cycles.
 
 - `LOCAL_LLM_HUB_ENV`: `development` | `packaged` | `test`
 - `LOCAL_LLM_HUB_APP_SUPPORT_DIR`: Override root app-support directory
+- `LOCAL_LLM_HUB_GATEWAY_PUBLIC_HOST`: Override public listener host
 - `LOCAL_LLM_HUB_GATEWAY_PUBLIC_PORT`: Override public listener port
 - `LOCAL_LLM_HUB_GATEWAY_CONTROL_PORT`: Override control listener port
 - `LOCAL_LLM_HUB_AUTH_REQUIRED`: Enable bearer token auth. Requests may send the token as

@@ -146,6 +146,7 @@ const fixtures: Fixture[] = [];
 function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
     defaultModelTtlMs: 1_000,
+    maxActiveModelsInMemory: 0,
     publicHost: "127.0.0.1",
     publicPort: 11434,
     controlHost: "127.0.0.1",

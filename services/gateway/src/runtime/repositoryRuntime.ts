@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import type { DatabaseSync } from "node:sqlite";
@@ -13,7 +14,11 @@ import {
   type StoredModelRecord,
   openDatabase,
 } from "@localhub/db";
-import { runtimeKeyToString } from "@localhub/engine-core";
+import {
+  runtimeKeyToString,
+  type EngineAdapter,
+  type EngineInstallResult,
+} from "@localhub/engine-core";
 import {
   LlamaCppDownloadManager,
   LlamaCppModelManager,
@@ -22,6 +27,12 @@ import {
   createLlamaCppAdapter,
   createLlamaCppHarness,
 } from "@localhub/engine-llama";
+import {
+  MlxModelManager,
+  createMlxAdapter,
+  isMlxModelDirectoryPath,
+  launchMlxSession,
+} from "@localhub/engine-mlx";
 import { classifyStderrLogLevel, resolveAppPaths } from "@localhub/platform";
 import {
   type ChatCompletionsChunk,
@@ -35,6 +46,7 @@ import {
   type DesktopChatSessionUpsertRequest,
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
+  type DesktopDownloadDeleteResponse,
   type DesktopDownloadList,
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
@@ -57,6 +69,7 @@ import {
   desktopChatRunResponseSchema,
   desktopChatSessionListSchema,
   desktopDownloadActionResponseSchema,
+  desktopDownloadDeleteResponseSchema,
   desktopDownloadListSchema,
   desktopEngineInstallResponseSchema,
   desktopLocalModelImportRequestSchema,
@@ -122,6 +135,7 @@ const DEFAULT_STREAM_HEARTBEAT_MS = 15_000;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 1_500;
 const DEFAULT_WORKER_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESIDENT_MEMORY_BYTES = 0;
+const DEFAULT_MAX_ACTIVE_MODELS_IN_MEMORY = 0;
 const DEFAULT_MAX_WORKERS_PER_MODEL = 2;
 const DEFAULT_FAILURE_BACKOFF_MS = 250;
 const DEFAULT_FAILURE_BACKOFF_MAX_MS = 2_000;
@@ -148,6 +162,30 @@ const QUANTIZATION_TOKEN_PATTERN =
   /^(?:Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4)$/i;
 const SHARD_SUFFIX_PATTERN = /^(.*?)-(\d{5})-of-(\d{5})$/i;
 const AUXILIARY_GGUF_PATTERN = /^mmproj(?:[-_.]|$)/i;
+const MLX_CONFIG_FILE = "config.json";
+
+interface WorkerHarness {
+  readonly child: {
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    stdout: NodeJS.ReadableStream;
+    stderr: NodeJS.ReadableStream;
+    once: (
+      event: "exit",
+      listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+    ) => void;
+  };
+  readonly command: {
+    command: string;
+    managedBy: "binary" | "fake-worker";
+    healthUrl?: string;
+    transport?: "http" | "filesystem";
+    versionTag?: string;
+    notes?: string[];
+  };
+  waitForReady: (timeoutMs?: number) => Promise<unknown>;
+  stop: (timeoutMs?: number) => Promise<void>;
+}
 
 interface StreamedAssistantAccumulator {
   responseId?: string;
@@ -172,6 +210,7 @@ type ChatSettingsMetadata = {
 interface CatalogVariantArtifact {
   artifact: ProviderArtifactDescriptor;
   auxiliary: boolean;
+  auxiliaryKind?: string;
   baseModelName: string;
   basename: string;
   quantizationLabel: string;
@@ -199,11 +238,7 @@ function extractTrailingQuantization(stem: string): string | undefined {
   return normalizeQuantLabel(match?.[1]);
 }
 
-function getOptionalNumber(
-  value: unknown,
-  min?: number,
-  max?: number,
-): number | undefined {
+function getOptionalNumber(value: unknown, min?: number, max?: number): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;
   }
@@ -287,6 +322,7 @@ function toCatalogVariantArtifact(artifact: ProviderArtifactDescriptor): Catalog
   return {
     artifact,
     auxiliary: AUXILIARY_GGUF_PATTERN.test(basename),
+    ...(AUXILIARY_GGUF_PATTERN.test(basename) ? { auxiliaryKind: "mmproj" } : {}),
     baseModelName: baseModelName || shardlessStem,
     basename,
     quantizationLabel,
@@ -341,6 +377,9 @@ function toDesktopProviderSearchItem(
 
 function toDesktopProviderCatalogDetail(
   item: ProviderModelSummary,
+  options: {
+    preferMlxVariants?: boolean;
+  } = {},
 ): DesktopProviderCatalogDetailResponse["data"] {
   const baseGroups = new Map<
     string,
@@ -350,8 +389,36 @@ function toDesktopProviderCatalogDetail(
       variants: Map<string, CatalogVariantArtifact[]>;
     }
   >();
+  const mlxGroups = new Map<
+    string,
+    {
+      label: string;
+      files: ProviderArtifactDescriptor[];
+    }
+  >();
 
   for (const artifact of item.artifacts) {
+    if (artifact.format === "mlx") {
+      const normalizedPath = artifact.fileName.replace(/\\/g, "/");
+      const pathSegments = normalizedPath.split("/").filter((segment) => segment.length > 0);
+      const parentSegments = pathSegments.slice(0, -1);
+      const bundleKey = parentSegments.join("/") || "__root__";
+      const bundleLabel =
+        parentSegments.length === 0
+          ? "MLX"
+          : `${parentSegments.at(-1)?.replace(/[_-]+/g, " ") ?? "MLX"} / MLX`;
+      const bundle = mlxGroups.get(bundleKey) ?? {
+        label: bundleLabel,
+        files: [],
+      };
+      if (!mlxGroups.has(bundleKey)) {
+        mlxGroups.set(bundleKey, bundle);
+      }
+
+      bundle.files.push(artifact);
+      continue;
+    }
+
     const file = toCatalogVariantArtifact(artifact);
     const baseKey = file.baseModelName.toLowerCase();
     const baseGroup = baseGroups.get(baseKey) ?? {
@@ -413,14 +480,75 @@ function toDesktopProviderCatalogDetail(
           ...(file.artifact.checksum?.algorithm === "sha256"
             ? { checksumSha256: file.artifact.checksum.value }
             : {}),
-          metadata: file.artifact.metadata ?? {},
+          auxiliary: file.auxiliary,
+          ...(file.auxiliaryKind ? { auxiliaryKind: file.auxiliaryKind } : {}),
+          metadata: {
+            ...(file.artifact.metadata ?? {}),
+            engineType: "llama.cpp",
+          },
         })),
         ...(totalSizeBytes !== undefined ? { totalSizeBytes } : {}),
       });
     }
   }
 
+  for (const [bundleKey, bundle] of mlxGroups.entries()) {
+    const files = [...bundle.files].sort((left, right) =>
+      left.fileName.localeCompare(right.fileName),
+    );
+    const primary =
+      files.find(
+        (file) => file.fileName.replace(/\\/g, "/").split("/").at(-1) === MLX_CONFIG_FILE,
+      ) ?? files[0];
+    if (!primary) {
+      continue;
+    }
+
+    const totalSizeBytes = files.some((file) => file.sizeBytes === undefined)
+      ? undefined
+      : files.reduce((total, file) => total + (file.sizeBytes ?? 0), 0);
+    const registrationPath =
+      bundleKey === "__root__"
+        ? ""
+        : bundleKey
+            .split("/")
+            .filter((segment) => segment.length > 0)
+            .join("/");
+
+    variants.push({
+      id: `${item.provider}:${item.providerModelId}:mlx:${bundleKey}`,
+      label: bundle.label,
+      primaryArtifactId: primary.artifactId,
+      files: files.map((file) => ({
+        id: file.artifactId,
+        artifactId: file.artifactId,
+        artifactName: file.fileName,
+        ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+        ...(file.quantization ? { quantization: file.quantization } : {}),
+        ...(file.architecture ? { architecture: file.architecture } : {}),
+        ...(file.checksum?.algorithm === "sha256" ? { checksumSha256: file.checksum.value } : {}),
+        auxiliary: false,
+        metadata: {
+          ...(file.metadata ?? {}),
+          engineType: "mlx",
+          ...(registrationPath ? { registrationPath } : {}),
+        },
+      })),
+      ...(totalSizeBytes !== undefined ? { totalSizeBytes } : {}),
+    });
+  }
+
   variants.sort((left, right) => {
+    const leftIsMlx = left.files.some(
+      (file) => (file.metadata?.engineType as string | undefined) === "mlx",
+    );
+    const rightIsMlx = right.files.some(
+      (file) => (file.metadata?.engineType as string | undefined) === "mlx",
+    );
+    if (options.preferMlxVariants && leftIsMlx !== rightIsMlx) {
+      return leftIsMlx ? -1 : 1;
+    }
+
     const leftSize = left.totalSizeBytes ?? 0;
     const rightSize = right.totalSizeBytes ?? 0;
     if (leftSize !== rightSize) {
@@ -450,12 +578,28 @@ interface RepositoryGatewayRuntimeOptions {
   shutdownDrainTimeoutMs?: number;
   workerStopTimeoutMs?: number;
   maxResidentMemoryBytes?: number;
+  maxActiveModelsInMemory?: number;
   maxWorkersPerModel?: number;
   failureBackoffMs?: number;
   failureBackoffMaxMs?: number;
   failureWindowMs?: number;
   circuitBreakerThreshold?: number;
   circuitBreakerCooldownMs?: number;
+}
+
+interface EngineBackedModelManager {
+  scanLocalModels(): Promise<unknown[]>;
+  registerLocalModel(options: {
+    filePath: string;
+    displayName?: string;
+    expectedChecksumSha256?: string;
+    sourceKind?: "local" | "huggingface" | "modelscope" | "manual" | "unknown";
+    remoteUrl?: string;
+  }): Promise<{
+    artifact: ModelArtifact;
+    profile: ModelProfile;
+  }>;
+  activateEngineVersion(versionTag: string): Promise<EngineInstallResult>;
 }
 
 interface ResolvedModelRecord {
@@ -476,9 +620,10 @@ interface RuntimeSnapshot {
 }
 
 interface ManagedWorker {
+  adapter: EngineAdapter;
   artifact: ModelArtifact;
   evictionTimer: NodeJS.Timeout | undefined;
-  harness: Awaited<ReturnType<typeof createLlamaCppHarness>>;
+  harness: WorkerHarness;
   inflightRequests: number;
   intentionalStop: boolean;
   lastUsedAt: number;
@@ -515,6 +660,92 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function isMlxSupportedPlatform(): boolean {
+  return process.platform === "darwin" && process.arch === "arm64";
+}
+
+type LocalModelCandidate = {
+  engineType: "llama.cpp" | "mlx";
+  filePath: string;
+};
+
+function isGgufModelPath(filePath: string): boolean {
+  const fileName = path.basename(filePath);
+  return path.extname(filePath).toLowerCase() === ".gguf" && !/^mmproj(?:[-_.]|$)/i.test(fileName);
+}
+
+function resolveModelEngineTypeFromPath(filePath: string): "llama.cpp" | "mlx" {
+  return isMlxSupportedPlatform() && isMlxModelDirectoryPath(filePath)
+    ? "mlx"
+    : DEFAULT_ENGINE_TYPE;
+}
+
+function collectLocalModelCandidates(rootDir: string): LocalModelCandidate[] {
+  const candidates: LocalModelCandidate[] = [];
+
+  const visit = (directory: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    if (resolveModelEngineTypeFromPath(directory) === "mlx") {
+      candidates.push({
+        engineType: "mlx",
+        filePath: directory,
+      });
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath);
+        continue;
+      }
+
+      if (entry.isFile() && isGgufModelPath(fullPath)) {
+        candidates.push({
+          engineType: "llama.cpp",
+          filePath: fullPath,
+        });
+      }
+    }
+  };
+
+  visit(rootDir);
+  return candidates.sort(
+    (left, right) =>
+      left.engineType.localeCompare(right.engineType) ||
+      left.filePath.localeCompare(right.filePath),
+  );
+}
+
+function collectLocalModelCandidatesFromRoots(rootDirs: readonly string[]): LocalModelCandidate[] {
+  const deduped = new Map<string, LocalModelCandidate>();
+
+  for (const rootDir of rootDirs) {
+    for (const candidate of collectLocalModelCandidates(rootDir)) {
+      const normalizedPath = path.resolve(candidate.filePath);
+      const key = `${candidate.engineType}:${normalizedPath}`;
+      if (!deduped.has(key)) {
+        deduped.set(key, {
+          engineType: candidate.engineType,
+          filePath: normalizedPath,
+        });
+      }
+    }
+  }
+
+  return [...deduped.values()].sort(
+    (left, right) =>
+      left.engineType.localeCompare(right.engineType) ||
+      left.filePath.localeCompare(right.filePath),
+  );
+}
+
 function normalizeCapabilityOverrides(
   overrides: ModelProfile["capabilityOverrides"],
 ): CapabilityOverrides {
@@ -548,7 +779,7 @@ function applyCapabilityOverrides(
     audioTranscription: normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
     audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
     rerank: normalizedOverrides.rerank ?? capabilities.rerank,
-    promptCache: true,
+    promptCache: capabilities.promptCache,
   };
 }
 
@@ -595,13 +826,14 @@ function hashConfig(profile: ModelProfile): string {
 
 function createDefaultProfile(artifact: ModelArtifact, defaultModelTtlMs: number): ModelProfile {
   const timestamp = artifact.updatedAt;
+  const engineType = artifact.format === "mlx" ? "mlx" : DEFAULT_ENGINE_TYPE;
 
   return {
     schemaVersion: artifact.schemaVersion,
     id: `${artifact.id}::default`,
     modelId: artifact.id,
     displayName: artifact.name,
-    engineType: DEFAULT_ENGINE_TYPE,
+    engineType,
     pinned: false,
     defaultTtlMs: defaultModelTtlMs,
     role: getModelRole(artifact),
@@ -959,7 +1191,7 @@ function createFakeChatCompletionResponse(
     };
   }
 
-  const answer = `Fake response from ${input.model}: ${userContent || "Hello from fake llama.cpp"}`;
+  const answer = `Fake response from ${input.model}: ${userContent || "Hello from fake local runtime"}`;
   const completionTokens = countChatContentTokens(answer);
 
   return {
@@ -1132,8 +1364,11 @@ function toDesktopModelRecord(
 ): DesktopModelRecord {
   const artifactStatus = getArtifactStatus(stored.artifact);
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
-  const batchSize = getEffectiveBatchSize(profile);
-  const flashAttentionType = getEffectiveFlashAttentionType(profile);
+  const llamaRuntimeControls = profile.engineType === "llama.cpp";
+  const batchSize = llamaRuntimeControls ? getEffectiveBatchSize(profile) : undefined;
+  const flashAttentionType = llamaRuntimeControls
+    ? getEffectiveFlashAttentionType(profile)
+    : undefined;
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1159,20 +1394,22 @@ function toDesktopModelRecord(
     ...(stored.artifact.architecture ? { architecture: stored.artifact.architecture } : {}),
     ...(stored.artifact.quantization ? { quantization: stored.artifact.quantization } : {}),
     ...(contextLength !== undefined ? { contextLength } : {}),
-    batchSize,
-    flashAttentionType,
+    ...(batchSize !== undefined ? { batchSize } : {}),
+    ...(flashAttentionType !== undefined ? { flashAttentionType } : {}),
     ...(stored.artifact.metadata.parameterCount !== undefined
       ? { parameterCount: stored.artifact.metadata.parameterCount }
       : {}),
     ...(stored.artifact.metadata.tokenizer
       ? { tokenizer: stored.artifact.metadata.tokenizer }
       : {}),
-    ...(typeof profile.parameterOverrides.gpuLayers === "number" &&
+    ...(llamaRuntimeControls &&
+    typeof profile.parameterOverrides.gpuLayers === "number" &&
     Number.isFinite(profile.parameterOverrides.gpuLayers) &&
     profile.parameterOverrides.gpuLayers > 0
       ? { gpuLayers: Math.floor(profile.parameterOverrides.gpuLayers) }
       : {}),
-    ...(typeof profile.parameterOverrides.parallelSlots === "number" &&
+    ...(llamaRuntimeControls &&
+    typeof profile.parameterOverrides.parallelSlots === "number" &&
     Number.isFinite(profile.parameterOverrides.parallelSlots) &&
     profile.parameterOverrides.parallelSlots > 0
       ? { parallelSlots: Math.floor(profile.parameterOverrides.parallelSlots) }
@@ -1198,15 +1435,34 @@ function toDownloadRecord(task: ReturnType<LlamaCppDownloadManager["listDownload
     id: task.id,
     ...(task.modelId ? { modelId: task.modelId } : {}),
     provider: task.provider,
-    title: task.providerModelId.split("/").at(-1) ?? task.providerModelId,
+    providerModelId: task.providerModelId,
+    title: task.title,
     artifactName: task.fileName,
     status: task.status,
     progress: task.progress,
     downloadedBytes: task.downloadedBytes,
     ...(task.totalBytes !== undefined ? { totalBytes: task.totalBytes } : {}),
+    fileCount: task.fileCount,
+    completedFileCount: task.completedFileCount,
+    errorFileCount: task.errorFileCount,
     destinationPath: task.destinationPath,
     updatedAt: task.updatedAt,
     ...(task.errorMessage ? { errorMessage: task.errorMessage } : {}),
+    files: task.files.map((file) => ({
+      id: file.id,
+      artifactId: file.artifactId,
+      artifactName: file.fileName,
+      status: file.status,
+      progress: file.progress,
+      downloadedBytes: file.downloadedBytes,
+      ...(file.totalBytes !== undefined ? { totalBytes: file.totalBytes } : {}),
+      destinationPath: file.destinationPath,
+      updatedAt: file.updatedAt,
+      ...(file.errorMessage ? { errorMessage: file.errorMessage } : {}),
+      auxiliary: file.auxiliary,
+      ...(file.auxiliaryKind ? { auxiliaryKind: file.auxiliaryKind } : {}),
+      metadata: {},
+    })),
   };
 }
 
@@ -1270,14 +1526,17 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
 }
 
 export class RepositoryGatewayRuntime implements GatewayRuntime {
-  readonly #adapter;
+  readonly #adapters: Map<string, EngineAdapter>;
   readonly #chatRepository: ChatRepository;
   readonly #database: DatabaseSync;
   readonly #defaultModelTtlMs: number;
   readonly #downloadsRepository: DownloadTasksRepository;
   readonly #downloadManager: LlamaCppDownloadManager;
   readonly #enginesRepository: EngineVersionsRepository;
-  readonly #modelManager: LlamaCppModelManager;
+  readonly #legacyManagedModelsDir: string;
+  readonly #localModelsDir: string;
+  readonly #mlxSupported: boolean;
+  readonly #modelManagers: Map<string, EngineBackedModelManager>;
   readonly #modelsRepository: ModelsRepository;
   readonly #startedAt = Date.now();
   readonly #subscribers = new Set<(event: GatewayEvent) => void>();
@@ -1286,6 +1545,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   readonly #shutdownDrainTimeoutMs: number;
   readonly #workerStopTimeoutMs: number;
   readonly #maxResidentMemoryBytes: number;
+  readonly #maxActiveModelsInMemory: number;
   readonly #maxWorkersPerModel: number;
   readonly #failureBackoffMs: number;
   readonly #failureBackoffMaxMs: number;
@@ -1322,7 +1582,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
 
     this.#database = database;
+    this.#localModelsDir = options.localModelsDir;
     this.#supportRoot = appPaths.supportRoot;
+    this.#legacyManagedModelsDir = appPaths.modelsDir;
     this.#telemetryIntervalMs = options.telemetryIntervalMs;
     this.#defaultModelTtlMs = options.defaultModelTtlMs;
     this.#shutdownDrainTimeoutMs =
@@ -1330,6 +1592,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     this.#workerStopTimeoutMs = options.workerStopTimeoutMs ?? DEFAULT_WORKER_STOP_TIMEOUT_MS;
     this.#maxResidentMemoryBytes =
       options.maxResidentMemoryBytes ?? DEFAULT_MAX_RESIDENT_MEMORY_BYTES;
+    this.#maxActiveModelsInMemory =
+      options.maxActiveModelsInMemory ?? DEFAULT_MAX_ACTIVE_MODELS_IN_MEMORY;
     this.#maxWorkersPerModel = options.maxWorkersPerModel ?? DEFAULT_MAX_WORKERS_PER_MODEL;
     this.#failureBackoffMs = options.failureBackoffMs ?? DEFAULT_FAILURE_BACKOFF_MS;
     this.#failureBackoffMaxMs = options.failureBackoffMaxMs ?? DEFAULT_FAILURE_BACKOFF_MAX_MS;
@@ -1338,12 +1602,13 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       options.circuitBreakerThreshold ?? DEFAULT_CIRCUIT_BREAKER_THRESHOLD;
     this.#circuitBreakerCooldownMs =
       options.circuitBreakerCooldownMs ?? DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS;
+    this.#mlxSupported = isMlxSupportedPlatform();
     this.#modelsRepository = new ModelsRepository(database);
     this.#enginesRepository = new EngineVersionsRepository(database);
     this.#downloadsRepository = new DownloadTasksRepository(database);
     const promptCachesRepository = new PromptCachesRepository(database);
     this.#chatRepository = new ChatRepository(database);
-    this.#adapter = createLlamaCppAdapter({
+    const llamaAdapter = createLlamaCppAdapter({
       supportRoot: this.#supportRoot,
       ...(options.env ? { env: options.env } : {}),
       ...(options.fakeWorkerStartupDelayMs !== undefined
@@ -1353,18 +1618,44 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         ? { preferFakeWorker: options.preferFakeWorker }
         : {}),
     });
-    this.#modelManager = new LlamaCppModelManager({
+    const llamaModelManager = new LlamaCppModelManager({
       supportRoot: this.#supportRoot,
       localModelsDir: options.localModelsDir,
-      adapter: this.#adapter,
+      adapter: llamaAdapter,
       modelsRepository: this.#modelsRepository,
       engineVersionsRepository: this.#enginesRepository,
       promptCachesRepository,
     });
+    this.#adapters = new Map([["llama.cpp", llamaAdapter]]);
+    this.#modelManagers = new Map([["llama.cpp", llamaModelManager]]);
+
+    if (this.#mlxSupported) {
+      const mlxAdapter = createMlxAdapter({
+        supportRoot: this.#supportRoot,
+        ...(options.env ? { env: options.env } : {}),
+        ...(options.fakeWorkerStartupDelayMs !== undefined
+          ? { fakeWorkerStartupDelayMs: options.fakeWorkerStartupDelayMs }
+          : {}),
+        ...(options.preferFakeWorker !== undefined
+          ? { preferFakeWorker: options.preferFakeWorker }
+          : {}),
+      });
+      const mlxModelManager = new MlxModelManager({
+        supportRoot: this.#supportRoot,
+        localModelsDir: options.localModelsDir,
+        adapter: mlxAdapter,
+        modelsRepository: this.#modelsRepository,
+        engineVersionsRepository: this.#enginesRepository,
+      });
+      this.#adapters.set("mlx", mlxAdapter);
+      this.#modelManagers.set("mlx", mlxModelManager);
+    }
+
     this.#downloadManager = new LlamaCppDownloadManager({
       supportRoot: this.#supportRoot,
+      localModelsDir: options.localModelsDir,
       downloadsRepository: this.#downloadsRepository,
-      modelManager: this.#modelManager,
+      modelRegistrars: Object.fromEntries(this.#modelManagers.entries()),
       providerSearch: options.providerSearch ?? createDefaultProviderSearchService(),
       ...(options.downloadFetch ? { fetch: options.downloadFetch } : {}),
       emitEvent: (event: GatewayEvent) => {
@@ -1387,7 +1678,32 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       undefined,
       "system",
     );
-    const discoveredModels = await this.#modelManager.scanLocalModels();
+    const existingPaths = new Set(
+      this.#modelsRepository.list().map((stored) => path.resolve(stored.artifact.localPath)),
+    );
+    const discoveredModels: unknown[] = [];
+
+    const scanRoots = [this.#localModelsDir];
+    if (path.resolve(this.#legacyManagedModelsDir) !== path.resolve(this.#localModelsDir)) {
+      scanRoots.push(this.#legacyManagedModelsDir);
+    }
+
+    for (const candidate of collectLocalModelCandidatesFromRoots(scanRoots)) {
+      const normalizedPath = path.resolve(candidate.filePath);
+      if (existingPaths.has(normalizedPath)) {
+        continue;
+      }
+
+      try {
+        const registered = await this.getModelManager(candidate.engineType).registerLocalModel({
+          filePath: normalizedPath,
+        });
+        discoveredModels.push(registered);
+        existingPaths.add(normalizedPath);
+      } catch {
+        // Ignore unreadable or invalid local artifacts while auto-discovering on startup.
+      }
+    }
     if (discoveredModels.length > 0) {
       this.publishLog(
         "info",
@@ -1626,7 +1942,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: false,
-        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.temperature !== undefined
+          ? { temperature: chatSettings.temperature }
+          : {}),
         ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
         ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
         messages: buildChatCompletionMessages(
@@ -1707,7 +2025,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: true,
-        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.temperature !== undefined
+          ? { temperature: chatSettings.temperature }
+          : {}),
         ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
         ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
         messages: buildChatCompletionMessages(
@@ -1829,7 +2149,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   async searchCatalog(query: string): Promise<DesktopProviderSearchResult> {
     const result = await this.#downloadManager.search({
       text: query,
-      formats: ["gguf"],
+      formats: this.#mlxSupported ? ["mlx", "gguf"] : ["gguf"],
       limit: 20,
     });
 
@@ -1845,11 +2165,19 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     providerModelId: string,
   ): Promise<DesktopProviderCatalogDetailResponse> {
     const item = await this.#downloadManager.getCatalogModel(provider, providerModelId);
+    const supportedFormats = this.#mlxSupported ? ["mlx", "gguf"] : ["gguf"];
+    const variants = toDesktopProviderCatalogDetail(item, {
+      preferMlxVariants: this.#mlxSupported,
+    });
 
     return {
       object: "model",
-      data: toDesktopProviderCatalogDetail(item),
-      warnings: item.artifacts.length === 0 ? ["No GGUF variants found for this repository."] : [],
+      data: variants,
+      warnings:
+        item.artifacts.length === 0 ||
+        !item.formats.some((format) => supportedFormats.includes(format))
+          ? ["No supported downloadable variants were found for this repository."]
+          : [],
     };
   }
 
@@ -1866,6 +2194,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       provider: input.provider,
       providerModelId: input.providerModelId,
       artifactId: input.artifactId,
+      ...(input.taskGroupId ? { taskGroupId: input.taskGroupId } : {}),
       displayName: input.title,
       ...(typeof metadata.autoRegister === "boolean"
         ? { autoRegister: metadata.autoRegister }
@@ -1876,6 +2205,16 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       ...(typeof metadata.bundlePrimaryArtifactId === "string" &&
       metadata.bundlePrimaryArtifactId.length > 0
         ? { bundlePrimaryArtifactId: metadata.bundlePrimaryArtifactId }
+        : {}),
+      ...(typeof metadata.engineType === "string" && metadata.engineType.length > 0
+        ? { engineType: metadata.engineType }
+        : {}),
+      ...(typeof metadata.registrationPath === "string" && metadata.registrationPath.length > 0
+        ? { registrationPath: metadata.registrationPath }
+        : {}),
+      ...(typeof metadata.auxiliary === "boolean" ? { auxiliary: metadata.auxiliary } : {}),
+      ...(typeof metadata.auxiliaryKind === "string" && metadata.auxiliaryKind.length > 0
+        ? { auxiliaryKind: metadata.auxiliaryKind }
         : {}),
     });
 
@@ -1901,6 +2240,18 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
   }
 
+  async deleteDownload(
+    id: string,
+    options: { deleteFiles?: boolean } = {},
+    _traceId?: string,
+  ): Promise<DesktopDownloadDeleteResponse> {
+    const result = await this.#downloadManager.deleteDownload(id, options);
+    return desktopDownloadDeleteResponseSchema.parse({
+      accepted: true,
+      id: result.id,
+    });
+  }
+
   listEngines(): EngineRecord[] {
     return this.#enginesRepository.list().map((record) => toEngineRecord(record));
   }
@@ -1911,30 +2262,50 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   ): Promise<DesktopEngineInstallResponse> {
     this.assertAcceptingNewWork();
     const normalizedTraceId = normalizeTraceId(traceId);
+    const engineType =
+      "engineType" in input && typeof input.engineType === "string"
+        ? input.engineType
+        : DEFAULT_ENGINE_TYPE;
 
-    const installResult =
-      input.action === "download-latest-metal"
-        ? await this.#modelManager.downloadPackagedMetalBinary({
-            ...(input.versionTag ? { versionTag: input.versionTag } : {}),
-          })
-        : input.action === "import-local-binary"
-          ? await this.#modelManager.importLocalEngineBinary({
-              sourcePath: input.filePath,
-              ...(input.versionTag ? { versionTag: input.versionTag } : {}),
-            })
-          : await this.#modelManager.activateEngineVersion(input.versionTag);
+    let installResult: EngineInstallResult;
+    if (engineType === "mlx") {
+      const mlxManager = this.getModelManager("mlx") as MlxModelManager;
+      if (input.action === "activate-installed-version") {
+        installResult = await mlxManager.activateEngineVersion(input.versionTag);
+      } else {
+        installResult = await mlxManager.installManagedRuntime({
+          ...("versionTag" in input && input.versionTag ? { versionTag: input.versionTag } : {}),
+        });
+      }
+    } else {
+      const llamaManager = this.getModelManager(DEFAULT_ENGINE_TYPE) as LlamaCppModelManager;
+      if (input.action === "download-latest-metal") {
+        installResult = await llamaManager.downloadPackagedMetalBinary({
+          ...(input.versionTag ? { versionTag: input.versionTag } : {}),
+        });
+      } else if (input.action === "import-local-binary") {
+        installResult = await llamaManager.importLocalEngineBinary({
+          sourcePath: input.filePath,
+          ...(input.versionTag ? { versionTag: input.versionTag } : {}),
+        });
+      } else {
+        if (!input.versionTag) {
+          throw new Error("A version tag is required to activate an installed llama.cpp runtime.");
+        }
+        installResult = await llamaManager.activateEngineVersion(input.versionTag);
+      }
+    }
 
     const stored = this.#enginesRepository
       .list()
       .find(
         (record) =>
-          record.engineType === DEFAULT_ENGINE_TYPE &&
-          record.versionTag === installResult.versionTag,
+          record.engineType === engineType && record.versionTag === installResult.versionTag,
       );
 
     if (!stored) {
       throw new Error(
-        `Installed llama.cpp version ${installResult.versionTag} could not be recorded.`,
+        `Installed ${engineType} version ${installResult.versionTag} could not be recorded.`,
       );
     }
 
@@ -1970,7 +2341,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       .list()
       .find((stored) => path.resolve(stored.artifact.localPath) === normalizedPath);
     const normalizedTraceId = normalizeTraceId(traceId);
-    const registered = await this.#modelManager.registerLocalModel({
+    const engineType = resolveModelEngineTypeFromPath(normalizedPath);
+    const registered = await this.getModelManager(engineType).registerLocalModel({
       filePath: parsedInput.filePath,
       ...(parsedInput.displayName ? { displayName: parsedInput.displayName } : {}),
     });
@@ -2022,7 +2394,21 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
-    validateBatchSize(input.batchSize);
+    if (resolved.profile.engineType === "llama.cpp") {
+      validateBatchSize(input.batchSize);
+    } else if (
+      input.contextLength !== undefined ||
+      input.batchSize !== undefined ||
+      input.gpuLayers !== undefined ||
+      input.parallelSlots !== undefined ||
+      input.flashAttentionType !== undefined
+    ) {
+      throw new GatewayRequestError(
+        "unsupported_model_config",
+        "MLX models only support alias, pinning, TTL, and capability override changes in this build.",
+        400,
+      );
+    }
 
     if (
       hasRuntimeAffectingModelConfigChanges(input) &&
@@ -2163,9 +2549,11 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/chat/completions", input);
       const payload = chatCompletionsResponseSchema.parse(
-        this.#adapter.normalizeResponse(await response.json()),
+        worker.adapter.normalizeResponse(await response.json()),
       );
       const usage = getChatUsage(payload);
+      const totalDurationMs = Date.now() - startedAt;
+      const safeDurationMs = Math.max(totalDurationMs, 1);
 
       this.insertApiLog({
         traceId: context.traceId,
@@ -2174,10 +2562,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         requestIp: context.remoteAddress,
         promptTokens: usage.promptTokens,
         completionTokens: usage.completionTokens,
-        totalDurationMs: Date.now() - startedAt,
+        totalDurationMs,
         tokensPerSecond:
-          usage.completionTokens && Date.now() > startedAt
-            ? Number((usage.completionTokens / ((Date.now() - startedAt) / 1000)).toFixed(2))
+          usage.completionTokens && safeDurationMs > 0
+            ? Number(((usage.completionTokens * 1000) / safeDurationMs).toFixed(2))
             : undefined,
         statusCode: response.status,
         createdAt: nowIso(),
@@ -2275,7 +2663,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                   }
 
                   const parsed = chatCompletionsChunkSchema.safeParse(
-                    this.#adapter.normalizeResponse(parsedJson),
+                    worker.adapter.normalizeResponse(parsedJson),
                   );
                   if (parsed.success) {
                     applyChunkToAccumulator(accumulator, parsed.data);
@@ -2301,7 +2689,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                   }
 
                   const parsed = chatCompletionsChunkSchema.safeParse(
-                    this.#adapter.normalizeResponse(parsedJson),
+                    worker.adapter.normalizeResponse(parsedJson),
                   );
                   if (parsed.success) {
                     applyChunkToAccumulator(accumulator, parsed.data);
@@ -2404,7 +2792,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/embeddings", input);
       const payload = embeddingsResponseSchema.parse(
-        normalizeEmbeddingsResponsePayload(this.#adapter.normalizeResponse(await response.json())),
+        normalizeEmbeddingsResponsePayload(worker.adapter.normalizeResponse(await response.json())),
       );
 
       this.insertApiLog({
@@ -2486,6 +2874,28 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private getAllWorkers(): ManagedWorker[] {
     return Array.from(this.#workers.values()).flat();
+  }
+
+  private getActiveRuntimeKeys(): Set<string> {
+    const runtimeKeys = new Set<string>();
+
+    for (const [runtimeKeyString, workers] of this.#workers.entries()) {
+      if (workers.length > 0) {
+        runtimeKeys.add(runtimeKeyString);
+      }
+    }
+
+    for (const [runtimeKeyString, reservationCount] of this.#pendingLoadReservations.entries()) {
+      if (reservationCount > 0) {
+        runtimeKeys.add(runtimeKeyString);
+      }
+    }
+
+    return runtimeKeys;
+  }
+
+  private getActiveRuntimeKeyCount(): number {
+    return this.getActiveRuntimeKeys().size;
   }
 
   private getPendingLoadPromises(runtimeKeyString: string): Promise<ManagedWorker>[] {
@@ -2738,6 +3148,24 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private getProfile(stored: StoredModelRecord): ModelProfile {
     return stored.profile ?? createDefaultProfile(stored.artifact, this.#defaultModelTtlMs);
+  }
+
+  private getAdapter(engineType: string): EngineAdapter {
+    const adapter = this.#adapters.get(engineType);
+    if (!adapter) {
+      throw new Error(`Engine ${engineType} is not configured.`);
+    }
+
+    return adapter;
+  }
+
+  private getModelManager(engineType: string): EngineBackedModelManager {
+    const manager = this.#modelManagers.get(engineType);
+    if (!manager) {
+      throw new Error(`Engine ${engineType} does not have a configured model manager.`);
+    }
+
+    return manager;
   }
 
   private findStoredModelRecord(modelId: string): StoredModelRecord | undefined {
@@ -3162,6 +3590,65 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
   }
 
+  private async enforceMaxActiveModelsInMemory(
+    resolved: ResolvedModelRecord,
+    traceId: string,
+  ): Promise<void> {
+    if (this.#maxActiveModelsInMemory <= 0) {
+      return;
+    }
+
+    let activeRuntimeKeyCount = this.getActiveRuntimeKeyCount();
+    if (activeRuntimeKeyCount <= this.#maxActiveModelsInMemory) {
+      return;
+    }
+
+    const evictionCandidates = Array.from(this.#workers.entries())
+      .filter(
+        ([runtimeKeyString, workers]) =>
+          runtimeKeyString !== resolved.runtimeKeyString &&
+          workers.length > 0 &&
+          workers.every((worker) => worker.inflightRequests === 0 && worker.state === "Ready"),
+      )
+      .map(([, workers]) => ({
+        lastUsedAt: Math.max(...workers.map((worker) => worker.lastUsedAt)),
+        workers: [...workers],
+      }))
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+
+    for (const candidate of evictionCandidates) {
+      if (activeRuntimeKeyCount <= this.#maxActiveModelsInMemory) {
+        break;
+      }
+
+      this.publishLog(
+        "info",
+        `Evicting ${candidate.workers[0]?.artifact.id ?? "worker"} to keep at most ${this.#maxActiveModelsInMemory} active model${this.#maxActiveModelsInMemory === 1 ? "" : "s"} in memory while loading ${resolved.artifact.id}.`,
+        traceId,
+        candidate.workers[0]?.artifact.id,
+        "gateway",
+      );
+      await Promise.allSettled(
+        candidate.workers.map((worker) =>
+          this.stopWorker(
+            worker,
+            traceId,
+            `Evicted to respect the max active model limit while loading ${resolved.artifact.id}.`,
+          ),
+        ),
+      );
+      activeRuntimeKeyCount = this.getActiveRuntimeKeyCount();
+    }
+
+    if (activeRuntimeKeyCount > this.#maxActiveModelsInMemory) {
+      throw new GatewayRequestError(
+        "resource_exhausted",
+        `Max active models in memory (${this.#maxActiveModelsInMemory}) reached while loading ${resolved.artifact.id}.`,
+        503,
+      );
+    }
+  }
+
   private async loadWorker(resolved: ResolvedModelRecord, traceId: string): Promise<ManagedWorker> {
     this.assertWorkerLoadAllowed(resolved, traceId);
     const pendingLoads = this.#loadPromises.get(resolved.runtimeKeyString) ?? new Set();
@@ -3210,14 +3697,24 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           throw new Error(getMissingArtifactMessage(resolved.artifact));
         }
 
+        await this.enforceMaxActiveModelsInMemory(resolved, traceId);
         await this.enforceResidentMemoryBudget(resolved, traceId);
 
-        const harness = await createLlamaCppHarness(this.#adapter, {
-          artifact: resolved.artifact,
-          profile: resolved.profile,
-          runtimeKey: resolved.runtimeKey,
-          supportRoot: this.#supportRoot,
-        });
+        const adapter = this.getAdapter(resolved.profile.engineType);
+        const harness =
+          resolved.profile.engineType === "mlx"
+            ? await launchMlxSession(adapter, {
+                artifact: resolved.artifact,
+                profile: resolved.profile,
+                runtimeKey: resolved.runtimeKey,
+                supportRoot: this.#supportRoot,
+              })
+            : await createLlamaCppHarness(adapter, {
+                artifact: resolved.artifact,
+                profile: resolved.profile,
+                runtimeKey: resolved.runtimeKey,
+                supportRoot: this.#supportRoot,
+              });
 
         if (this.#stopping) {
           await harness.stop(this.#workerStopTimeoutMs).catch(() => undefined);
@@ -3229,6 +3726,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         }
 
         worker = {
+          adapter,
           artifact: resolved.artifact,
           evictionTimer: undefined,
           harness,
@@ -3246,7 +3744,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         releaseReservation();
         this.attachWorkerLogging(worker);
         this.attachWorkerExitListener(worker);
-        this.persistEngineRecord(harness.command);
+        this.persistEngineRecord(resolved.profile.engineType, harness.command);
 
         if (this.#stopping) {
           await this.stopWorker(
@@ -3506,27 +4004,46 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
   }
 
-  private persistEngineRecord(command: {
-    command: string;
-    managedBy: "binary" | "fake-worker";
-    versionTag?: string;
-  }): void {
+  private persistEngineRecord(
+    engineType: string,
+    command: {
+      command: string;
+      managedBy: "binary" | "fake-worker";
+      versionTag?: string;
+      notes?: string[];
+    },
+  ): void {
     const versionTag = command.versionTag ?? "stage2-runtime";
+    const normalizedEngineType =
+      engineType === "mlx" ? "mlx" : engineType === "llama.cpp" ? "llama.cpp" : "unknown";
+    const capabilities =
+      normalizedEngineType === "mlx"
+        ? {
+            chat: true,
+            streaming: true,
+          }
+        : ENGINE_RECORD_CAPABILITIES;
+    const compatibilityNotes =
+      command.notes?.join(" ") ||
+      (normalizedEngineType === "mlx"
+        ? command.managedBy === "fake-worker"
+          ? "Using the fake MLX worker harness."
+          : "Using a managed MLX runtime."
+        : command.managedBy === "fake-worker"
+          ? "Using the fake llama.cpp worker harness."
+          : "Using a resolved llama.cpp binary.");
 
     const storedId = this.#enginesRepository.upsert({
-      id: `${DEFAULT_ENGINE_TYPE}:${versionTag}`,
-      engineType: DEFAULT_ENGINE_TYPE,
+      id: `${normalizedEngineType}:${versionTag}`,
+      engineType: normalizedEngineType,
       versionTag,
       binaryPath: command.command,
       isActive: true,
-      capabilities: ENGINE_RECORD_CAPABILITIES,
-      compatibilityNotes:
-        command.managedBy === "fake-worker"
-          ? "Using the fake llama.cpp worker harness."
-          : "Using a resolved llama.cpp binary.",
+      capabilities,
+      compatibilityNotes,
       installedAt: nowIso(),
     });
-    this.#enginesRepository.setActive(DEFAULT_ENGINE_TYPE, storedId);
+    this.#enginesRepository.setActive(normalizedEngineType, storedId);
   }
 
   private createModelStateEvent(

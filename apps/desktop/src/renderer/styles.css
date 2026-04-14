@@ -67,8 +67,7 @@ select {
   padding: 28px 30px;
   border: 1px solid rgba(20, 33, 61, 0.12);
   border-radius: 30px;
-  background:
-    radial-gradient(circle at top right, rgba(184, 111, 34, 0.12), transparent 32%),
+  background: radial-gradient(circle at top right, rgba(184, 111, 34, 0.12), transparent 32%),
     linear-gradient(135deg, rgba(255, 250, 242, 0.98), rgba(255, 244, 230, 0.92));
   box-shadow: 0 26px 60px rgba(15, 23, 42, 0.1);
   overflow: hidden;
@@ -99,8 +98,7 @@ select {
   padding: 28px 30px;
   border-radius: 28px;
   border: 1px solid rgba(184, 111, 34, 0.14);
-  background:
-    radial-gradient(circle at top right, rgba(184, 111, 34, 0.12), transparent 45%),
+  background: radial-gradient(circle at top right, rgba(184, 111, 34, 0.12), transparent 45%),
     linear-gradient(135deg, rgba(255, 250, 242, 0.95), rgba(255, 242, 228, 0.88));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
   overflow: hidden;
@@ -522,6 +520,86 @@ select {
   padding: 20px;
 }
 
+.download-task-card {
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.download-task-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(184, 111, 34, 0.22);
+}
+
+.download-task-card:focus-visible {
+  outline: 2px solid rgba(184, 111, 34, 0.34);
+  outline-offset: 2px;
+}
+
+.download-task-card-error {
+  border-color: rgba(178, 67, 44, 0.18);
+  background: rgba(255, 246, 243, 0.9);
+}
+
+.download-task-subtitle {
+  margin-top: 4px;
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
+.download-task-actions {
+  margin-top: 12px;
+}
+
+.download-task-delete-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(20, 33, 61, 0.08);
+}
+
+.download-task-error-text {
+  margin-top: 10px;
+  color: #9d2b20;
+}
+
+.download-detail-backdrop {
+  align-items: center;
+  justify-content: center;
+}
+
+.download-detail-modal {
+  width: min(920px, calc(100vw - 64px));
+  max-height: calc(100vh - 64px);
+}
+
+.download-detail-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.download-detail-file-card h4 {
+  margin: 0 0 4px;
+}
+
+.download-detail-file-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.download-detail-path {
+  margin-top: 8px;
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
 .search-result-strip {
   display: flex;
   flex-direction: column;
@@ -547,6 +625,11 @@ select {
 .search-result-title {
   margin: 6px 0 4px;
   word-break: break-word;
+}
+
+.search-result-pill-row {
+  margin-top: 0;
+  margin-bottom: 10px;
 }
 
 .search-result-subtitle {
@@ -607,6 +690,36 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin: 18px 0 0;
+}
+
+.runtime-envelope-fields {
+  display: grid;
+  grid-template-columns:
+    minmax(220px, 1.25fr)
+    minmax(112px, 0.55fr)
+    minmax(128px, 0.62fr)
+    minmax(320px, 1.7fr);
+  gap: 12px 14px;
+  margin: 16px 0 0;
+}
+
+.runtime-envelope-fields .field-stack {
+  margin-top: 0;
+  min-width: 0;
+}
+
+.gateway-runtime-actions {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.gateway-runtime-actions .primary-button {
+  min-width: 184px;
+  white-space: nowrap;
+}
+
+.runtime-status-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .meta-grid dt,
@@ -750,6 +863,11 @@ select {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.model-card-pill-row {
+  margin-top: 8px;
+  gap: 8px;
 }
 
 .model-card-summary-text {
@@ -984,6 +1102,11 @@ select {
   background: rgba(20, 33, 61, 0.06);
   color: var(--ink);
   font-size: 0.84rem;
+}
+
+.meta-pill-mlx {
+  background: rgba(32, 122, 96, 0.12);
+  color: #135947;
 }
 
 .meta-pill-muted {
@@ -1808,6 +1931,18 @@ select {
   .models-stage-grid {
     grid-template-columns: 1fr;
   }
+
+  .runtime-envelope-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .runtime-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gateway-runtime-actions {
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1884,6 +2019,8 @@ select {
 
   .screen-grid,
   .settings-grid,
+  .runtime-status-grid,
+  .runtime-envelope-fields,
   .meta-grid,
   .capability-override-list {
     grid-template-columns: 1fr;
@@ -1908,6 +2045,14 @@ select {
   }
 
   .alias-inline-row .secondary-button {
+    width: 100%;
+  }
+
+  .gateway-runtime-actions {
+    justify-content: flex-start;
+  }
+
+  .gateway-runtime-actions .primary-button {
     width: 100%;
   }
 

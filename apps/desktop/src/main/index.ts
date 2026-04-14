@@ -1,6 +1,7 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DEFAULT_MLX_LM_VERSION, DEFAULT_MLX_VERSION } from "@localhub/engine-mlx";
 import {
   ensureAppPaths,
   loadDesktopConfig,
@@ -8,7 +9,7 @@ import {
   resolveAppPaths,
   writeConfigFile,
 } from "@localhub/platform";
-import type { ControlAuthHeaderName } from "@localhub/shared-contracts";
+import type { ControlAuthHeaderName, DesktopRuntimeContext } from "@localhub/shared-contracts";
 import {
   BrowserWindow,
   type Event as ElectronEvent,
@@ -24,31 +25,6 @@ import {
 import { loadGatewayConfig } from "../../../../services/gateway/src/config";
 import { IPC_CHANNELS } from "./channels";
 import { GatewayManager, resolveDesktopRuntimeEnvironment } from "./gateway-manager";
-
-export type DesktopRuntimeContext = {
-  desktop: {
-    closeToTray: boolean;
-    autoLaunchGateway: boolean;
-    theme: "system" | "light" | "dark";
-    controlAuthHeaderName: ControlAuthHeaderName;
-    controlAuthToken?: string;
-  };
-  gateway: {
-    enableLan: boolean;
-    authRequired: boolean;
-    publicHost: string;
-    controlHost: string;
-    corsAllowlist: string[];
-    defaultModelTtlMs: number;
-    localModelsDir: string;
-    controlAuthHeaderName: ControlAuthHeaderName;
-    authConfigured: boolean;
-  };
-  files: {
-    desktopConfigFile: string;
-    gatewayConfigFile: string;
-  };
-};
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -144,6 +120,107 @@ const normalizeLocalModelsDir = (value: string): string => {
   return path.isAbsolute(expanded) ? expanded : path.resolve(appPaths.supportRoot, expanded);
 };
 
+const isMlxSupportedPlatform = (): boolean =>
+  process.platform === "darwin" && process.arch === "arm64";
+
+const getDesktopPlatform = (): "darwin" | "linux" | "win32" => {
+  if (
+    process.platform === "darwin" ||
+    process.platform === "linux" ||
+    process.platform === "win32"
+  ) {
+    return process.platform;
+  }
+
+  return "linux";
+};
+
+const readInstalledMlxRuntime = (): {
+  installed: boolean;
+  activeVersion?: string;
+  activeMlxVersion?: string;
+  activeMlxLmVersion?: string;
+  latestMlxVersion?: string;
+  latestMlxLmVersion?: string;
+  updateAvailable: boolean;
+  statusMessage?: string;
+} => {
+  const registryFile = path.join(appPaths.supportRoot, "engines", "mlx", "registry.json");
+  if (!existsSync(registryFile)) {
+    return {
+      installed: false,
+      latestMlxVersion: DEFAULT_MLX_VERSION,
+      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
+      updateAvailable: false,
+      statusMessage: isMlxSupportedPlatform()
+        ? "Managed MLX runtime not installed yet."
+        : "MLX requires Apple Silicon macOS.",
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(registryFile, "utf8")) as {
+      activeVersionTag?: string;
+      versions?: Array<{
+        versionTag?: string;
+        installPath?: string;
+      }>;
+    };
+    const versions = Array.isArray(parsed.versions) ? parsed.versions : [];
+    const versionCount = versions.length;
+    const activeVersionTag =
+      typeof parsed.activeVersionTag === "string" ? parsed.activeVersionTag : undefined;
+    const activeVersionRecord = activeVersionTag
+      ? versions.find((candidate) => candidate.versionTag === activeVersionTag)
+      : undefined;
+    const activeManifestPath =
+      activeVersionRecord && typeof activeVersionRecord.installPath === "string"
+        ? path.join(activeVersionRecord.installPath, "manifest.json")
+        : undefined;
+    const activeManifest =
+      activeManifestPath && existsSync(activeManifestPath)
+        ? (JSON.parse(readFileSync(activeManifestPath, "utf8")) as {
+            mlxVersion?: string;
+            mlxLmVersion?: string;
+          })
+        : undefined;
+    const activeVersionMatch = activeVersionTag
+      ? /-mlx(?<mlxVersion>[0-9.]+)-mlx-lm(?<mlxLmVersion>[0-9.]+)/.exec(activeVersionTag)
+      : undefined;
+    const activeMlxVersion =
+      typeof activeManifest?.mlxVersion === "string"
+        ? activeManifest.mlxVersion
+        : activeVersionMatch?.groups?.mlxVersion;
+    const activeMlxLmVersion =
+      typeof activeManifest?.mlxLmVersion === "string"
+        ? activeManifest.mlxLmVersion
+        : activeVersionMatch?.groups?.mlxLmVersion;
+
+    return {
+      installed: versionCount > 0,
+      latestMlxVersion: DEFAULT_MLX_VERSION,
+      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
+      updateAvailable:
+        versionCount > 0 &&
+        ((activeMlxVersion !== undefined && activeMlxVersion !== DEFAULT_MLX_VERSION) ||
+          (activeMlxLmVersion !== undefined && activeMlxLmVersion !== DEFAULT_MLX_LM_VERSION)),
+      ...(activeVersionTag ? { activeVersion: activeVersionTag } : {}),
+      ...(activeMlxVersion ? { activeMlxVersion } : {}),
+      ...(activeMlxLmVersion ? { activeMlxLmVersion } : {}),
+      ...(versionCount > 0 ? {} : { statusMessage: "Managed MLX runtime not installed yet." }),
+    };
+  } catch (error) {
+    return {
+      installed: false,
+      latestMlxVersion: DEFAULT_MLX_VERSION,
+      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
+      updateAvailable: false,
+      statusMessage:
+        error instanceof Error ? error.message : "Unable to read the MLX runtime registry.",
+    };
+  }
+};
+
 const buildRuntimeContext = (): DesktopRuntimeContext => ({
   desktop: {
     closeToTray: desktopConfig.value.closeToTray,
@@ -156,14 +233,26 @@ const buildRuntimeContext = (): DesktopRuntimeContext => ({
   },
   gateway: {
     enableLan: sharedGatewayConfig.value.enableLan,
-    authRequired: sharedGatewayConfig.value.authRequired,
+    authRequired: Boolean(gatewayConfig.publicBearerToken),
     publicHost: gatewayConfig.publicHost,
+    publicPort: gatewayConfig.publicPort,
     controlHost: gatewayConfig.controlHost,
     corsAllowlist: [...gatewayConfig.corsAllowlist],
     defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
+    maxActiveModelsInMemory: gatewayConfig.maxActiveModelsInMemory,
     localModelsDir: gatewayConfig.localModelsDir,
+    ...(sharedGatewayConfig.value.publicAuthToken !== undefined
+      ? { publicAuthToken: sharedGatewayConfig.value.publicAuthToken }
+      : {}),
     controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
-    authConfigured: Boolean(gatewayConfig.controlBearerToken || gatewayConfig.publicBearerToken),
+  },
+  system: {
+    platform: getDesktopPlatform(),
+    arch: process.arch,
+  },
+  mlx: {
+    supported: isMlxSupportedPlatform(),
+    ...readInstalledMlxRuntime(),
   },
   files: {
     desktopConfigFile: appPaths.desktopConfigFile,
@@ -299,6 +388,11 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayResumeDownload, (_event, id: string) =>
     gatewayManager.resumeDownload(id),
   );
+  ipcMain.handle(
+    IPC_CHANNELS.gatewayDeleteDownload,
+    (_event, id: string, options?: { deleteFiles?: boolean }) =>
+      gatewayManager.deleteDownload(id, options),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayRestart, () => gatewayManager.restart());
   ipcMain.handle(IPC_CHANNELS.gatewayShutdown, () => gatewayManager.shutdown());
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);
@@ -318,6 +412,123 @@ const registerIpcHandlers = (): void => {
 
     return mainWindow ? dialog.showOpenDialog(mainWindow, options) : dialog.showOpenDialog(options);
   });
+  ipcMain.handle(
+    IPC_CHANNELS.systemUpdateGatewaySettings,
+    async (
+      _event,
+      payload: {
+        publicHost: string;
+        publicPort: number;
+        maxActiveModelsInMemory: number;
+        apiAuthToken?: string;
+      },
+    ): Promise<DesktopRuntimeContext> => {
+      const publicHost = payload.publicHost.trim();
+      if (!publicHost) {
+        throw new Error("Listening address cannot be empty.");
+      }
+
+      if (
+        !Number.isInteger(payload.publicPort) ||
+        payload.publicPort < 1 ||
+        payload.publicPort > 65535
+      ) {
+        throw new Error("Listening port must be between 1 and 65535.");
+      }
+
+      if (
+        !Number.isInteger(payload.maxActiveModelsInMemory) ||
+        payload.maxActiveModelsInMemory < 0
+      ) {
+        throw new Error("Max active models in memory must be 0 or a positive whole number.");
+      }
+
+      const apiAuthToken = payload.apiAuthToken?.trim();
+      const normalizedApiAuthToken =
+        apiAuthToken && apiAuthToken.length > 0 ? apiAuthToken : undefined;
+
+      mkdirSync(path.dirname(sharedGatewayConfig.filePath), { recursive: true });
+      writeConfigFile(sharedGatewayConfig.filePath, {
+        ...sharedGatewayConfig.value,
+        publicHost,
+        publicPort: payload.publicPort,
+        maxActiveModelsInMemory: payload.maxActiveModelsInMemory,
+        authRequired: Boolean(normalizedApiAuthToken),
+        publicAuthToken: normalizedApiAuthToken,
+      });
+      mkdirSync(path.dirname(desktopConfig.filePath), { recursive: true });
+      writeConfigFile(desktopConfig.filePath, {
+        ...desktopConfig.value,
+        controlAuthHeaderName: "api-key",
+        controlAuthToken: normalizedApiAuthToken,
+      });
+      reloadGatewayConfig();
+      reloadDesktopConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.systemUpdateGatewayListenerSettings,
+    async (
+      _event,
+      payload: {
+        publicHost: string;
+        publicPort: number;
+      },
+    ): Promise<DesktopRuntimeContext> => {
+      const publicHost = payload.publicHost.trim();
+      if (!publicHost) {
+        throw new Error("Listening address cannot be empty.");
+      }
+
+      if (
+        !Number.isInteger(payload.publicPort) ||
+        payload.publicPort < 1 ||
+        payload.publicPort > 65535
+      ) {
+        throw new Error("Listening port must be between 1 and 65535.");
+      }
+
+      mkdirSync(path.dirname(sharedGatewayConfig.filePath), { recursive: true });
+      writeConfigFile(sharedGatewayConfig.filePath, {
+        ...sharedGatewayConfig.value,
+        publicHost,
+        publicPort: payload.publicPort,
+      });
+      reloadGatewayConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.systemUpdateGatewayRuntimeSettings,
+    async (
+      _event,
+      payload: {
+        maxActiveModelsInMemory: number;
+      },
+    ): Promise<DesktopRuntimeContext> => {
+      if (
+        !Number.isInteger(payload.maxActiveModelsInMemory) ||
+        payload.maxActiveModelsInMemory < 0
+      ) {
+        throw new Error("Max active models in memory must be 0 or a positive whole number.");
+      }
+
+      mkdirSync(path.dirname(sharedGatewayConfig.filePath), { recursive: true });
+      writeConfigFile(sharedGatewayConfig.filePath, {
+        ...sharedGatewayConfig.value,
+        maxActiveModelsInMemory: payload.maxActiveModelsInMemory,
+      });
+      reloadGatewayConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
+  );
   ipcMain.handle(
     IPC_CHANNELS.systemUpdateModelsDirectory,
     async (_event, rawModelsDir: string): Promise<DesktopRuntimeContext> => {
@@ -369,7 +580,9 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelDialog, async () => {
     const options = {
       title: "Pick a local model artifact",
-      properties: ["openFile"] as Array<"openFile">,
+      properties: isMlxSupportedPlatform()
+        ? (["openFile", "openDirectory"] as Array<"openFile" | "openDirectory">)
+        : (["openFile"] as Array<"openFile">),
       filters: [
         {
           name: "Model Artifacts",

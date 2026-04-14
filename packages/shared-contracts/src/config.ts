@@ -22,8 +22,10 @@ export const gatewayConfigRecordSchema = z.object({
   enableLan: z.boolean().default(false),
   corsAllowlist: z.array(nonEmptyStringSchema).default(["http://127.0.0.1"]),
   authRequired: z.boolean().default(false),
+  publicAuthToken: nonEmptyStringSchema.optional(),
   logLevel: logLevelSchema.default("info"),
   defaultModelTtlMs: positiveIntegerSchema.default(900000),
+  maxActiveModelsInMemory: positiveIntegerSchema.default(0),
   requestTraceRetentionDays: z.number().int().positive().default(30),
   localModelsDir: fileSystemPathSchema.default(path.join(os.homedir(), ".llm_hub", "models")),
 });

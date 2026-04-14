@@ -1,15 +1,19 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "lib": ["ES2022"],
-    "types": ["node"],
-    "paths": {},
+    "composite": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
+  "references": [
+    { "path": "../../packages/shared-contracts" },
+    { "path": "../../packages/platform" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/engine-core" },
+    { "path": "../../packages/engine-llama" },
+    { "path": "../../packages/engine-mlx" }
+  ],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "test"]
 }

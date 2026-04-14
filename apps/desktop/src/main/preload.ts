@@ -9,6 +9,7 @@ import type {
   DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
+  DesktopDownloadDeleteResponse,
   DesktopDownloadList,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
@@ -20,6 +21,7 @@ import type {
   DesktopModelLibrary,
   DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
+  DesktopRuntimeContext,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -28,7 +30,6 @@ import type {
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./channels";
 import type { DesktopSystemPaths } from "./gateway-manager";
-import type { DesktopRuntimeContext } from "./index";
 
 type FileDialogResult = {
   canceled: boolean;
@@ -131,6 +132,12 @@ const api = {
         IPC_CHANNELS.gatewayResumeDownload,
         id,
       ) as Promise<DesktopDownloadActionResponse>,
+    deleteDownload: (id: string, options?: { deleteFiles?: boolean }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayDeleteDownload,
+        id,
+        options,
+      ) as Promise<DesktopDownloadDeleteResponse>,
     restart: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayRestart) as Promise<void>,
     shutdown: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayShutdown) as Promise<void>,
     subscribeEvents: (listener: Listener<GatewayEvent>) =>
@@ -152,6 +159,29 @@ const api = {
       ipcRenderer.invoke(
         IPC_CHANNELS.gatewayOpenModelsDirectoryDialog,
       ) as Promise<FileDialogResult>,
+    updateGatewaySettings: (payload: {
+      publicHost: string;
+      publicPort: number;
+      maxActiveModelsInMemory: number;
+      apiAuthToken?: string;
+    }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateGatewaySettings,
+        payload,
+      ) as Promise<DesktopRuntimeContext>,
+    updateGatewayListenerSettings: (payload: {
+      publicHost: string;
+      publicPort: number;
+    }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateGatewayListenerSettings,
+        payload,
+      ) as Promise<DesktopRuntimeContext>,
+    updateGatewayRuntimeSettings: (payload: { maxActiveModelsInMemory: number }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateGatewayRuntimeSettings,
+        payload,
+      ) as Promise<DesktopRuntimeContext>,
     updateModelsDirectory: (modelsDir: string) =>
       ipcRenderer.invoke(
         IPC_CHANNELS.systemUpdateModelsDirectory,

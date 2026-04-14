@@ -10,6 +10,7 @@ import type {
   DesktopChatStreamEvent,
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
+  DesktopDownloadDeleteResponse,
   DesktopDownloadList,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
@@ -21,6 +22,7 @@ import type {
   DesktopModelLibrary,
   DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
+  DesktopRuntimeContext,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -33,31 +35,6 @@ type DesktopSystemPaths = {
   logsDir: string;
   sessionLogFile: string;
   discoveryFile: string;
-};
-
-type DesktopRuntimeContext = {
-  desktop: {
-    closeToTray: boolean;
-    autoLaunchGateway: boolean;
-    theme: "system" | "light" | "dark";
-    controlAuthHeaderName: ControlAuthHeaderName;
-    controlAuthToken?: string;
-  };
-  gateway: {
-    enableLan: boolean;
-    authRequired: boolean;
-    publicHost: string;
-    controlHost: string;
-    corsAllowlist: string[];
-    defaultModelTtlMs: number;
-    localModelsDir: string;
-    controlAuthHeaderName: ControlAuthHeaderName;
-    authConfigured: boolean;
-  };
-  files: {
-    desktopConfigFile: string;
-    gatewayConfigFile: string;
-  };
 };
 
 type FileDialogResult = {
@@ -106,6 +83,10 @@ type DesktopApi = {
     createDownload(payload: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse>;
     pauseDownload(id: string): Promise<DesktopDownloadActionResponse>;
     resumeDownload(id: string): Promise<DesktopDownloadActionResponse>;
+    deleteDownload(
+      id: string,
+      options?: { deleteFiles?: boolean },
+    ): Promise<DesktopDownloadDeleteResponse>;
     restart(): Promise<void>;
     shutdown(): Promise<void>;
     subscribeEvents(listener: (event: GatewayEvent) => void): Unsubscribe;
@@ -118,6 +99,19 @@ type DesktopApi = {
     copyPath(filePath: string): Promise<void>;
     revealPath(filePath: string): Promise<boolean>;
     pickModelsDirectory(): Promise<FileDialogResult>;
+    updateGatewaySettings(payload: {
+      publicHost: string;
+      publicPort: number;
+      maxActiveModelsInMemory: number;
+      apiAuthToken?: string;
+    }): Promise<DesktopRuntimeContext>;
+    updateGatewayListenerSettings(payload: {
+      publicHost: string;
+      publicPort: number;
+    }): Promise<DesktopRuntimeContext>;
+    updateGatewayRuntimeSettings(payload: {
+      maxActiveModelsInMemory: number;
+    }): Promise<DesktopRuntimeContext>;
     updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;
     updateControlAuthSettings(payload: {
       headerName: ControlAuthHeaderName;

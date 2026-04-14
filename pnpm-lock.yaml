@@ -103,6 +103,18 @@ importers:
         specifier: workspace:*
         version: link:../shared-contracts
 
+  packages/engine-mlx:
+    dependencies:
+      '@localhub/db':
+        specifier: workspace:*
+        version: link:../db
+      '@localhub/engine-core':
+        specifier: workspace:*
+        version: link:../engine-core
+      '@localhub/shared-contracts':
+        specifier: workspace:*
+        version: link:../shared-contracts
+
   packages/platform:
     dependencies:
       '@localhub/shared-contracts':
@@ -138,6 +150,9 @@ importers:
       '@localhub/engine-llama':
         specifier: workspace:*
         version: link:../../packages/engine-llama
+      '@localhub/engine-mlx':
+        specifier: workspace:*
+        version: link:../../packages/engine-mlx
       '@localhub/platform':
         specifier: workspace:*
         version: link:../../packages/platform

@@ -67,8 +67,42 @@ function toArtifactId(fileName: string): string {
     .toLowerCase();
 }
 
-function mapFormat(fileName: string): "gguf" | undefined {
-  return fileName.toLowerCase().endsWith(".gguf") ? "gguf" : undefined;
+function mapFormat(fileName: string): "gguf" | "mlx" | undefined {
+  const normalized = fileName.toLowerCase().replace(/\\/g, "/");
+  const basename = normalized.split("/").at(-1) ?? normalized;
+  if (basename.endsWith(".gguf")) {
+    return "gguf";
+  }
+
+  if (
+    basename === "config.json" ||
+    basename === "generation_config.json" ||
+    basename === "special_tokens_map.json" ||
+    basename === "preprocessor_config.json" ||
+    basename === "chat_template.jinja" ||
+    basename === "quant_strategy.json" ||
+    /^tokenizer(?:\.|$)/i.test(basename) ||
+    basename.endsWith(".safetensors") ||
+    basename.endsWith(".safetensors.index.json") ||
+    basename === "merges.txt" ||
+    basename === "vocab.json" ||
+    basename.endsWith(".tiktoken")
+  ) {
+    return "mlx";
+  }
+
+  return undefined;
+}
+
+function hasRequestedFormats(
+  item: ProviderModelSummary,
+  requestedFormats: ProviderSearchQuery["formats"],
+): boolean {
+  if (requestedFormats.length === 0) {
+    return item.formats.length > 0;
+  }
+
+  return item.formats.some((format) => requestedFormats.includes(format));
 }
 
 function encodeProviderModelId(providerModelId: string): string {
@@ -299,11 +333,16 @@ function summarizeHuggingFaceSearchItem(baseUrl: string, item: JsonResponse): Pr
     detail.providerModelId.toLowerCase().includes("gguf") ||
     detail.title.toLowerCase().includes("gguf") ||
     detail.tags.some((tag) => tag.toLowerCase() === "gguf");
+  const hasMlxHint =
+    detail.providerModelId.toLowerCase().includes("mlx") ||
+    detail.title.toLowerCase().includes("mlx") ||
+    detail.tags.some((tag) => tag.toLowerCase() === "mlx");
 
   return {
     ...detail,
     artifacts: [],
-    formats: formats.length > 0 ? formats : hasGgufHint ? ["gguf"] : [],
+    formats:
+      formats.length > 0 ? formats : hasGgufHint ? ["gguf"] : hasMlxHint ? ["mlx"] : [],
   };
 }
 
@@ -313,11 +352,15 @@ function summarizeModelScopeSearchItem(baseUrl: string, item: JsonResponse): Pro
     detail.providerModelId.toLowerCase().includes("gguf") ||
     detail.title.toLowerCase().includes("gguf") ||
     detail.tags.some((tag) => tag.toLowerCase() === "gguf");
+  const hasMlxHint =
+    detail.providerModelId.toLowerCase().includes("mlx") ||
+    detail.title.toLowerCase().includes("mlx") ||
+    detail.tags.some((tag) => tag.toLowerCase() === "mlx");
 
   return {
     ...detail,
     artifacts: [],
-    formats: hasGgufHint ? ["gguf"] : [],
+    formats: hasGgufHint ? ["gguf"] : hasMlxHint ? ["mlx"] : [],
   };
 }
 
@@ -344,7 +387,7 @@ export class HuggingFaceProvider implements ModelProvider {
       : [];
 
     return {
-      items: items.filter((item) => item.formats.includes("gguf")),
+      items: items.filter((item) => hasRequestedFormats(item, query.formats)),
       warnings: [],
       sourceLatencyMs: Date.now() - startedAt,
     };
@@ -445,7 +488,7 @@ export class ModelScopeProvider implements ModelProvider {
     const items = models.map((item) => summarizeModelScopeSearchItem(this.#baseUrl, item));
 
     return {
-      items: items.filter((item) => item.formats.includes("gguf")).slice(0, query.limit),
+      items: items.filter((item) => hasRequestedFormats(item, query.formats)).slice(0, query.limit),
       warnings: [],
       sourceLatencyMs: Date.now() - startedAt,
     };

@@ -24,6 +24,7 @@ export const IPC_CHANNELS = {
   gatewayCreateDownload: "gateway:create-download",
   gatewayPauseDownload: "gateway:pause-download",
   gatewayResumeDownload: "gateway:resume-download",
+  gatewayDeleteDownload: "gateway:delete-download",
   gatewayRestart: "gateway:restart",
   gatewayShutdown: "gateway:shutdown",
   gatewayEvent: "gateway:event",
@@ -34,6 +35,9 @@ export const IPC_CHANNELS = {
   systemGetRuntimeContext: "system:get-runtime-context",
   systemCopyPath: "system:copy-path",
   systemRevealPath: "system:reveal-path",
+  systemUpdateGatewaySettings: "system:update-gateway-settings",
+  systemUpdateGatewayListenerSettings: "system:update-gateway-listener-settings",
+  systemUpdateGatewayRuntimeSettings: "system:update-gateway-runtime-settings",
   systemUpdateModelsDirectory: "system:update-models-directory",
   systemUpdateControlAuthSettings: "system:update-control-auth-settings",
 } as const;

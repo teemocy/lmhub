@@ -1,5 +1,4 @@
 import type {
-  ControlAuthHeaderName,
   DesktopEngineInstallRequest,
   DesktopEngineInstallResponse,
   DesktopEngineRecord,
@@ -8,6 +7,7 @@ import type {
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
+  DesktopRuntimeContext,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -29,31 +29,6 @@ type DesktopSystemPaths = {
   logsDir: string;
   sessionLogFile: string;
   discoveryFile: string;
-};
-
-type DesktopRuntimeContext = {
-  desktop: {
-    closeToTray: boolean;
-    autoLaunchGateway: boolean;
-    theme: "system" | "light" | "dark";
-    controlAuthHeaderName: ControlAuthHeaderName;
-    controlAuthToken?: string;
-  };
-  gateway: {
-    enableLan: boolean;
-    authRequired: boolean;
-    publicHost: string;
-    controlHost: string;
-    corsAllowlist: string[];
-    defaultModelTtlMs: number;
-    localModelsDir: string;
-    controlAuthHeaderName: ControlAuthHeaderName;
-    authConfigured: boolean;
-  };
-  files: {
-    desktopConfigFile: string;
-    gatewayConfigFile: string;
-  };
 };
 
 const initialShellState: DesktopShellState = {
@@ -297,12 +272,14 @@ export function App() {
     return result;
   };
 
-  const activateEngineVersion = async (
-    versionTag: string,
-  ): Promise<DesktopEngineInstallResponse> => {
+  const activateEngineVersion = async (payload: {
+    engineType: "llama.cpp" | "mlx";
+    versionTag: string;
+  }): Promise<DesktopEngineInstallResponse> => {
     const result = await window.desktopApi.gateway.installEngineBinary({
+      engineType: payload.engineType,
       action: "activate-installed-version",
-      versionTag,
+      versionTag: payload.versionTag,
     });
     requestRefresh();
     return result;
@@ -335,14 +312,13 @@ export function App() {
     requestRefresh();
   };
 
-  const updateControlAuthSettings = async (payload: {
-    headerName: ControlAuthHeaderName;
-    token: string;
+  const updateGatewaySettings = async (payload: {
+    publicHost: string;
+    publicPort: number;
+    maxActiveModelsInMemory: number;
+    apiAuthToken: string;
   }): Promise<void> => {
-    const updatedContext = await window.desktopApi.system.updateControlAuthSettings({
-      headerName: payload.headerName,
-      token: payload.token,
-    });
+    const updatedContext = await window.desktopApi.system.updateGatewaySettings(payload);
     startTransition(() => {
       setRuntimeContext(updatedContext);
     });
@@ -479,6 +455,7 @@ export function App() {
                 <ModelsScreen
                   engines={engines}
                   models={modelLibrary}
+                  runtimeContext={runtimeContext}
                   onEvictModel={evictModel}
                   onPickImportFile={pickLocalModel}
                   onPickEngineBinaryFile={pickEngineBinary}
@@ -518,7 +495,7 @@ export function App() {
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}
-                  onUpdateControlAuthSettings={updateControlAuthSettings}
+                  onUpdateGatewaySettings={updateGatewaySettings}
                   onUpdateModelsDirectory={updateModelsDirectory}
                   paths={paths}
                   runtimeContext={runtimeContext}
