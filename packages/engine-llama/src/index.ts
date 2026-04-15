@@ -25,6 +25,7 @@ import type {
   FlashAttentionType,
   ModelArtifact,
   ModelProfile,
+  PoolingMethod,
 } from "@localhub/shared-contracts/foundation-models";
 import type { RuntimeKey } from "@localhub/shared-contracts/foundation-runtime";
 
@@ -117,6 +118,15 @@ function getBatchSize(profile: ModelProfile): number {
   return DEFAULT_BATCH_SIZE;
 }
 
+function getUBatchSize(profile: ModelProfile): number {
+  const overrideValue = profile.parameterOverrides.ubatchSize;
+  if (isFinitePositiveNumber(overrideValue)) {
+    return Math.floor(overrideValue);
+  }
+
+  return DEFAULT_UBATCH_SIZE;
+}
+
 function getFlashAttentionType(profile: ModelProfile): FlashAttentionType {
   const overrideValue = profile.parameterOverrides.flashAttentionType;
   if (overrideValue === "enabled" || overrideValue === "disabled" || overrideValue === "auto") {
@@ -124,6 +134,21 @@ function getFlashAttentionType(profile: ModelProfile): FlashAttentionType {
   }
 
   return "auto";
+}
+
+function getPoolingMethod(profile: ModelProfile): PoolingMethod | undefined {
+  const overrideValue = profile.parameterOverrides.poolingMethod;
+  if (
+    overrideValue === "none" ||
+    overrideValue === "mean" ||
+    overrideValue === "cls" ||
+    overrideValue === "last" ||
+    overrideValue === "rank"
+  ) {
+    return overrideValue;
+  }
+
+  return undefined;
 }
 
 function getParallelSlots(profile: ModelProfile): number | undefined {
@@ -200,7 +225,7 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
     "--batch-size",
     String(getBatchSize(input.profile)),
     "--ubatch-size",
-    String(DEFAULT_UBATCH_SIZE),
+    String(getUBatchSize(input.profile)),
   ];
 
   const gpuLayers = getGpuLayers(input.profile);
@@ -225,6 +250,11 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
 
   if (input.runtimeKey.role === "embeddings") {
     args.push("--embedding");
+  }
+
+  const poolingMethod = getPoolingMethod(input.profile);
+  if (poolingMethod) {
+    args.push("--pooling", poolingMethod);
   }
 
   const mmprojPath = getMmprojPath(input.artifact);

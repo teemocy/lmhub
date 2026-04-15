@@ -200,22 +200,57 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
     input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
     input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
     input.capabilityOverrides !== undefined
   );
 }
 
-function validateBatchSize(batchSize: number | undefined): void {
-  if (batchSize === undefined) {
+function hasLaunchAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
+  return (
+    input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
+    input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
+    input.capabilityOverrides !== undefined
+  );
+}
+
+function validateBatchSettings(batchSize: number, ubatchSize: number): void {
+  if (batchSize % ubatchSize !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ubatch size (${ubatchSize}).`,
+      400,
+    );
+  }
+}
+
+function validateEmbeddingRoleConfig(model: DesktopModelRecord): void {
+  if (model.role !== "embeddings" && model.role !== "rerank") {
     return;
   }
 
-  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+  const batchSize = model.batchSize ?? DEFAULT_BATCH_SIZE;
+  const ubatchSize = model.ubatchSize ?? DEFAULT_UBATCH_SIZE;
+  if (batchSize !== ubatchSize) {
     throw new GatewayRequestError(
-      "invalid_batch_size",
-      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      "invalid_ubatch_size",
+      "Embedding and rerank models must use the same ubatch size as batch size.",
+      400,
+    );
+  }
+
+  if (!model.poolingMethod) {
+    throw new GatewayRequestError(
+      "missing_pooling_method",
+      "Embedding and rerank models require a pooling method override.",
       400,
     );
   }
@@ -1363,8 +1398,6 @@ export class MockGatewayRuntime {
       throw new Error(`Unknown model: ${modelId}`);
     }
 
-    validateBatchSize(input.batchSize);
-
     const current = this.getDesktopModelRecord(resolvedModelId);
     if (current.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
       throw new GatewayRequestError(
@@ -1381,11 +1414,13 @@ export class MockGatewayRuntime {
       ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
       ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
       ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
+      ...(input.ubatchSize !== undefined ? { ubatchSize: input.ubatchSize } : {}),
       ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
       ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
       ...(input.flashAttentionType !== undefined
         ? { flashAttentionType: input.flashAttentionType }
         : {}),
+      ...(input.poolingMethod !== undefined ? { poolingMethod: input.poolingMethod } : {}),
       ...(input.capabilityOverrides !== undefined
         ? {
             capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides),
@@ -1402,6 +1437,13 @@ export class MockGatewayRuntime {
     updated.role = getModelRole(
       createModel(resolvedModelId, Math.floor(Date.now() / 1000), updated.capabilities),
     );
+    validateBatchSettings(
+      updated.batchSize ?? DEFAULT_BATCH_SIZE,
+      updated.ubatchSize ?? DEFAULT_UBATCH_SIZE,
+    );
+    if (hasLaunchAffectingModelConfigChanges(input)) {
+      validateEmbeddingRoleConfig(updated);
+    }
     this.#modelDetails.set(resolvedModelId, updated);
     const runtimeModel = this.#models.get(resolvedModelId);
     if (runtimeModel) {
@@ -1430,6 +1472,13 @@ export class MockGatewayRuntime {
         alreadyWarm: true,
       };
     }
+
+    const desktopModel = this.getDesktopModelRecord(modelId);
+    validateBatchSettings(
+      desktopModel.batchSize ?? DEFAULT_BATCH_SIZE,
+      desktopModel.ubatchSize ?? DEFAULT_UBATCH_SIZE,
+    );
+    validateEmbeddingRoleConfig(desktopModel);
 
     this.transitionModel(model, "Loading", false, traceId, "Model load requested.");
     this.publishLog("info", `Loading model ${modelId}`, traceId, modelId);
@@ -1736,9 +1785,11 @@ export class MockGatewayRuntime {
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
       contextLength: existing?.contextLength ?? 8192,
       batchSize: existing?.batchSize ?? DEFAULT_BATCH_SIZE,
+      ubatchSize: existing?.ubatchSize ?? DEFAULT_UBATCH_SIZE,
       gpuLayers: existing?.gpuLayers ?? 20,
       parallelSlots: existing?.parallelSlots,
       flashAttentionType: existing?.flashAttentionType ?? "auto",
+      poolingMethod: existing?.poolingMethod,
       quantization: existing?.quantization ?? "Q4_K_M",
       architecture: existing?.architecture ?? "llama",
       tokenizer: existing?.tokenizer ?? "gpt2",

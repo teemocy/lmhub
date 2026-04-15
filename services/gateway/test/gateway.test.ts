@@ -427,8 +427,10 @@ describe("gateway skeleton", () => {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
         batchSize: 3072,
+        ubatchSize: 3072,
         gpuLayers: 16,
         flashAttentionType: "enabled",
+        poolingMethod: "mean",
         parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
@@ -446,8 +448,10 @@ describe("gateway skeleton", () => {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
         batchSize: 3072,
+        ubatchSize: 3072,
         gpuLayers: 16,
         flashAttentionType: "enabled",
+        poolingMethod: "mean",
         parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
@@ -458,6 +462,31 @@ describe("gateway skeleton", () => {
         role: "embeddings",
         capabilities: expect.arrayContaining(["embeddings"]),
       }),
+    });
+  });
+
+  it("requires pooling and matched ubatch sizing when switching a model into embeddings mode", async () => {
+    const gateway = await createTestGateway();
+
+    const response = await gateway.controlApp.inject({
+      method: "PUT",
+      url: "/config/models/localhub/tinyllama-1.1b-chat-q4",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        batchSize: 3072,
+        ubatchSize: 3072,
+        capabilityOverrides: {
+          chat: false,
+          embeddings: true,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: "missing_pooling_method",
     });
   });
 

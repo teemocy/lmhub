@@ -82,6 +82,7 @@ import type {
   FlashAttentionType,
   ModelArtifact,
   ModelProfile,
+  PoolingMethod,
 } from "@localhub/shared-contracts/foundation-models";
 import type {
   ChatMessage,
@@ -943,6 +944,15 @@ function getEffectiveBatchSize(profile: ModelProfile): number {
   return DEFAULT_BATCH_SIZE;
 }
 
+function getEffectiveUBatchSize(profile: ModelProfile): number {
+  const override = profile.parameterOverrides.ubatchSize;
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+
+  return DEFAULT_UBATCH_SIZE;
+}
+
 function getEffectiveFlashAttentionType(profile: ModelProfile): FlashAttentionType {
   const override = profile.parameterOverrides.flashAttentionType;
   if (override === "enabled" || override === "disabled" || override === "auto") {
@@ -950,6 +960,21 @@ function getEffectiveFlashAttentionType(profile: ModelProfile): FlashAttentionTy
   }
 
   return "auto";
+}
+
+function getEffectivePoolingMethod(profile: ModelProfile): PoolingMethod | undefined {
+  const override = profile.parameterOverrides.poolingMethod;
+  if (
+    override === "none" ||
+    override === "mean" ||
+    override === "cls" ||
+    override === "last" ||
+    override === "rank"
+  ) {
+    return override;
+  }
+
+  return undefined;
 }
 
 function getCreatedEpochSeconds(artifact: ModelArtifact): number {
@@ -981,22 +1006,58 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
     input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
     input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
     input.capabilityOverrides !== undefined
   );
 }
 
-function validateBatchSize(batchSize: number | undefined): void {
-  if (batchSize === undefined) {
+function hasLaunchAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
+  return (
+    input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
+    input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
+    input.capabilityOverrides !== undefined
+  );
+}
+
+function validateBatchSettings(batchSize: number, ubatchSize: number): void {
+  if (batchSize % ubatchSize !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ubatch size (${ubatchSize}).`,
+      400,
+    );
+  }
+}
+
+function validateEmbeddingRoleOverrides(artifact: ModelArtifact, profile: ModelProfile): void {
+  const role = getModelRole(artifact, profile);
+  if (role !== "embeddings" && role !== "rerank") {
     return;
   }
 
-  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+  const batchSize = getEffectiveBatchSize(profile);
+  const ubatchSize = getEffectiveUBatchSize(profile);
+  if (batchSize !== ubatchSize) {
     throw new GatewayRequestError(
-      "invalid_batch_size",
-      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      "invalid_ubatch_size",
+      "Embedding and rerank models must use the same ubatch size as batch size.",
+      400,
+    );
+  }
+
+  if (!getEffectivePoolingMethod(profile)) {
+    throw new GatewayRequestError(
+      "missing_pooling_method",
+      "Embedding and rerank models require a pooling method override.",
       400,
     );
   }
@@ -1381,9 +1442,11 @@ function toDesktopModelRecord(
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
   const llamaRuntimeControls = profile.engineType === "llama.cpp";
   const batchSize = llamaRuntimeControls ? getEffectiveBatchSize(profile) : undefined;
+  const ubatchSize = llamaRuntimeControls ? getEffectiveUBatchSize(profile) : undefined;
   const flashAttentionType = llamaRuntimeControls
     ? getEffectiveFlashAttentionType(profile)
     : undefined;
+  const poolingMethod = llamaRuntimeControls ? getEffectivePoolingMethod(profile) : undefined;
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1410,7 +1473,9 @@ function toDesktopModelRecord(
     ...(stored.artifact.quantization ? { quantization: stored.artifact.quantization } : {}),
     ...(contextLength !== undefined ? { contextLength } : {}),
     ...(batchSize !== undefined ? { batchSize } : {}),
+    ...(ubatchSize !== undefined ? { ubatchSize } : {}),
     ...(flashAttentionType !== undefined ? { flashAttentionType } : {}),
+    ...(poolingMethod !== undefined ? { poolingMethod } : {}),
     ...(stored.artifact.metadata.parameterCount !== undefined
       ? { parameterCount: stored.artifact.metadata.parameterCount }
       : {}),
@@ -2459,14 +2524,45 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
+    const nextProfile: ModelProfile = {
+      ...resolved.profile,
+      ...(input.displayName ? { displayName: input.displayName } : {}),
+      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+      ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
+      parameterOverrides: {
+        ...resolved.profile.parameterOverrides,
+        ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+        ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
+        ...(input.ubatchSize !== undefined ? { ubatchSize: input.ubatchSize } : {}),
+        ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+        ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
+        ...(input.flashAttentionType !== undefined
+          ? { flashAttentionType: input.flashAttentionType }
+          : {}),
+        ...(input.poolingMethod !== undefined ? { poolingMethod: input.poolingMethod } : {}),
+      },
+      ...(input.capabilityOverrides !== undefined
+        ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }
+        : {}),
+      updatedAt: nowIso(),
+    };
+
     if (resolved.profile.engineType === "llama.cpp") {
-      validateBatchSize(input.batchSize);
+      validateBatchSettings(
+        getEffectiveBatchSize(nextProfile),
+        getEffectiveUBatchSize(nextProfile),
+      );
+      if (hasLaunchAffectingModelConfigChanges(input)) {
+        validateEmbeddingRoleOverrides(resolved.artifact, nextProfile);
+      }
     } else if (
       input.contextLength !== undefined ||
       input.batchSize !== undefined ||
+      input.ubatchSize !== undefined ||
       input.gpuLayers !== undefined ||
       input.parallelSlots !== undefined ||
-      input.flashAttentionType !== undefined
+      input.flashAttentionType !== undefined ||
+      input.poolingMethod !== undefined
     ) {
       throw new GatewayRequestError(
         "unsupported_model_config",
@@ -2485,27 +2581,6 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         409,
       );
     }
-
-    const nextProfile: ModelProfile = {
-      ...resolved.profile,
-      ...(input.displayName ? { displayName: input.displayName } : {}),
-      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-      ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
-      parameterOverrides: {
-        ...resolved.profile.parameterOverrides,
-        ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
-        ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
-        ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
-        ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
-        ...(input.flashAttentionType !== undefined
-          ? { flashAttentionType: input.flashAttentionType }
-          : {}),
-      },
-      ...(input.capabilityOverrides !== undefined
-        ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }
-        : {}),
-      updatedAt: nowIso(),
-    };
 
     const nextCapabilities = getEffectiveCapabilities(resolved.artifact, nextProfile);
     nextProfile.role = deriveRuntimeRole(nextCapabilities);
@@ -2561,6 +2636,14 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           alreadyWarm: false,
         };
       }
+    }
+
+    if (resolved.profile.engineType === "llama.cpp") {
+      validateBatchSettings(
+        getEffectiveBatchSize(resolved.profile),
+        getEffectiveUBatchSize(resolved.profile),
+      );
+      validateEmbeddingRoleOverrides(resolved.artifact, resolved.profile);
     }
 
     const loadPromise = this.loadWorker(resolved, normalizeTraceId(traceId));

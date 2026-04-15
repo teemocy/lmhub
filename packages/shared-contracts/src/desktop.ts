@@ -14,6 +14,7 @@ import {
   flashAttentionTypeSchema,
   modelFormatSchema,
   modelSourceKindSchema,
+  poolingMethodSchema,
   runtimeRoleSchema,
 } from "./models.js";
 import {
@@ -130,9 +131,11 @@ export const desktopModelRecordSchema = z.object({
   parameterCount: z.number().int().nonnegative().optional(),
   tokenizer: nonEmptyStringSchema.optional(),
   batchSize: positiveIntegerSchema.optional(),
+  ubatchSize: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
   parallelSlots: positiveIntegerSchema.optional(),
   flashAttentionType: flashAttentionTypeSchema.optional(),
+  poolingMethod: poolingMethodSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
   engineVersion: nonEmptyStringSchema.optional(),
   engineChannel: desktopEngineChannelSchema.optional(),
@@ -163,9 +166,11 @@ export const desktopModelConfigUpdateRequestSchema = z.object({
   defaultTtlMs: positiveIntegerSchema.optional(),
   contextLength: positiveIntegerSchema.optional(),
   batchSize: positiveIntegerSchema.optional(),
+  ubatchSize: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
   parallelSlots: positiveIntegerSchema.optional(),
   flashAttentionType: flashAttentionTypeSchema.optional(),
+  poolingMethod: poolingMethodSchema.optional(),
   capabilityOverrides: capabilityOverridesSchema.optional(),
 });
 

@@ -280,6 +280,12 @@ describe("llama.cpp stage 1 scaffolding", () => {
     const profile = {
       ...LLAMA_CPP_FIXTURE_PROFILE,
       role: "embeddings" as const,
+      parameterOverrides: {
+        ...LLAMA_CPP_FIXTURE_PROFILE.parameterOverrides,
+        batchSize: 2048,
+        ubatchSize: 2048,
+        poolingMethod: "mean" as const,
+      },
     };
     const runtimeKey = {
       ...LLAMA_CPP_FIXTURE_RUNTIME_KEY,
@@ -296,7 +302,9 @@ describe("llama.cpp stage 1 scaffolding", () => {
 
     expect(command.command).toBe(fakeBinaryPath);
     expect(command.managedBy).toBe("binary");
-    expect(command.args).toEqual(expect.arrayContaining(["--embedding"]));
+    expect(command.args).toEqual(
+      expect.arrayContaining(["--embedding", "--ubatch-size", "2048", "--pooling", "mean"]),
+    );
   });
 
   it("emits --mmproj for vision-capable runtimes when the sidecar is registered", async () => {
