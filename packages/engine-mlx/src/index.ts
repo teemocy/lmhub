@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -35,6 +35,7 @@ import {
   DEFAULT_MLX_PYTHON_VERSION,
   DEFAULT_MLX_VERSION,
   buildMlxVersionTag,
+  parseMlxVersionTag,
 } from "./versioning.js";
 
 export * from "./model-manager.js";
@@ -346,6 +347,9 @@ export function createMlxAdapter(options: MlxAdapterOptions = {}): EngineAdapter
   async function ensureInstalledVersion(
     requestedVersionTag: string,
     supportRootOverride?: string,
+    installOptions: {
+      force?: boolean;
+    } = {},
   ): Promise<EngineInstallResult> {
     const { paths, registry } = loadRegistry(supportRootOverride);
     const versionTag = sanitizeVersionTag(requestedVersionTag || DEFAULT_VERSION_TAG);
@@ -353,7 +357,7 @@ export function createMlxAdapter(options: MlxAdapterOptions = {}): EngineAdapter
     const manifestPath = path.join(installPath, "manifest.json");
     const existingManifest = readInstallManifest(manifestPath);
 
-    if (existingManifest && existsSync(existingManifest.executablePath)) {
+    if (existingManifest && existsSync(existingManifest.executablePath) && !installOptions.force) {
       const nextRegistry = writeEngineVersionRegistry(
         paths.registryFile,
         activateEngineVersion(
@@ -376,9 +380,16 @@ export function createMlxAdapter(options: MlxAdapterOptions = {}): EngineAdapter
       };
     }
 
-    const pythonVersion = options.pythonVersion ?? DEFAULT_MLX_PYTHON_VERSION;
-    const mlxVersion = options.mlxVersion ?? DEFAULT_MLX_VERSION;
-    const mlxLmVersion = options.mlxLmVersion ?? DEFAULT_MLX_LM_VERSION;
+    if (installOptions.force) {
+      await rm(installPath, { recursive: true, force: true });
+    }
+
+    const parsedVersionTag = parseMlxVersionTag(versionTag);
+    const pythonVersion =
+      parsedVersionTag?.pythonVersion ?? options.pythonVersion ?? DEFAULT_MLX_PYTHON_VERSION;
+    const mlxVersion = parsedVersionTag?.mlxVersion ?? options.mlxVersion ?? DEFAULT_MLX_VERSION;
+    const mlxLmVersion =
+      parsedVersionTag?.mlxLmVersion ?? options.mlxLmVersion ?? DEFAULT_MLX_LM_VERSION;
 
     mkdirSync(installPath, { recursive: true });
 
@@ -589,8 +600,17 @@ export function createMlxAdapter(options: MlxAdapterOptions = {}): EngineAdapter
         ],
       };
     },
-    async install(versionTag: string): Promise<EngineInstallResult> {
-      return await ensureInstalledVersion(versionTag || DEFAULT_VERSION_TAG);
+    async install(
+      versionTag: string,
+      installOptions: {
+        force?: boolean;
+      } = {},
+    ): Promise<EngineInstallResult> {
+      return await ensureInstalledVersion(
+        versionTag || DEFAULT_VERSION_TAG,
+        undefined,
+        installOptions,
+      );
     },
     async activate(
       versionTag: string,

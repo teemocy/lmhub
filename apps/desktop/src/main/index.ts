@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_MLX_LM_VERSION, DEFAULT_MLX_VERSION } from "@localhub/engine-mlx";
+import { parseMlxVersionTag } from "@localhub/engine-mlx";
 import {
   ensureAppPaths,
   loadDesktopConfig,
@@ -24,12 +24,14 @@ import {
 } from "electron";
 import { loadGatewayConfig } from "../../../../services/gateway/src/config";
 import { IPC_CHANNELS } from "./channels";
+import { fetchEngineUpdateSnapshot } from "./engine-updates";
 import { GatewayManager, resolveDesktopRuntimeEnvironment } from "./gateway-manager";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 const APP_NAME = "LM Hub";
+const ENGINE_UPDATE_CACHE_TTL_MS = 5 * 60_000;
 
 const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
 const runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
@@ -135,23 +137,126 @@ const getDesktopPlatform = (): "darwin" | "linux" | "win32" => {
   return "linux";
 };
 
+let cachedEngineUpdates:
+  | {
+      expiresAt: number;
+      value: Awaited<ReturnType<typeof fetchEngineUpdateSnapshot>>;
+    }
+  | undefined;
+let pendingEngineUpdates:
+  | Promise<Awaited<ReturnType<typeof fetchEngineUpdateSnapshot>>>
+  | undefined;
+
+const getEngineUpdates = async (): Promise<
+  Awaited<ReturnType<typeof fetchEngineUpdateSnapshot>>
+> => {
+  const now = Date.now();
+  if (cachedEngineUpdates && cachedEngineUpdates.expiresAt > now) {
+    return cachedEngineUpdates.value;
+  }
+
+  if (!pendingEngineUpdates) {
+    pendingEngineUpdates = fetchEngineUpdateSnapshot().then((value) => {
+      cachedEngineUpdates = {
+        expiresAt: Date.now() + ENGINE_UPDATE_CACHE_TTL_MS,
+        value,
+      };
+      return value;
+    });
+    void pendingEngineUpdates.finally(() => {
+      if (pendingEngineUpdates) {
+        pendingEngineUpdates = undefined;
+      }
+    });
+  }
+
+  return await pendingEngineUpdates;
+};
+
+const readInstalledLlamaRuntime = (): {
+  installed: boolean;
+  activeVersion?: string;
+  activeReleaseTag?: string;
+  activeSource?: "release" | "manual" | "unknown";
+  statusMessage?: string;
+} => {
+  const registryFile = path.join(appPaths.supportRoot, "engines", "llama.cpp", "registry.json");
+  if (!existsSync(registryFile)) {
+    return {
+      installed: false,
+      statusMessage: "Managed llama.cpp runtime not installed yet.",
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(registryFile, "utf8")) as {
+      activeVersionTag?: string;
+      versions?: Array<{
+        versionTag?: string;
+        installPath?: string;
+      }>;
+    };
+    const versions = Array.isArray(parsed.versions) ? parsed.versions : [];
+    const activeVersionTag =
+      typeof parsed.activeVersionTag === "string" ? parsed.activeVersionTag : undefined;
+    const activeVersionRecord = activeVersionTag
+      ? versions.find((candidate) => candidate.versionTag === activeVersionTag)
+      : undefined;
+    const activeManifestPath =
+      activeVersionRecord && typeof activeVersionRecord.installPath === "string"
+        ? path.join(activeVersionRecord.installPath, "manifest.json")
+        : undefined;
+    const activeManifest =
+      activeManifestPath && existsSync(activeManifestPath)
+        ? (JSON.parse(readFileSync(activeManifestPath, "utf8")) as {
+            source?: {
+              kind?: string;
+              releaseTag?: string;
+            };
+          })
+        : undefined;
+    const manifestSourceKind = activeManifest?.source?.kind;
+    const activeSource: "release" | "manual" | "unknown" =
+      manifestSourceKind === "release"
+        ? "release"
+        : manifestSourceKind === "manual"
+          ? "manual"
+          : "unknown";
+    const activeReleaseTag =
+      typeof activeManifest?.source?.releaseTag === "string" &&
+      activeManifest.source.releaseTag.trim().length > 0
+        ? activeManifest.source.releaseTag.trim()
+        : undefined;
+
+    return {
+      installed: versions.length > 0,
+      ...(activeVersionTag ? { activeVersion: activeVersionTag } : {}),
+      ...(activeReleaseTag ? { activeReleaseTag } : {}),
+      ...(activeVersionTag ? { activeSource } : {}),
+      ...(versions.length > 0
+        ? {}
+        : { statusMessage: "Managed llama.cpp runtime not installed yet." }),
+    };
+  } catch (error) {
+    return {
+      installed: false,
+      statusMessage:
+        error instanceof Error ? error.message : "Unable to read the llama.cpp runtime registry.",
+    };
+  }
+};
+
 const readInstalledMlxRuntime = (): {
   installed: boolean;
   activeVersion?: string;
   activeMlxVersion?: string;
   activeMlxLmVersion?: string;
-  latestMlxVersion?: string;
-  latestMlxLmVersion?: string;
-  updateAvailable: boolean;
   statusMessage?: string;
 } => {
   const registryFile = path.join(appPaths.supportRoot, "engines", "mlx", "registry.json");
   if (!existsSync(registryFile)) {
     return {
       installed: false,
-      latestMlxVersion: DEFAULT_MLX_VERSION,
-      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
-      updateAvailable: false,
       statusMessage: isMlxSupportedPlatform()
         ? "Managed MLX runtime not installed yet."
         : "MLX requires Apple Silicon macOS.",
@@ -184,26 +289,19 @@ const readInstalledMlxRuntime = (): {
             mlxLmVersion?: string;
           })
         : undefined;
-    const activeVersionMatch = activeVersionTag
-      ? /-mlx(?<mlxVersion>[0-9.]+)-mlx-lm(?<mlxLmVersion>[0-9.]+)/.exec(activeVersionTag)
-      : undefined;
+    const parsedVersionTag =
+      activeVersionTag !== undefined ? parseMlxVersionTag(activeVersionTag) : undefined;
     const activeMlxVersion =
       typeof activeManifest?.mlxVersion === "string"
         ? activeManifest.mlxVersion
-        : activeVersionMatch?.groups?.mlxVersion;
+        : parsedVersionTag?.mlxVersion;
     const activeMlxLmVersion =
       typeof activeManifest?.mlxLmVersion === "string"
         ? activeManifest.mlxLmVersion
-        : activeVersionMatch?.groups?.mlxLmVersion;
+        : parsedVersionTag?.mlxLmVersion;
 
     return {
       installed: versionCount > 0,
-      latestMlxVersion: DEFAULT_MLX_VERSION,
-      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
-      updateAvailable:
-        versionCount > 0 &&
-        ((activeMlxVersion !== undefined && activeMlxVersion !== DEFAULT_MLX_VERSION) ||
-          (activeMlxLmVersion !== undefined && activeMlxLmVersion !== DEFAULT_MLX_LM_VERSION)),
       ...(activeVersionTag ? { activeVersion: activeVersionTag } : {}),
       ...(activeMlxVersion ? { activeMlxVersion } : {}),
       ...(activeMlxLmVersion ? { activeMlxLmVersion } : {}),
@@ -212,53 +310,104 @@ const readInstalledMlxRuntime = (): {
   } catch (error) {
     return {
       installed: false,
-      latestMlxVersion: DEFAULT_MLX_VERSION,
-      latestMlxLmVersion: DEFAULT_MLX_LM_VERSION,
-      updateAvailable: false,
       statusMessage:
         error instanceof Error ? error.message : "Unable to read the MLX runtime registry.",
     };
   }
 };
 
-const buildRuntimeContext = (): DesktopRuntimeContext => ({
-  desktop: {
-    closeToTray: desktopConfig.value.closeToTray,
-    autoLaunchGateway: desktopConfig.value.autoLaunchGateway,
-    theme: desktopConfig.value.theme,
-    controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
-    ...(desktopConfig.value.controlAuthToken !== undefined
-      ? { controlAuthToken: desktopConfig.value.controlAuthToken }
-      : {}),
-  },
-  gateway: {
-    enableLan: sharedGatewayConfig.value.enableLan,
-    authRequired: Boolean(gatewayConfig.publicBearerToken),
-    publicHost: gatewayConfig.publicHost,
-    publicPort: gatewayConfig.publicPort,
-    controlHost: gatewayConfig.controlHost,
-    corsAllowlist: [...gatewayConfig.corsAllowlist],
-    defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
-    maxActiveModelsInMemory: gatewayConfig.maxActiveModelsInMemory,
-    localModelsDir: gatewayConfig.localModelsDir,
-    ...(sharedGatewayConfig.value.publicAuthToken !== undefined
-      ? { publicAuthToken: sharedGatewayConfig.value.publicAuthToken }
-      : {}),
-    controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
-  },
-  system: {
-    platform: getDesktopPlatform(),
-    arch: process.arch,
-  },
-  mlx: {
-    supported: isMlxSupportedPlatform(),
-    ...readInstalledMlxRuntime(),
-  },
-  files: {
-    desktopConfigFile: appPaths.desktopConfigFile,
-    gatewayConfigFile: appPaths.gatewayConfigFile,
-  },
-});
+const buildRuntimeContext = async (): Promise<DesktopRuntimeContext> => {
+  const updates = await getEngineUpdates();
+  const llamaRuntime = readInstalledLlamaRuntime();
+  const mlxRuntime = readInstalledMlxRuntime();
+
+  return {
+    desktop: {
+      closeToTray: desktopConfig.value.closeToTray,
+      autoLaunchGateway: desktopConfig.value.autoLaunchGateway,
+      theme: desktopConfig.value.theme,
+      controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
+      ...(desktopConfig.value.controlAuthToken !== undefined
+        ? { controlAuthToken: desktopConfig.value.controlAuthToken }
+        : {}),
+    },
+    gateway: {
+      enableLan: sharedGatewayConfig.value.enableLan,
+      authRequired: Boolean(gatewayConfig.publicBearerToken),
+      publicHost: gatewayConfig.publicHost,
+      publicPort: gatewayConfig.publicPort,
+      controlHost: gatewayConfig.controlHost,
+      corsAllowlist: [...gatewayConfig.corsAllowlist],
+      defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
+      maxActiveModelsInMemory: gatewayConfig.maxActiveModelsInMemory,
+      localModelsDir: gatewayConfig.localModelsDir,
+      ...(sharedGatewayConfig.value.publicAuthToken !== undefined
+        ? { publicAuthToken: sharedGatewayConfig.value.publicAuthToken }
+        : {}),
+      controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
+    },
+    system: {
+      platform: getDesktopPlatform(),
+      arch: process.arch,
+    },
+    llama: {
+      supported: process.platform === "darwin",
+      installed: llamaRuntime.installed,
+      ...(llamaRuntime.activeVersion ? { activeVersion: llamaRuntime.activeVersion } : {}),
+      ...(llamaRuntime.activeReleaseTag ? { activeReleaseTag: llamaRuntime.activeReleaseTag } : {}),
+      ...(llamaRuntime.activeSource ? { activeSource: llamaRuntime.activeSource } : {}),
+      ...(updates.llama.latestReleaseTag
+        ? { latestReleaseTag: updates.llama.latestReleaseTag }
+        : {}),
+      updateAvailable:
+        llamaRuntime.activeSource === "release" &&
+        llamaRuntime.activeReleaseTag !== undefined &&
+        updates.llama.latestReleaseTag !== undefined &&
+        llamaRuntime.activeReleaseTag !== updates.llama.latestReleaseTag,
+      ...((!llamaRuntime.installed ? llamaRuntime.statusMessage : undefined) ||
+      updates.llama.statusMessage
+        ? {
+            statusMessage:
+              (!llamaRuntime.installed ? llamaRuntime.statusMessage : undefined) ??
+              updates.llama.statusMessage,
+          }
+        : {}),
+    },
+    mlx: {
+      supported: isMlxSupportedPlatform(),
+      installed: mlxRuntime.installed,
+      ...(mlxRuntime.activeVersion ? { activeVersion: mlxRuntime.activeVersion } : {}),
+      ...(mlxRuntime.activeMlxVersion ? { activeMlxVersion: mlxRuntime.activeMlxVersion } : {}),
+      ...(mlxRuntime.activeMlxLmVersion
+        ? { activeMlxLmVersion: mlxRuntime.activeMlxLmVersion }
+        : {}),
+      ...(updates.mlx.latestMlxVersion ? { latestMlxVersion: updates.mlx.latestMlxVersion } : {}),
+      ...(updates.mlx.latestMlxLmVersion
+        ? { latestMlxLmVersion: updates.mlx.latestMlxLmVersion }
+        : {}),
+      ...(updates.mlx.latestVersionTag ? { latestVersionTag: updates.mlx.latestVersionTag } : {}),
+      updateAvailable:
+        mlxRuntime.installed &&
+        updates.mlx.latestMlxVersion !== undefined &&
+        updates.mlx.latestMlxLmVersion !== undefined &&
+        ((mlxRuntime.activeMlxVersion !== undefined &&
+          updates.mlx.latestMlxVersion !== undefined &&
+          mlxRuntime.activeMlxVersion !== updates.mlx.latestMlxVersion) ||
+          (mlxRuntime.activeMlxLmVersion !== undefined &&
+            updates.mlx.latestMlxLmVersion !== undefined &&
+            mlxRuntime.activeMlxLmVersion !== updates.mlx.latestMlxLmVersion)),
+      ...(mlxRuntime.statusMessage || updates.mlx.statusMessage
+        ? {
+            statusMessage: mlxRuntime.statusMessage ?? updates.mlx.statusMessage,
+          }
+        : {}),
+    },
+    files: {
+      desktopConfigFile: appPaths.desktopConfigFile,
+      gatewayConfigFile: appPaths.gatewayConfigFile,
+    },
+  };
+};
 
 const reloadGatewayConfig = (): void => {
   gatewayConfig = loadGatewayConfig({
@@ -406,7 +555,7 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);
   ipcMain.handle(
     IPC_CHANNELS.systemGetRuntimeContext,
-    (): DesktopRuntimeContext => buildRuntimeContext(),
+    async (): Promise<DesktopRuntimeContext> => await buildRuntimeContext(),
   );
   ipcMain.handle(IPC_CHANNELS.systemCopyPath, (_event, filePath: string) => {
     clipboard.writeText(filePath);
@@ -474,7 +623,7 @@ const registerIpcHandlers = (): void => {
       reloadDesktopConfig();
       await gatewayManager.restart();
 
-      return buildRuntimeContext();
+      return await buildRuntimeContext();
     },
   );
   ipcMain.handle(
@@ -508,7 +657,7 @@ const registerIpcHandlers = (): void => {
       reloadGatewayConfig();
       await gatewayManager.restart();
 
-      return buildRuntimeContext();
+      return await buildRuntimeContext();
     },
   );
   ipcMain.handle(
@@ -534,7 +683,7 @@ const registerIpcHandlers = (): void => {
       reloadGatewayConfig();
       await gatewayManager.restart();
 
-      return buildRuntimeContext();
+      return await buildRuntimeContext();
     },
   );
   ipcMain.handle(
@@ -550,7 +699,7 @@ const registerIpcHandlers = (): void => {
       reloadGatewayConfig();
       await gatewayManager.restart();
 
-      return buildRuntimeContext();
+      return await buildRuntimeContext();
     },
   );
   ipcMain.handle(IPC_CHANNELS.systemRevealPath, async (_event, filePath: string) =>
@@ -582,7 +731,7 @@ const registerIpcHandlers = (): void => {
       reloadDesktopConfig();
       await gatewayManager.restart();
 
-      return buildRuntimeContext();
+      return await buildRuntimeContext();
     },
   );
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelDialog, async () => {

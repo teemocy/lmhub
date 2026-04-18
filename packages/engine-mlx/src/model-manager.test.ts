@@ -25,7 +25,7 @@ const fakeAdapter: EngineAdapter = {
       notes: [],
     };
   },
-  async install(versionTag) {
+  async install(versionTag, _options) {
     return {
       success: true,
       versionTag,

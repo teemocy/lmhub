@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
-  type EngineAdapter,
   type EngineActivationResult,
+  type EngineAdapter,
   type EngineHealthCheck,
   type EngineInstallResult,
   type EngineProbeResult,
@@ -280,11 +280,7 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
   const flashAttentionType = getFlashAttentionType(input.profile);
   args.push(
     "--flash-attn",
-    flashAttentionType === "enabled"
-      ? "on"
-      : flashAttentionType === "disabled"
-        ? "off"
-        : "auto",
+    flashAttentionType === "enabled" ? "on" : flashAttentionType === "disabled" ? "off" : "auto",
   );
 
   if (input.runtimeKey.role === "embeddings") {
@@ -391,7 +387,10 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     const installPath = path.join(paths.versionsRoot, sanitizedVersionTag);
     const manifestPath = path.join(installPath, "manifest.json");
 
-    const installedBinary = await getInstalledPackagedLlamaCppBinary(paths.supportRoot, sanitizedVersionTag);
+    const installedBinary = await getInstalledPackagedLlamaCppBinary(
+      paths.supportRoot,
+      sanitizedVersionTag,
+    );
     if (installedBinary) {
       return installedBinary;
     }
@@ -494,7 +493,10 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     }
 
     if (!existsSync(activeVersion.binaryPath)) {
-      const installResult = await ensureInstalledVersion(activeVersion.versionTag, input.supportRoot);
+      const installResult = await ensureInstalledVersion(
+        activeVersion.versionTag,
+        input.supportRoot,
+      );
       return {
         versionTag: installResult.versionTag,
         managedBy: installResult.binaryPath === process.execPath ? "fake-worker" : "binary",
@@ -580,7 +582,12 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
 
       return unavailableResult;
     },
-    async install(versionTag: string): Promise<EngineInstallResult> {
+    async install(
+      versionTag: string,
+      _options?: {
+        force?: boolean;
+      },
+    ): Promise<EngineInstallResult> {
       return ensureInstalledVersion(versionTag);
     },
     async activate(
@@ -588,7 +595,9 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
       supportRootOverride?: string,
     ): Promise<EngineActivationResult> {
       const { paths, registry } = loadRegistry(supportRootOverride);
-      const existingVersion = registry.versions.find((candidate) => candidate.versionTag === versionTag);
+      const existingVersion = registry.versions.find(
+        (candidate) => candidate.versionTag === versionTag,
+      );
 
       if (!existingVersion) {
         const installResult = await ensureInstalledVersion(versionTag, supportRootOverride);

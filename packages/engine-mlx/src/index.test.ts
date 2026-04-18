@@ -80,4 +80,3 @@ describe("mlx adapter response normalization", () => {
     expect(normalized.choices[0]?.delta.tool_calls).toBeUndefined();
   });
 });
-

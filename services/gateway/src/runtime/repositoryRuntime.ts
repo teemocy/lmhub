@@ -52,10 +52,10 @@ import {
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
   type DesktopLocalModelImportResponse,
-  type DesktopModelDeleteRequest,
-  type DesktopModelDeleteResponse,
   type DesktopModelConfigUpdateRequest,
   type DesktopModelConfigUpdateResponse,
+  type DesktopModelDeleteRequest,
+  type DesktopModelDeleteResponse,
   type DesktopModelRecord,
   type DesktopModelRuntimeState,
   type DesktopProviderCatalogDetailResponse,
@@ -78,9 +78,9 @@ import {
   desktopDownloadListSchema,
   desktopEngineInstallResponseSchema,
   desktopLocalModelImportRequestSchema,
+  desktopModelConfigUpdateResponseSchema,
   desktopModelDeleteRequestSchema,
   desktopModelDeleteResponseSchema,
-  desktopModelConfigUpdateResponseSchema,
   embeddingsResponseSchema,
   gatewayEventSchema,
   rerankResponseSchema,
@@ -1455,7 +1455,9 @@ function createFakeRerankResponse(input: RerankRequest): RerankResponse {
         relevance_score: Number(score.toFixed(6)),
       };
     })
-    .sort((left, right) => right.relevance_score - left.relevance_score || left.index - right.index);
+    .sort(
+      (left, right) => right.relevance_score - left.relevance_score || left.index - right.index,
+    );
 
   return {
     object: "list",
@@ -1470,8 +1472,7 @@ function createFakeRerankResponse(input: RerankRequest): RerankResponse {
         ...input.documents.map((document) => normalizeRerankDocumentText(document)),
       ]),
     },
-    results:
-      input.top_n !== undefined ? results.slice(0, Math.max(1, input.top_n)) : results,
+    results: input.top_n !== undefined ? results.slice(0, Math.max(1, input.top_n)) : results,
   };
 }
 
@@ -2549,6 +2550,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       } else {
         installResult = await mlxManager.installManagedRuntime({
           ...("versionTag" in input && input.versionTag ? { versionTag: input.versionTag } : {}),
+          ...("forceReinstall" in input && input.forceReinstall
+            ? { forceReinstall: input.forceReinstall }
+            : {}),
         });
       }
     } else {
@@ -3181,7 +3185,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/rerank", input);
-      const payload = rerankResponseSchema.parse(worker.adapter.normalizeResponse(await response.json()));
+      const payload = rerankResponseSchema.parse(
+        worker.adapter.normalizeResponse(await response.json()),
+      );
 
       this.insertApiLog({
         traceId: context.traceId,

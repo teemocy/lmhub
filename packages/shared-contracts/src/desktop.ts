@@ -93,6 +93,7 @@ export const desktopEngineInstallRequestSchema = z.union([
     engineType: z.literal("mlx"),
     action: z.literal("install-managed-runtime"),
     versionTag: nonEmptyStringSchema.optional(),
+    forceReinstall: z.boolean().optional(),
   }),
   z.object({
     engineType: z.literal("mlx"),
@@ -431,6 +432,16 @@ export const desktopRuntimeContextSchema = z.object({
     platform: z.enum(["darwin", "linux", "win32"]),
     arch: nonEmptyStringSchema,
   }),
+  llama: z.object({
+    supported: z.boolean(),
+    installed: z.boolean(),
+    activeVersion: nonEmptyStringSchema.optional(),
+    activeReleaseTag: nonEmptyStringSchema.optional(),
+    activeSource: z.enum(["release", "manual", "unknown"]).optional(),
+    latestReleaseTag: nonEmptyStringSchema.optional(),
+    updateAvailable: z.boolean().default(false),
+    statusMessage: z.string().optional(),
+  }),
   mlx: z.object({
     supported: z.boolean(),
     installed: z.boolean(),
@@ -439,6 +450,7 @@ export const desktopRuntimeContextSchema = z.object({
     activeMlxLmVersion: nonEmptyStringSchema.optional(),
     latestMlxVersion: nonEmptyStringSchema.optional(),
     latestMlxLmVersion: nonEmptyStringSchema.optional(),
+    latestVersionTag: nonEmptyStringSchema.optional(),
     updateAvailable: z.boolean().default(false),
     statusMessage: z.string().optional(),
   }),

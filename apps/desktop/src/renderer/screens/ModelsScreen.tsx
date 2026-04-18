@@ -389,9 +389,14 @@ export function ModelsScreen({
   const selectedModel =
     (selectedModelId ? models.find((model) => model.id === selectedModelId) : undefined) ??
     models[0];
+  const llamaSupported = runtimeContext?.llama.supported ?? false;
+  const llamaUpdateAvailable = runtimeContext?.llama.updateAvailable ?? false;
+  const llamaActiveSource = runtimeContext?.llama.activeSource;
+  const latestLlamaReleaseTag = runtimeContext?.llama.latestReleaseTag ?? null;
   const mlxSupported = runtimeContext?.mlx.supported ?? false;
   const mlxInstalled = runtimeContext?.mlx.installed ?? false;
   const mlxUpdateAvailable = runtimeContext?.mlx.updateAvailable ?? false;
+  const latestMlxVersionTag = runtimeContext?.mlx.latestVersionTag;
   const latestMlxRuntimeLabel =
     runtimeContext?.mlx.latestMlxVersion && runtimeContext?.mlx.latestMlxLmVersion
       ? `mlx ${runtimeContext.mlx.latestMlxVersion} / mlx-lm ${runtimeContext.mlx.latestMlxLmVersion}`
@@ -608,6 +613,12 @@ export function ModelsScreen({
   const handleDownloadMetalBinary = async () => {
     setEngineFeedback(null);
     setPendingEngineAction("download");
+    const actionLabel =
+      llamaActiveSource === "release"
+        ? llamaUpdateAvailable
+          ? "Updated"
+          : "Reinstalled"
+        : "Downloaded";
 
     try {
       const result = await onInstallEngineBinary({
@@ -617,8 +628,8 @@ export function ModelsScreen({
       setSelectedEngineVersionTag(result.engine.version);
       setEngineFeedback({
         tone: "success",
-        title: "Install complete",
-        text: `Installed ${result.engine.version} into ${result.engine.binaryPath}.`,
+        title: llamaUpdateAvailable ? "Runtime updated" : "Runtime ready",
+        text: `${actionLabel} llama.cpp Metal build ${result.engine.version}.`,
       });
     } catch (error) {
       setEngineFeedback({
@@ -711,6 +722,8 @@ export function ModelsScreen({
       const result = await onInstallEngineBinary({
         engineType: "mlx",
         action: "install-managed-runtime",
+        ...(latestMlxVersionTag ? { versionTag: latestMlxVersionTag } : {}),
+        ...(mlxInstalled && !mlxUpdateAvailable ? { forceReinstall: true } : {}),
       });
 
       setSelectedEngineVersionTag(result.engine.version);
@@ -1738,11 +1751,19 @@ export function ModelsScreen({
           <div className="button-row">
             <button
               className="primary-button"
-              disabled={!connected || pendingEngineAction !== null}
+              disabled={!connected || !llamaSupported || pendingEngineAction !== null}
               onClick={() => void handleDownloadMetalBinary()}
               type="button"
             >
-              {pendingEngineAction === "download" ? "Downloading..." : "Download Metal build"}
+              {pendingEngineAction === "download"
+                ? llamaUpdateAvailable
+                  ? "Updating..."
+                  : "Downloading..."
+                : llamaActiveSource === "release"
+                  ? llamaUpdateAvailable
+                    ? "Update Metal build"
+                    : "Reinstall latest Metal build"
+                  : "Download latest Metal build"}
             </button>
             {mlxSupported ? (
               <button
@@ -1785,6 +1806,20 @@ export function ModelsScreen({
                 : ""}
               {runtimeContext?.mlx.updateAvailable ? " · update available" : ""}
             </p>
+          ) : null}
+          {latestLlamaReleaseTag ? (
+            <p className="search-detail-note">
+              Latest llama.cpp release: {latestLlamaReleaseTag}
+              {runtimeContext?.llama.activeReleaseTag
+                ? ` · active release: ${runtimeContext.llama.activeReleaseTag}`
+                : runtimeContext?.llama.activeVersion
+                  ? ` · active runtime: ${runtimeContext.llama.activeVersion}`
+                  : ""}
+              {runtimeContext?.llama.activeSource === "manual" ? " · active source: imported binary" : ""}
+              {runtimeContext?.llama.updateAvailable ? " · update available" : ""}
+            </p>
+          ) : runtimeContext?.llama.statusMessage ? (
+            <p className="search-detail-note">{runtimeContext.llama.statusMessage}</p>
           ) : null}
 
           {engines.length > 0 ? (

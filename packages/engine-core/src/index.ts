@@ -105,7 +105,7 @@ export interface EngineHealthCheck {
 export interface EngineAdapter {
   readonly engineType: string;
   probe(): Promise<EngineProbeResult>;
-  install(versionTag: string): Promise<EngineInstallResult>;
+  install(versionTag: string, options?: { force?: boolean }): Promise<EngineInstallResult>;
   activate(versionTag: string, supportRoot?: string): Promise<EngineActivationResult>;
   resolveCommand(input: ResolveCommandInput): Promise<ResolvedCommand>;
   healthCheck(runtimeKey: RuntimeKey): Promise<EngineHealthCheck>;
@@ -114,12 +114,7 @@ export interface EngineAdapter {
 }
 
 export function runtimeKeyToString(runtimeKey: RuntimeKey): string {
-  return [
-    runtimeKey.modelId,
-    runtimeKey.engineType,
-    runtimeKey.role,
-    runtimeKey.configHash,
-  ]
+  return [runtimeKey.modelId, runtimeKey.engineType, runtimeKey.role, runtimeKey.configHash]
     .map((part) => part.replace(/[^A-Za-z0-9._-]+/g, "-"))
     .join("__");
 }
@@ -170,8 +165,7 @@ export function readEngineVersionRegistry(
           notes: Array.isArray(version.notes) ? version.notes : [],
         }))
       : [],
-    updatedAt:
-      typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
   };
 
   if (typeof parsed.activeVersionTag === "string") {

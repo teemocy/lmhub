@@ -29,10 +29,10 @@ import {
   type DesktopEngineList,
   type DesktopLocalModelImportRequest,
   type DesktopLocalModelImportResponse,
-  type DesktopModelDeleteRequest,
-  type DesktopModelDeleteResponse,
   type DesktopModelConfigUpdateRequest,
   type DesktopModelConfigUpdateResponse,
+  type DesktopModelDeleteRequest,
+  type DesktopModelDeleteResponse,
   type DesktopModelLibrary,
   type DesktopModelRecord,
   type DesktopProviderCatalogDetailResponse,
@@ -56,8 +56,8 @@ import {
   desktopEngineInstallResponseSchema,
   desktopEngineListSchema,
   desktopLocalModelImportResponseSchema,
-  desktopModelDeleteResponseSchema,
   desktopModelConfigUpdateResponseSchema,
+  desktopModelDeleteResponseSchema,
   desktopModelLibrarySchema,
   desktopProviderCatalogDetailResponseSchema,
   desktopProviderSearchResultSchema,
@@ -717,7 +717,7 @@ export class GatewayManager extends EventEmitter {
         }),
         body: JSON.stringify(payload),
       }),
-      "Unable to install the selected llama.cpp binary.",
+      "Unable to install the selected engine runtime.",
     );
 
     return desktopEngineInstallResponseSchema.parse(json);

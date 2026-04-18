@@ -315,11 +315,9 @@ function getContextLength(
   generationConfig: Record<string, unknown>,
   tokenizerConfig: Record<string, unknown>,
 ): number | undefined {
-  const records = [
-    ...getModelConfigRecords(config),
-    generationConfig,
-    tokenizerConfig,
-  ].filter((record) => Object.keys(record).length > 0);
+  const records = [...getModelConfigRecords(config), generationConfig, tokenizerConfig].filter(
+    (record) => Object.keys(record).length > 0,
+  );
   const directValue = pickFirstInteger(
     records,
     [
@@ -474,8 +472,7 @@ function estimateDenseTransformerParameterCount(
   const keyProjection = hiddenSize * keyValueProjectionWidth;
   const valueProjection = hiddenSize * keyValueProjectionWidth;
   const outputProjection = hiddenSize * hiddenSize;
-  const attentionParameters =
-    queryProjection + keyProjection + valueProjection + outputProjection;
+  const attentionParameters = queryProjection + keyProjection + valueProjection + outputProjection;
   const mlpProjectionCount = inferUsesGatedMlp(architecture) ? 3 : 2;
   const mlpParameters = hiddenSize * intermediateSize * mlpProjectionCount;
   const layerNormParameters = hiddenSize * 2;
@@ -962,8 +959,13 @@ export class MlxModelManager {
     };
   }
 
-  async ensureEngineVersion(versionTag?: string): Promise<EngineInstallResult> {
-    const installResult = await this.#adapter.install(versionTag ?? "");
+  async ensureEngineVersion(
+    versionTag?: string,
+    options: {
+      force?: boolean;
+    } = {},
+  ): Promise<EngineInstallResult> {
+    const installResult = await this.#adapter.install(versionTag ?? "", options);
     const record = toEngineVersionRecord(installResult, this.#now());
     if (record && this.#engineVersionsRepository) {
       const storedId = this.#engineVersionsRepository.upsert(record);
@@ -975,7 +977,16 @@ export class MlxModelManager {
     return installResult;
   }
 
-  async installManagedRuntime(options: { versionTag?: string } = {}): Promise<EngineInstallResult> {
+  async installManagedRuntime(
+    options: {
+      versionTag?: string;
+      forceReinstall?: boolean;
+    } = {},
+  ): Promise<EngineInstallResult> {
+    if (options.forceReinstall) {
+      return await this.ensureEngineVersion(options.versionTag, { force: true });
+    }
+
     return await this.ensureEngineVersion(options.versionTag);
   }
 
