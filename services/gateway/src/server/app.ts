@@ -13,6 +13,7 @@ import {
   desktopDownloadCreateRequestSchema,
   desktopEngineInstallRequestSchema,
   desktopLocalModelImportRequestSchema,
+  desktopModelDeleteRequestSchema,
   desktopModelConfigUpdateRequestSchema,
   embeddingsRequestSchema,
   rerankRequestSchema,
@@ -421,6 +422,38 @@ async function registerControlApp(
               ? error.message
               : "The selected local artifact could not be read."
             : formatted.message,
+        requestId: request.id,
+      });
+    }
+  });
+
+  app.delete("/control/models/*", async (request, reply) => {
+    const rawModelId = (request.params as { "*": string | undefined })["*"];
+    const modelId = rawModelId?.trim();
+    if (!modelId) {
+      return reply.code(400).send({
+        error: "validation_error",
+        message: "modelId is required.",
+        requestId: request.id,
+      });
+    }
+
+    const parsed = desktopModelDeleteRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendValidationError(
+        reply,
+        request.id,
+        parsed.error.issues[0]?.message ?? "Invalid delete model payload.",
+      );
+    }
+
+    try {
+      return await runtime.deleteRegisteredModel(modelId, parsed.data, request.id);
+    } catch (error) {
+      const formatted = toGatewayErrorResponse(error);
+      return reply.code(formatted.statusCode).send({
+        error: formatted.code,
+        message: formatted.message,
         requestId: request.id,
       });
     }

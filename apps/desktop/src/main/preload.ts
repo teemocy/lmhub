@@ -16,6 +16,7 @@ import type {
   DesktopEngineList,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelDeleteResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelLibrary,
@@ -75,6 +76,12 @@ const api = {
         IPC_CHANNELS.gatewayRegisterLocalModel,
         payload,
       ) as Promise<DesktopLocalModelImportResponse>,
+    deleteRegisteredModel: (modelId: string, options?: { deleteFiles?: boolean }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayDeleteRegisteredModel,
+        modelId,
+        options,
+      ) as Promise<DesktopModelDeleteResponse>,
     updateModelConfig: (modelId: string, payload: DesktopModelConfigUpdateRequest) =>
       ipcRenderer.invoke(
         IPC_CHANNELS.gatewayUpdateModelConfig,

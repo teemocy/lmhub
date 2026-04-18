@@ -4,6 +4,7 @@ import type {
   DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelDeleteResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
@@ -24,6 +25,10 @@ type ModelsScreenProps = {
   onRegisterModel(
     payload: DesktopLocalModelImportRequest,
   ): Promise<DesktopLocalModelImportResponse>;
+  onDeleteModel(
+    modelId: string,
+    options?: { deleteFiles?: boolean },
+  ): Promise<DesktopModelDeleteResponse>;
   onInstallEngineBinary(
     payload: DesktopEngineInstallRequest,
   ): Promise<DesktopEngineInstallResponse>;
@@ -315,6 +320,7 @@ export function ModelsScreen({
   onPickImportFile,
   onPickEngineBinaryFile,
   onRegisterModel,
+  onDeleteModel,
   onInstallEngineBinary,
   onActivateEngineVersion,
   onUpdateModelConfig,
@@ -335,6 +341,7 @@ export function ModelsScreen({
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
+  const [deleteFilesOnRemove, setDeleteFilesOnRemove] = useState(false);
   const [detailTab, setDetailTab] = useState<ModelDetailTab>("details");
   const [configDraft, setConfigDraft] = useState({
     pinned: false,
@@ -404,6 +411,12 @@ export function ModelsScreen({
     !!selectedModel &&
     !selectedModel.loaded &&
     pendingActionModelId !== selectedModel.id;
+  const canDeleteModel =
+    connected &&
+    !!selectedModel &&
+    selectedModel.state !== "loading" &&
+    selectedModel.state !== "evicting" &&
+    pendingActionModelId !== selectedModel.id;
   const hasCapabilityOverrides =
     !!selectedModel && Object.keys(selectedModel.capabilityOverrides).length > 0;
   const selectedModelUsesLlamaRuntime = selectedModel?.engineType === "llama.cpp";
@@ -435,6 +448,7 @@ export function ModelsScreen({
       poolingMethod: (selectedModel.poolingMethod as PoolingMethodValue | undefined) ?? "",
       capabilityOverrides,
     });
+    setDeleteFilesOnRemove(false);
   }, [selectedModel?.id]);
 
   useEffect(() => {
@@ -753,6 +767,51 @@ export function ModelsScreen({
           error instanceof Error
             ? error.message
             : `Unable to update the alias for ${selectedModel.displayName}.`,
+      });
+    } finally {
+      setPendingActionModelId(null);
+    }
+  };
+
+  const deleteModel = async () => {
+    if (!selectedModel) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      deleteFilesOnRemove
+        ? `Delete the ${selectedModel.displayName} registration and remove its related files from disk?`
+        : `Delete the ${selectedModel.displayName} registration and keep its files on disk?`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setPendingActionModelId(selectedModel.id);
+    setFeedback(null);
+
+    try {
+      const result = await onDeleteModel(selectedModel.id, {
+        deleteFiles: deleteFilesOnRemove,
+      });
+      closeModelConfigPanel();
+      closeModelDetail();
+      setDeleteFilesOnRemove(false);
+      setFeedback({
+        tone: "success",
+        text: result.deletedFiles
+          ? result.deletedPaths.length > 0
+            ? `Deleted ${selectedModel.displayName} and removed ${result.deletedPaths.length} related file(s).`
+            : `Deleted ${selectedModel.displayName}. Any related files were already missing.`
+          : `Deleted ${selectedModel.displayName} from the registered model list and kept its files on disk.`,
+      });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : `Unable to delete ${selectedModel.displayName}.`,
       });
     } finally {
       setPendingActionModelId(null);
@@ -1343,6 +1402,51 @@ export function ModelsScreen({
                       <span className="meta-pill meta-pill-muted">No explicit overrides</span>
                     )}
                   </div>
+                </div>
+              </div>
+
+              <div className="advanced-config-card modal-section-card">
+                <div className="panel-header">
+                  <div>
+                    <span className="section-label">Danger zone</span>
+                    <h3>Delete registration</h3>
+                  </div>
+                  <span className="status-pill status-pill-negative">
+                    {selectedModel.loaded ? "Will evict first" : "Permanent change"}
+                  </span>
+                </div>
+                <p>
+                  Remove this model from the registered inventory. If file deletion is enabled, the
+                  gateway also removes the model artifact from disk, including any related MMProj
+                  sidecar it knows about.
+                </p>
+                <label className="checkbox-row">
+                  <input
+                    checked={deleteFilesOnRemove}
+                    disabled={!canDeleteModel}
+                    onChange={(event) => setDeleteFilesOnRemove(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>
+                    Also delete related files from disk
+                    {selectedModel.artifactStatus === "missing"
+                      ? " if any remnants still exist."
+                      : "."}
+                  </span>
+                </label>
+                <div className="button-row">
+                  <button
+                    className="secondary-button danger-button"
+                    disabled={!canDeleteModel}
+                    onClick={() => void deleteModel()}
+                    type="button"
+                  >
+                    {pendingActionModelId === selectedModel.id
+                      ? "Deleting..."
+                      : deleteFilesOnRemove
+                        ? "Delete model and files"
+                        : "Delete model registration"}
+                  </button>
                 </div>
               </div>
             </div>

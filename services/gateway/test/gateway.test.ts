@@ -536,6 +536,9 @@ describe("gateway skeleton", () => {
       async registerLocalModel() {
         throw new Error("not implemented");
       },
+      async deleteRegisteredModel() {
+        throw new Error("not implemented");
+      },
       deleteChatSession() {
         return false;
       },
@@ -823,6 +826,9 @@ describe("gateway skeleton", () => {
         };
       },
       async registerLocalModel() {
+        throw new Error("not implemented");
+      },
+      async deleteRegisteredModel() {
         throw new Error("not implemented");
       },
       async deleteChatSession() {

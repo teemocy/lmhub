@@ -17,6 +17,8 @@ import type {
   DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelDeleteRequest,
+  DesktopModelDeleteResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
@@ -181,6 +183,11 @@ export interface GatewayRuntime {
     input: DesktopLocalModelImportRequest,
     traceId?: string,
   ): MaybePromise<DesktopLocalModelImportResponse>;
+  deleteRegisteredModel(
+    modelId: string,
+    input?: DesktopModelDeleteRequest,
+    traceId?: string,
+  ): MaybePromise<DesktopModelDeleteResponse>;
   updateModelConfig(
     modelId: string,
     input: DesktopModelConfigUpdateRequest,

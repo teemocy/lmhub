@@ -7,6 +7,7 @@ export const IPC_CHANNELS = {
   gatewayListEngines: "gateway:list-engines",
   gatewayInstallEngineBinary: "gateway:install-engine-binary",
   gatewayRegisterLocalModel: "gateway:register-local-model",
+  gatewayDeleteRegisteredModel: "gateway:delete-registered-model",
   gatewayUpdateModelConfig: "gateway:update-model-config",
   gatewayPreloadModel: "gateway:preload-model",
   gatewayEvictModel: "gateway:evict-model",

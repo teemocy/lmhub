@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1258,6 +1259,133 @@ describe("gateway stage 2 runtime", () => {
     );
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("deletes a registered model while keeping its artifact on disk when requested", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+    const artifactPath = fixture.artifactPaths[fixtureModelArtifact.id];
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const deleteResponse = await gateway.controlApp.inject({
+      method: "DELETE",
+      url: `/control/models/${encodeURIComponent(fixtureModelArtifact.id)}`,
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        deleteFiles: false,
+      },
+    });
+
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json()).toMatchObject({
+      accepted: true,
+      id: fixtureModelArtifact.id,
+      deletedFiles: false,
+      deletedPaths: [],
+    });
+
+    const desktopModels = await fixture.runtime.listDesktopModels();
+    expect(desktopModels.map((model) => model.id)).not.toContain(fixtureModelArtifact.id);
+    expect(existsSync(artifactPath)).toBe(true);
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("deletes a registered model and removes related files when requested", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+    const artifactPath = path.join(fixture.appPaths.modelsDir, "delete-me.gguf");
+    const mmprojPath = path.join(fixture.appPaths.modelsDir, "mmproj-delete-me.gguf");
+
+    await writeSampleGgufFile(artifactPath);
+    await writeSampleGgufFile(mmprojPath);
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const registerResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/models/register-local",
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        filePath: artifactPath,
+        displayName: "Delete Me",
+      },
+    });
+
+    expect(registerResponse.statusCode).toBe(201);
+    const registeredModelId = registerResponse.json().model.id as string;
+
+    const deleteResponse = await gateway.controlApp.inject({
+      method: "DELETE",
+      url: `/control/models/${encodeURIComponent(registeredModelId)}`,
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        deleteFiles: true,
+      },
+    });
+
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json()).toMatchObject({
+      accepted: true,
+      id: registeredModelId,
+      deletedFiles: true,
+      deletedPaths: expect.arrayContaining([artifactPath, mmprojPath]),
+    });
+
+    const desktopModels = await fixture.runtime.listDesktopModels();
+    expect(desktopModels.map((model) => model.id)).not.toContain(registeredModelId);
+    expect(existsSync(artifactPath)).toBe(false);
+    expect(existsSync(mmprojPath)).toBe(false);
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("auto-cleans missing model registrations on startup", async () => {
+    const fixture = await createStage2Fixture();
+    const supportRoot = fixture.appPaths.supportRoot;
+    const missingArtifactPath = fixture.artifactPaths[fixtureModelArtifact.id];
+
+    await rm(missingArtifactPath, { force: true });
+    await fixture.runtime.stop();
+
+    const restartedRuntime = createRepositoryGatewayRuntime({
+      cwd: process.cwd(),
+      defaultModelTtlMs: 1_000,
+      env: {
+        ...process.env,
+        LOCAL_LLM_HUB_ENV: "test",
+      },
+      fakeWorkerStartupDelayMs: 25,
+      preferFakeWorker: true,
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      telemetryIntervalMs: 50,
+    });
+    await restartedRuntime.start();
+
+    fixture.runtime = restartedRuntime;
+    fixture.cleanup = async () => {
+      await restartedRuntime.stop();
+      await rm(supportRoot, { recursive: true, force: true });
+    };
+
+    const desktopModels = await restartedRuntime.listDesktopModels();
+    expect(desktopModels.map((model) => model.id)).not.toContain(fixtureModelArtifact.id);
+    expect(desktopModels.map((model) => model.id)).toEqual(
+      expect.arrayContaining([embeddingsModelArtifact.id, rerankModelArtifact.id]),
+    );
   });
 
   it.runIf(supportsMlxTests)(

@@ -344,6 +344,11 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayRegisterLocalModel, (_event, payload) =>
     gatewayManager.registerLocalModel(payload),
   );
+  ipcMain.handle(
+    IPC_CHANNELS.gatewayDeleteRegisteredModel,
+    (_event, modelId: string, payload?: { deleteFiles?: boolean }) =>
+      gatewayManager.deleteRegisteredModel(modelId, payload),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayUpdateModelConfig, (_event, modelId: string, payload) =>
     gatewayManager.updateModelConfig(modelId, payload),
   );

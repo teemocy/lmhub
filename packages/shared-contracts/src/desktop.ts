@@ -160,6 +160,17 @@ export const desktopLocalModelImportResponseSchema = z.object({
   model: desktopModelRecordSchema,
 });
 
+export const desktopModelDeleteRequestSchema = z.object({
+  deleteFiles: z.boolean().optional(),
+});
+
+export const desktopModelDeleteResponseSchema = z.object({
+  accepted: z.boolean(),
+  id: nonEmptyStringSchema,
+  deletedFiles: z.boolean(),
+  deletedPaths: z.array(fileSystemPathSchema).default([]),
+});
+
 export const desktopModelConfigUpdateRequestSchema = z.object({
   displayName: nonEmptyStringSchema.max(120).optional(),
   pinned: z.boolean().optional(),
@@ -475,6 +486,8 @@ export type DesktopModelRecord = z.infer<typeof desktopModelRecordSchema>;
 export type DesktopModelLibrary = z.infer<typeof desktopModelLibrarySchema>;
 export type DesktopLocalModelImportRequest = z.infer<typeof desktopLocalModelImportRequestSchema>;
 export type DesktopLocalModelImportResponse = z.infer<typeof desktopLocalModelImportResponseSchema>;
+export type DesktopModelDeleteRequest = z.infer<typeof desktopModelDeleteRequestSchema>;
+export type DesktopModelDeleteResponse = z.infer<typeof desktopModelDeleteResponseSchema>;
 export type DesktopModelConfigUpdateRequest = z.infer<typeof desktopModelConfigUpdateRequestSchema>;
 export type DesktopModelConfigUpdateResponse = z.infer<
   typeof desktopModelConfigUpdateResponseSchema

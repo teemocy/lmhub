@@ -134,4 +134,9 @@ export class ModelsRepository {
       )
       .run(loadedAt, id);
   }
+
+  delete(id: string): boolean {
+    const result = this.#database.prepare("DELETE FROM models WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
 }

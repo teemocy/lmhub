@@ -182,6 +182,24 @@ describe("db foundation", () => {
     expect(chat.listMessages(fixtureChatSession.id)).toHaveLength(0);
   });
 
+  it("deletes model registrations and applies foreign-key cleanup", () => {
+    const testDatabase = createTestDatabase();
+    cleanup = testDatabase.cleanup;
+
+    const models = new ModelsRepository(testDatabase.database);
+    const downloads = new DownloadTasksRepository(testDatabase.database);
+    const promptCaches = new PromptCachesRepository(testDatabase.database);
+
+    models.save(fixtureModelArtifact, fixtureModelProfile);
+    downloads.upsert(fixtureDownloadTask);
+    promptCaches.upsert(fixturePromptCacheRecord, { source: "test" });
+
+    expect(models.delete(fixtureModelArtifact.id)).toBe(true);
+    expect(models.findById(fixtureModelArtifact.id)).toBeUndefined();
+    expect(downloads.findById(fixtureDownloadTask.id)?.modelId).toBeUndefined();
+    expect(promptCaches.listByModelId(fixtureModelArtifact.id)).toEqual([]);
+  });
+
   it("maps request traces into persisted api logs", () => {
     const testDatabase = createTestDatabase();
     cleanup = testDatabase.cleanup;

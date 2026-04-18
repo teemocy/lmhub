@@ -4,6 +4,7 @@ import type {
   DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelDeleteResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
@@ -290,6 +291,15 @@ export function App() {
     requestRefresh();
   };
 
+  const deleteRegisteredModel = async (
+    modelId: string,
+    options?: { deleteFiles?: boolean },
+  ): Promise<DesktopModelDeleteResponse> => {
+    const result = await window.desktopApi.gateway.deleteRegisteredModel(modelId, options);
+    requestRefresh();
+    return result;
+  };
+
   const evictModel = async (modelId: string): Promise<void> => {
     await window.desktopApi.gateway.evictModel(modelId);
     requestRefresh();
@@ -456,6 +466,7 @@ export function App() {
                   engines={engines}
                   models={modelLibrary}
                   runtimeContext={runtimeContext}
+                  onDeleteModel={deleteRegisteredModel}
                   onEvictModel={evictModel}
                   onPickImportFile={pickLocalModel}
                   onPickEngineBinaryFile={pickEngineBinary}

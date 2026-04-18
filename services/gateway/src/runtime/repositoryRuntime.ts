@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import type { Dirent } from "node:fs";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import type { DatabaseSync } from "node:sqlite";
@@ -51,6 +52,8 @@ import {
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
   type DesktopLocalModelImportResponse,
+  type DesktopModelDeleteRequest,
+  type DesktopModelDeleteResponse,
   type DesktopModelConfigUpdateRequest,
   type DesktopModelConfigUpdateResponse,
   type DesktopModelRecord,
@@ -75,6 +78,8 @@ import {
   desktopDownloadListSchema,
   desktopEngineInstallResponseSchema,
   desktopLocalModelImportRequestSchema,
+  desktopModelDeleteRequestSchema,
+  desktopModelDeleteResponseSchema,
   desktopModelConfigUpdateResponseSchema,
   embeddingsResponseSchema,
   gatewayEventSchema,
@@ -1078,6 +1083,18 @@ function getMissingArtifactMessage(artifact: ModelArtifact): string {
   return `Local artifact is missing from ${artifact.localPath}.`;
 }
 
+function collectRelatedArtifactPaths(artifact: ModelArtifact): string[] {
+  const relatedPaths = new Set<string>([path.resolve(artifact.localPath)]);
+  const metadata = artifact.metadata.metadata;
+  const mmprojPath = typeof metadata.mmprojPath === "string" ? metadata.mmprojPath : undefined;
+
+  if (mmprojPath) {
+    relatedPaths.add(path.resolve(mmprojPath));
+  }
+
+  return Array.from(relatedPaths);
+}
+
 function normalizeBaseUrl(healthUrl: string): string {
   return healthUrl.replace(/\/(?:healthz?|)+$/, "").replace(/\/+$/, "");
 }
@@ -1630,6 +1647,7 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
+    case "DELETE /control/models/:id":
     case "GET /control/chat/sessions":
     case "GET /control/chat/messages":
     case "POST /control/chat/sessions":
@@ -1647,6 +1665,10 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     default:
       if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(pathName)) {
         return "PUT /config/models/:id";
+      }
+
+      if (method.toUpperCase() === "DELETE" && /^\/control\/models\/.+$/.test(pathName)) {
+        return "DELETE /control/models/:id";
       }
 
       if (
@@ -1813,6 +1835,16 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       undefined,
       "system",
     );
+    const removedMissingModelIds = this.cleanupMissingModelRegistrations();
+    if (removedMissingModelIds.length > 0) {
+      this.publishLog(
+        "info",
+        `Removed ${removedMissingModelIds.length} missing model registration(s) during startup cleanup.`,
+        undefined,
+        undefined,
+        "system",
+      );
+    }
     const existingPaths = new Set(
       this.#modelsRepository.list().map((stored) => path.resolve(stored.artifact.localPath)),
     );
@@ -2571,6 +2603,56 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         activeEngine,
       ),
     };
+  }
+
+  async deleteRegisteredModel(
+    modelId: string,
+    input: DesktopModelDeleteRequest = {},
+    traceId?: string,
+  ): Promise<DesktopModelDeleteResponse> {
+    this.assertAcceptingNewWork();
+    const resolved = this.resolveModelRecord(modelId);
+    const parsedInput = desktopModelDeleteRequestSchema.parse(input);
+    const deleteFiles = parsedInput.deleteFiles ?? false;
+    const normalizedTraceId = normalizeTraceId(traceId);
+
+    if (
+      this.getActiveRequestCount(resolved.runtimeKeyString) > 0 ||
+      this.getQueuedRequestCount(resolved.runtimeKeyString) > 0
+    ) {
+      throw new GatewayRequestError(
+        "model_in_use",
+        `Model ${resolved.artifact.id} is serving active or queued requests. Wait for it to go idle before deleting it.`,
+        409,
+      );
+    }
+
+    await this.evictModel(resolved.artifact.id, normalizedTraceId);
+    const deletedPaths = deleteFiles
+      ? await this.deleteRelatedArtifactFiles(resolved.artifact)
+      : [];
+
+    const deleted = this.unregisterModelRecord(resolved);
+    if (!deleted) {
+      throw new Error(`Registered model ${resolved.artifact.id} could not be deleted.`);
+    }
+
+    this.publishLog(
+      "info",
+      deleteFiles
+        ? `Deleted model registration ${resolved.artifact.id} and removed ${deletedPaths.length} related file(s).`
+        : `Deleted model registration ${resolved.artifact.id}.`,
+      normalizedTraceId,
+      resolved.artifact.id,
+      "desktop",
+    );
+
+    return desktopModelDeleteResponseSchema.parse({
+      accepted: true,
+      id: resolved.artifact.id,
+      deletedFiles: deleteFiles,
+      deletedPaths,
+    });
   }
 
   updateModelConfig(
@@ -3435,6 +3517,56 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
 
     return toRuntimeModelRecord(stored, this.#modelSnapshots.get(stored.artifact.id));
+  }
+
+  private cleanupMissingModelRegistrations(): string[] {
+    const removedModelIds: string[] = [];
+
+    for (const stored of this.#modelsRepository.list()) {
+      if (getArtifactStatus(stored.artifact) === "available") {
+        continue;
+      }
+
+      const profile = this.getProfile(stored);
+      const runtimeKey = buildRuntimeKey(stored.artifact, profile);
+      const deleted = this.unregisterModelRecord({
+        stored,
+        artifact: stored.artifact,
+        profile,
+        capabilities: getEffectiveCapabilities(stored.artifact, profile),
+        runtimeKey,
+        runtimeKeyString: runtimeKeyToString(runtimeKey),
+      });
+      if (deleted) {
+        removedModelIds.push(stored.artifact.id);
+      }
+    }
+
+    return removedModelIds;
+  }
+
+  private unregisterModelRecord(resolved: ResolvedModelRecord): boolean {
+    this.#modelSnapshots.delete(resolved.artifact.id);
+    this.#workerFailures.delete(resolved.runtimeKeyString);
+    this.#loadPromises.delete(resolved.runtimeKeyString);
+    this.#pendingLoadReservations.delete(resolved.runtimeKeyString);
+    this.#requestQueues.delete(resolved.runtimeKeyString);
+    this.#activeRequestCounts.delete(resolved.runtimeKeyString);
+    return this.#modelsRepository.delete(resolved.artifact.id);
+  }
+
+  private async deleteRelatedArtifactFiles(artifact: ModelArtifact): Promise<string[]> {
+    const deletedPaths: string[] = [];
+
+    for (const relatedPath of collectRelatedArtifactPaths(artifact)) {
+      const existed = existsSync(relatedPath);
+      await rm(relatedPath, { force: true, recursive: true });
+      if (existed) {
+        deletedPaths.push(relatedPath);
+      }
+    }
+
+    return deletedPaths;
   }
 
   private replayModelSnapshots(): void {

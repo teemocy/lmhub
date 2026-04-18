@@ -21,6 +21,8 @@ import {
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
   type DesktopLocalModelImportResponse,
+  type DesktopModelDeleteRequest,
+  type DesktopModelDeleteResponse,
   type DesktopModelConfigUpdateRequest,
   type DesktopModelConfigUpdateResponse,
   type DesktopModelRecord,
@@ -540,6 +542,7 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
+    case "DELETE /control/models/:id":
     case "GET /control/chat/sessions":
     case "GET /control/chat/messages":
     case "POST /control/chat/sessions":
@@ -557,6 +560,10 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     default:
       if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(path)) {
         return "PUT /config/models/:id";
+      }
+
+      if (method.toUpperCase() === "DELETE" && /^\/control\/models\/.+$/.test(path)) {
+        return "DELETE /control/models/:id";
       }
 
       if (method.toUpperCase() === "DELETE" && /^\/control\/chat\/sessions\/[^/]+$/.test(path)) {
@@ -1389,6 +1396,29 @@ export class MockGatewayRuntime {
     return {
       created,
       model: this.getDesktopModelRecord(modelId),
+    };
+  }
+
+  deleteRegisteredModel(
+    modelId: string,
+    _input: DesktopModelDeleteRequest = {},
+    traceId?: string,
+  ): DesktopModelDeleteResponse {
+    const resolvedModelId = this.resolveModelId(modelId);
+    const deleteFiles = _input.deleteFiles ?? false;
+    if (!resolvedModelId) {
+      throw new Error(`Unknown model: ${modelId}`);
+    }
+
+    this.#models.delete(resolvedModelId);
+    this.#modelDetails.delete(resolvedModelId);
+    this.publishLog("info", `Deleted mock model registration ${resolvedModelId}`, traceId);
+
+    return {
+      accepted: true,
+      id: resolvedModelId,
+      deletedFiles: deleteFiles,
+      deletedPaths: [],
     };
   }
 

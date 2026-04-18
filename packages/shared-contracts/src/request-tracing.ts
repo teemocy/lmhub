@@ -20,6 +20,7 @@ export const requestRouteSchema = z.enum([
   "POST /control/models/preload",
   "POST /control/models/evict",
   "POST /control/models/register-local",
+  "DELETE /control/models/:id",
   "GET /control/chat/sessions",
   "GET /control/chat/messages",
   "POST /control/chat/sessions",
