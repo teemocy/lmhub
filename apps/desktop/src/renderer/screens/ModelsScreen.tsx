@@ -158,6 +158,36 @@ const formatParameterCount = (value?: number): string => {
   return value.toLocaleString();
 };
 
+const formatParameterCountDetail = (value?: number): string => {
+  if (value === undefined) {
+    return "Unknown";
+  }
+
+  const compact = formatParameterCount(value);
+  const exact = value.toLocaleString();
+  return compact === exact ? exact : `${compact} (${exact})`;
+};
+
+const formatContextLengthDetail = (value?: number): string =>
+  value !== undefined ? `${value.toLocaleString()} tokens` : "Unknown";
+
+const formatTextValue = (value?: string): string =>
+  value && value.trim().length > 0 ? value : "Unknown";
+
+const formatLabel = (value: string): string =>
+  humanize(value).replace(/\b\w/g, (character) => character.toUpperCase());
+
+const formatEngineType = (value: DesktopModelRecord["engineType"]): string => {
+  switch (value) {
+    case "mlx":
+      return "MLX";
+    case "llama.cpp":
+      return "llama.cpp";
+    default:
+      return "Unknown";
+  }
+};
+
 const formatModelCardSummary = (model: DesktopModelRecord): string => {
   const architecture = model.architecture ? humanize(model.architecture) : "Unknown";
   const parameters = formatParameterCount(model.parameterCount);
@@ -170,7 +200,7 @@ const formatModelCardSummary = (model: DesktopModelRecord): string => {
 };
 
 const modelMetadataHint =
-  "For exact parameter count and tokenizer details, include a companion model metadata file or manifest with explicit values. Lightweight local detection can be incomplete or wrong for those fields.";
+  "GGUF metadata comes from the model header. MLX metadata is derived from bundled sidecars like config.json, generation_config.json, tokenizer_config.json, tokenizer.json, and quant_strategy.json when available. Parameter counts may still be estimated when a repository does not publish an explicit total.";
 
 const getStateToneClass = (state: DesktopModelRecord["state"]): string => {
   switch (state) {
@@ -501,8 +531,9 @@ export function ModelsScreen({
     setDetailModelId(null);
   };
 
-  const openModelConfigPanel = (modelId: string) => {
+  const openModelConfigPanel = (modelId: string, tab: ModelDetailTab = "details") => {
     onSelectModel(modelId);
+    setDetailTab(tab);
     setIsConfigModalOpen(true);
     setIsDetailModalOpen(false);
     setDetailModelId(null);
@@ -809,9 +840,7 @@ export function ModelsScreen({
       setFeedback({
         tone: "error",
         text:
-          error instanceof Error
-            ? error.message
-            : `Unable to delete ${selectedModel.displayName}.`,
+          error instanceof Error ? error.message : `Unable to delete ${selectedModel.displayName}.`,
       });
     } finally {
       setPendingActionModelId(null);
@@ -865,9 +894,7 @@ export function ModelsScreen({
                 ? { parallelSlots: Number.parseInt(configDraft.parallelSlots, 10) }
                 : {}),
               flashAttentionType: configDraft.flashAttentionType,
-              ...(configDraft.poolingMethod
-                ? { poolingMethod: configDraft.poolingMethod }
-                : {}),
+              ...(configDraft.poolingMethod ? { poolingMethod: configDraft.poolingMethod } : {}),
             }
           : {}),
       });
@@ -996,11 +1023,11 @@ export function ModelsScreen({
                           className="secondary-button model-card-config-button"
                           onClick={(event) => {
                             event.stopPropagation();
-                            openModelConfigPanel(model.id);
+                            openModelConfigPanel(model.id, "details");
                           }}
                           type="button"
                         >
-                          Config
+                          Details
                         </button>
                       </div>
                     </div>
@@ -1027,7 +1054,7 @@ export function ModelsScreen({
           >
             <div className="modal-shell-header">
               <div>
-                <span className="section-label">Model config</span>
+                <span className="section-label">Model details</span>
                 <h3 id="model-config-modal-title">{selectedModel.displayName}</h3>
                 <p>{formatModelCardSummary(selectedModel)}</p>
               </div>
@@ -1055,400 +1082,596 @@ export function ModelsScreen({
               </div>
             </div>
 
-            <div className="modal-panel" role="tabpanel">
-              <div className="advanced-config-card modal-section-card alias-config-card">
-                <div className="panel-header alias-panel-header">
-                  <div className="alias-header-copy">
-                    <span className="section-label">Alias name</span>
-                    <div className="alias-inline-row">
-                      <h3>Rename this model</h3>
-                      <input
-                        aria-label="Alias name"
-                        className="text-input alias-inline-input"
-                        disabled={!connected || pendingActionModelId !== null}
-                        onChange={(event) => setAliasDraft(event.target.value)}
-                        type="text"
-                        value={aliasDraft}
-                      />
-                      <button
-                        className="secondary-button alias-inline-save"
-                        disabled={
-                          !connected ||
-                          pendingActionModelId !== null ||
-                          aliasDraft.trim().length === 0 ||
-                          aliasDraft.trim() === selectedModel.displayName.trim()
+            <div aria-label="Model details sections" className="modal-tabbar" role="tablist">
+              <button
+                aria-selected={detailTab === "details"}
+                className={detailTab === "details" ? "modal-tab modal-tab-active" : "modal-tab"}
+                id="model-tab-details"
+                onClick={() => setDetailTab("details")}
+                role="tab"
+                type="button"
+              >
+                Details
+              </button>
+              <button
+                aria-selected={detailTab === "config"}
+                className={detailTab === "config" ? "modal-tab modal-tab-active" : "modal-tab"}
+                id="model-tab-config"
+                onClick={() => setDetailTab("config")}
+                role="tab"
+                type="button"
+              >
+                Config
+              </button>
+            </div>
+
+            <div
+              aria-labelledby={detailTab === "details" ? "model-tab-details" : "model-tab-config"}
+              className="modal-panel"
+              role="tabpanel"
+            >
+              {detailTab === "details" ? (
+                <>
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Model metadata</span>
+                        <h3>Detected artifact details</h3>
+                      </div>
+                      <div className="detail-status-row">
+                        <span
+                          className={`status-pill ${getArtifactToneClass(selectedModel.artifactStatus)}`}
+                        >
+                          {formatLabel(selectedModel.artifactStatus)}
+                        </span>
+                        <span className={`status-pill ${getStateToneClass(selectedModel.state)}`}>
+                          {selectedModel.loaded
+                            ? "Loaded in memory"
+                            : formatLabel(selectedModel.state)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <dl className="meta-grid compact-meta-grid modal-meta-grid">
+                      <div>
+                        <dt>Original name</dt>
+                        <dd>{selectedModel.name}</dd>
+                      </div>
+                      <div>
+                        <dt>Architecture</dt>
+                        <dd>{formatTextValue(selectedModel.architecture)}</dd>
+                      </div>
+                      <div>
+                        <dt>Parameters</dt>
+                        <dd>{formatParameterCountDetail(selectedModel.parameterCount)}</dd>
+                      </div>
+                      <div>
+                        <dt>Quantization</dt>
+                        <dd>{formatTextValue(selectedModel.quantization)}</dd>
+                      </div>
+                      <div>
+                        <dt>Tokenizer</dt>
+                        <dd>{formatTextValue(selectedModel.tokenizer)}</dd>
+                      </div>
+                      <div>
+                        <dt>Context length</dt>
+                        <dd>{formatContextLengthDetail(selectedModel.contextLength)}</dd>
+                      </div>
+                      <div>
+                        <dt>Runtime</dt>
+                        <dd>{formatEngineType(selectedModel.engineType)}</dd>
+                      </div>
+                      <div>
+                        <dt>Format</dt>
+                        <dd>
+                          {selectedModel.format === "mlx"
+                            ? "MLX"
+                            : selectedModel.format.toUpperCase()}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Role</dt>
+                        <dd>{formatLabel(selectedModel.role)}</dd>
+                      </div>
+                      <div>
+                        <dt>Source</dt>
+                        <dd>{formatSourceKind(selectedModel.sourceKind)}</dd>
+                      </div>
+                      <div>
+                        <dt>Artifact size</dt>
+                        <dd>{formatBytes(selectedModel.sizeBytes)}</dd>
+                      </div>
+                      <div>
+                        <dt>Warm TTL</dt>
+                        <dd>{formatTtl(selectedModel.defaultTtlMs)}</dd>
+                      </div>
+                    </dl>
+
+                    <details className="detail-meta-note">
+                      <summary>Metadata detection notes</summary>
+                      <p>{modelMetadataHint}</p>
+                    </details>
+                  </div>
+
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Storage and lifecycle</span>
+                        <h3>Runtime state and local files</h3>
+                      </div>
+                      <span
+                        className={
+                          selectedModel.loaded
+                            ? "status-pill status-pill-caution"
+                            : "status-pill status-pill-neutral"
                         }
-                        onClick={() => void saveAlias()}
+                      >
+                        {selectedModel.loaded ? "Resident in memory" : "Cold on disk"}
+                      </span>
+                    </div>
+
+                    <dl className="meta-grid compact-meta-grid modal-meta-grid">
+                      <div>
+                        <dt>Engine version</dt>
+                        <dd>{formatTextValue(selectedModel.engineVersion)}</dd>
+                      </div>
+                      <div>
+                        <dt>Engine channel</dt>
+                        <dd>
+                          {selectedModel.engineChannel
+                            ? formatLabel(selectedModel.engineChannel)
+                            : "Unknown"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Pinned</dt>
+                        <dd>{selectedModel.pinned ? "Yes" : "No"}</dd>
+                      </div>
+                      <div>
+                        <dt>Checksum (SHA-256)</dt>
+                        <dd className="meta-value-mono meta-value-wrap">
+                          {selectedModel.checksumSha256 ?? "Unavailable"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Local path</dt>
+                        <dd className="meta-value-mono meta-value-wrap">
+                          {selectedModel.localPath}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Model ID</dt>
+                        <dd className="meta-value-mono meta-value-wrap">{selectedModel.id}</dd>
+                      </div>
+                      <div>
+                        <dt>Last used</dt>
+                        <dd>
+                          {selectedModel.lastUsedAt
+                            ? formatTime(selectedModel.lastUsedAt)
+                            : "Never"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Registered</dt>
+                        <dd>{formatTime(selectedModel.createdAt)}</dd>
+                      </div>
+                      <div>
+                        <dt>Updated</dt>
+                        <dd>{formatTime(selectedModel.updatedAt)}</dd>
+                      </div>
+                    </dl>
+
+                    {selectedModel.errorMessage ? (
+                      <div className="detail-alert feedback-card-error">
+                        <strong>Latest runtime issue</strong>
+                        <p>{selectedModel.errorMessage}</p>
+                      </div>
+                    ) : null}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="advanced-config-card modal-section-card alias-config-card">
+                    <div className="panel-header alias-panel-header">
+                      <div className="alias-header-copy">
+                        <span className="section-label">Alias name</span>
+                        <div className="alias-inline-row">
+                          <h3>Rename this model</h3>
+                          <input
+                            aria-label="Alias name"
+                            className="text-input alias-inline-input"
+                            disabled={!connected || pendingActionModelId !== null}
+                            onChange={(event) => setAliasDraft(event.target.value)}
+                            type="text"
+                            value={aliasDraft}
+                          />
+                          <button
+                            className="secondary-button alias-inline-save"
+                            disabled={
+                              !connected ||
+                              pendingActionModelId !== null ||
+                              aliasDraft.trim().length === 0 ||
+                              aliasDraft.trim() === selectedModel.displayName.trim()
+                            }
+                            onClick={() => void saveAlias()}
+                            type="button"
+                          >
+                            {pendingActionModelId === selectedModel.id ? "Saving..." : "Save alias"}
+                          </button>
+                        </div>
+                      </div>
+                      <span
+                        className={
+                          selectedModel.loaded
+                            ? "status-pill status-pill-neutral"
+                            : "status-pill status-pill-positive"
+                        }
+                      >
+                        {selectedModel.loaded ? "Alias edits stay live" : "No eviction needed"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Advanced configuration</span>
+                        <h3>
+                          {selectedModelUsesLlamaRuntime
+                            ? "Safe cold-start overrides"
+                            : "Shared runtime settings"}
+                        </h3>
+                      </div>
+                      <span
+                        className={
+                          selectedModel.loaded
+                            ? "status-pill status-pill-caution"
+                            : "status-pill status-pill-neutral"
+                        }
+                      >
+                        {selectedModel.loaded ? "Evict before editing" : "Editable"}
+                      </span>
+                    </div>
+                    <p>
+                      {selectedModelUsesLlamaRuntime
+                        ? selectedModel.loaded
+                          ? "These settings persist to the model profile and apply on the next preload. Use Evict from memory above first so the runtime key stays consistent."
+                          : "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
+                        : selectedModel.loaded
+                          ? "MLX models only expose cross-engine settings in this build. Use Evict from memory above first so the runtime key stays consistent."
+                          : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
+                    </p>
+                    {selectedModelRequiresPooledRuntime ? (
+                      <p>
+                        Embedding and rerank workers need matching batch and ubatch sizes. If
+                        pooling is left unset, llama.cpp will use the model default.
+                      </p>
+                    ) : null}
+
+                    <div className="settings-grid">
+                      <label className="field-stack">
+                        <span className="section-label">Warm TTL (minutes)</span>
+                        <input
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          min="1"
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              defaultTtlMinutes: event.target.value,
+                            }))
+                          }
+                          type="number"
+                          value={configDraft.defaultTtlMinutes}
+                        />
+                      </label>
+                      {selectedModelUsesLlamaRuntime ? (
+                        <>
+                          <label className="field-stack">
+                            <span className="section-label">Context length</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  contextLength: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.contextLength}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Batch size</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="512"
+                              step="512"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  batchSize: event.target.value,
+                                  ...(selectedModelRequiresPooledRuntime
+                                    ? { ubatchSize: event.target.value }
+                                    : {}),
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.batchSize}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Ubatch size</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  ubatchSize: event.target.value,
+                                  ...(selectedModelRequiresPooledRuntime
+                                    ? { batchSize: event.target.value }
+                                    : {}),
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.ubatchSize}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">GPU layers</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  gpuLayers: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.gpuLayers}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Parallel slots</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  parallelSlots: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.parallelSlots}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Flash attention</span>
+                            <select
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  flashAttentionType: event.target.value as FlashAttentionValue,
+                                }))
+                              }
+                              value={configDraft.flashAttentionType}
+                            >
+                              <option value="auto">Auto</option>
+                              <option value="enabled">Enabled</option>
+                              <option value="disabled">Disabled</option>
+                            </select>
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Pooling method</span>
+                            <select
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  poolingMethod: event.target.value as "" | PoolingMethodValue,
+                                }))
+                              }
+                              value={configDraft.poolingMethod}
+                            >
+                              <option value="">Not set</option>
+                              <option value="none">None</option>
+                              <option value="mean">Mean</option>
+                              <option value="cls">CLS</option>
+                              <option value="last">Last</option>
+                              <option value="rank">Rank</option>
+                            </select>
+                          </label>
+                        </>
+                      ) : null}
+                    </div>
+
+                    <label className="checkbox-row">
+                      <input
+                        checked={configDraft.pinned}
+                        disabled={!canSaveConfig}
+                        onChange={(event) =>
+                          setConfigDraft((current) => ({
+                            ...current,
+                            pinned: event.target.checked,
+                          }))
+                        }
+                        type="checkbox"
+                      />
+                      <span>Pin this model in memory after the next successful preload.</span>
+                    </label>
+
+                    <div className="button-row">
+                      <button
+                        className="secondary-button"
+                        disabled={!canSaveConfig}
+                        onClick={() => void saveAdvancedConfig()}
                         type="button"
                       >
-                        {pendingActionModelId === selectedModel.id ? "Saving..." : "Save alias"}
+                        {pendingActionModelId === selectedModel.id
+                          ? "Saving..."
+                          : "Save advanced settings"}
                       </button>
                     </div>
                   </div>
-                  <span
-                    className={
-                      selectedModel.loaded
-                        ? "status-pill status-pill-neutral"
-                        : "status-pill status-pill-positive"
-                    }
-                  >
-                    {selectedModel.loaded ? "Alias edits stay live" : "No eviction needed"}
-                  </span>
-                </div>
-              </div>
 
-              <div className="advanced-config-card modal-section-card">
-                <div className="panel-header">
-                  <div>
-                    <span className="section-label">Advanced configuration</span>
-                    <h3>
-                      {selectedModelUsesLlamaRuntime
-                        ? "Safe cold-start overrides"
-                        : "Shared runtime settings"}
-                    </h3>
-                  </div>
-                  <span
-                    className={
-                      selectedModel.loaded
-                        ? "status-pill status-pill-caution"
-                        : "status-pill status-pill-neutral"
-                    }
-                  >
-                    {selectedModel.loaded ? "Evict before editing" : "Editable"}
-                  </span>
-                </div>
-                <p>
-                  {selectedModelUsesLlamaRuntime
-                    ? selectedModel.loaded
-                      ? "These settings persist to the model profile and apply on the next preload. Use Evict from memory above first so the runtime key stays consistent."
-                      : "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
-                    : selectedModel.loaded
-                      ? "MLX models only expose cross-engine settings in this build. Use Evict from memory above first so the runtime key stays consistent."
-                      : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
-                </p>
-                {selectedModelRequiresPooledRuntime ? (
-                  <p>
-                    Embedding and rerank workers need matching batch and ubatch sizes. If pooling
-                    is left unset, llama.cpp will use the model default.
-                  </p>
-                ) : null}
-
-                <div className="settings-grid">
-                  <label className="field-stack">
-                    <span className="section-label">Warm TTL (minutes)</span>
-                    <input
-                      className="text-input"
-                      disabled={!canSaveConfig}
-                      min="1"
-                      onChange={(event) =>
-                        setConfigDraft((current) => ({
-                          ...current,
-                          defaultTtlMinutes: event.target.value,
-                        }))
-                      }
-                      type="number"
-                      value={configDraft.defaultTtlMinutes}
-                    />
-                  </label>
-                  {selectedModelUsesLlamaRuntime ? (
-                    <>
-                      <label className="field-stack">
-                        <span className="section-label">Context length</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="1"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              contextLength: event.target.value,
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.contextLength}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Batch size</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="512"
-                          step="512"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              batchSize: event.target.value,
-                              ...(selectedModelRequiresPooledRuntime
-                                ? { ubatchSize: event.target.value }
-                                : {}),
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.batchSize}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Ubatch size</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="1"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              ubatchSize: event.target.value,
-                              ...(selectedModelRequiresPooledRuntime
-                                ? { batchSize: event.target.value }
-                                : {}),
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.ubatchSize}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">GPU layers</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="1"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              gpuLayers: event.target.value,
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.gpuLayers}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Parallel slots</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="1"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              parallelSlots: event.target.value,
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.parallelSlots}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Flash attention</span>
-                        <select
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              flashAttentionType: event.target.value as FlashAttentionValue,
-                            }))
-                          }
-                          value={configDraft.flashAttentionType}
-                        >
-                          <option value="auto">Auto</option>
-                          <option value="enabled">Enabled</option>
-                          <option value="disabled">Disabled</option>
-                        </select>
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Pooling method</span>
-                        <select
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              poolingMethod: event.target.value as "" | PoolingMethodValue,
-                            }))
-                          }
-                          value={configDraft.poolingMethod}
-                        >
-                          <option value="">Not set</option>
-                          <option value="none">None</option>
-                          <option value="mean">Mean</option>
-                          <option value="cls">CLS</option>
-                          <option value="last">Last</option>
-                          <option value="rank">Rank</option>
-                        </select>
-                      </label>
-                    </>
-                  ) : null}
-                </div>
-
-                <label className="checkbox-row">
-                  <input
-                    checked={configDraft.pinned}
-                    disabled={!canSaveConfig}
-                    onChange={(event) =>
-                      setConfigDraft((current) => ({ ...current, pinned: event.target.checked }))
-                    }
-                    type="checkbox"
-                  />
-                  <span>Pin this model in memory after the next successful preload.</span>
-                </label>
-
-                <div className="button-row">
-                  <button
-                    className="secondary-button"
-                    disabled={!canSaveConfig}
-                    onClick={() => void saveAdvancedConfig()}
-                    type="button"
-                  >
-                    {pendingActionModelId === selectedModel.id
-                      ? "Saving..."
-                      : "Save advanced settings"}
-                  </button>
-                </div>
-              </div>
-
-              <div className="advanced-config-card modal-section-card">
-                <div className="panel-header">
-                  <div>
-                    <span className="section-label">Capability overrides</span>
-                    <h3>Force model abilities on or off</h3>
-                  </div>
-                  <span
-                    className={
-                      hasCapabilityOverrides
-                        ? "status-pill status-pill-caution"
-                        : "status-pill status-pill-neutral"
-                    }
-                  >
-                    {hasCapabilityOverrides ? "Overrides active" : "Using defaults"}
-                  </span>
-                </div>
-                <p>
-                  Leave a capability on <strong>Auto</strong> to keep the detected default from the
-                  registered model metadata. Explicit overrides are saved to the profile and apply
-                  on the next preload.
-                </p>
-
-                <div className="capability-override-list">
-                  {capabilityDefinitions.map(({ key, label, description }) => (
-                    <div className="capability-override-row" key={key}>
-                      <div className="capability-override-copy">
-                        <strong>{label}</strong>
-                        <span>{description}</span>
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Capability overrides</span>
+                        <h3>Force model abilities on or off</h3>
                       </div>
-                      <div
-                        aria-label={`${label} capability override`}
-                        className="capability-toggle-group"
-                        role="group"
+                      <span
+                        className={
+                          hasCapabilityOverrides
+                            ? "status-pill status-pill-caution"
+                            : "status-pill status-pill-neutral"
+                        }
                       >
-                        {capabilityToggleOptions.map((option) => {
-                          const isSelected = configDraft.capabilityOverrides[key] === option.value;
-                          const optionTone =
-                            option.value === "inherit"
-                              ? "auto"
-                              : option.value === "enabled"
-                                ? "enabled"
-                                : "disabled";
+                        {hasCapabilityOverrides ? "Overrides active" : "Using defaults"}
+                      </span>
+                    </div>
+                    <p>
+                      Leave a capability on <strong>Auto</strong> to keep the detected default from
+                      the registered model metadata. Explicit overrides are saved to the profile and
+                      apply on the next preload.
+                    </p>
 
-                          return (
-                            <button
-                              aria-pressed={isSelected}
-                              className={[
-                                "capability-toggle-button",
-                                `capability-toggle-button-${optionTone}`,
-                                isSelected ? "capability-toggle-button-selected" : "",
-                              ]
-                                .filter(Boolean)
-                                .join(" ")}
-                              disabled={!canSaveConfig}
-                              key={option.value}
-                              onClick={() =>
-                                setConfigDraft((current) => ({
-                                  ...current,
-                                  capabilityOverrides: {
-                                    ...current.capabilityOverrides,
-                                    [key]: option.value,
-                                  },
-                                }))
-                              }
-                              type="button"
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
+                    <div className="capability-override-list">
+                      {capabilityDefinitions.map(({ key, label, description }) => (
+                        <div className="capability-override-row" key={key}>
+                          <div className="capability-override-copy">
+                            <strong>{label}</strong>
+                            <span>{description}</span>
+                          </div>
+                          <div
+                            aria-label={`${label} capability override`}
+                            className="capability-toggle-group"
+                            role="group"
+                          >
+                            {capabilityToggleOptions.map((option) => {
+                              const isSelected =
+                                configDraft.capabilityOverrides[key] === option.value;
+                              const optionTone =
+                                option.value === "inherit"
+                                  ? "auto"
+                                  : option.value === "enabled"
+                                    ? "enabled"
+                                    : "disabled";
+
+                              return (
+                                <button
+                                  aria-pressed={isSelected}
+                                  className={[
+                                    "capability-toggle-button",
+                                    `capability-toggle-button-${optionTone}`,
+                                    isSelected ? "capability-toggle-button-selected" : "",
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" ")}
+                                  disabled={!canSaveConfig}
+                                  key={option.value}
+                                  onClick={() =>
+                                    setConfigDraft((current) => ({
+                                      ...current,
+                                      capabilityOverrides: {
+                                        ...current.capabilityOverrides,
+                                        [key]: option.value,
+                                      },
+                                    }))
+                                  }
+                                  type="button"
+                                >
+                                  {option.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="capability-override-summary">
+                      <span className="section-label">Current overrides</span>
+                      <div className="pill-row">
+                        {hasCapabilityOverrides ? (
+                          capabilityDefinitions
+                            .filter(
+                              ({ key }) => selectedModel.capabilityOverrides[key] !== undefined,
+                            )
+                            .map(({ key, label }) => {
+                              const value = selectedModel.capabilityOverrides[key];
+                              return (
+                                <span className="meta-pill" key={key}>
+                                  {label}:{" "}
+                                  {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
+                                </span>
+                              );
+                            })
+                        ) : (
+                          <span className="meta-pill meta-pill-muted">No explicit overrides</span>
+                        )}
                       </div>
                     </div>
-                  ))}
-                </div>
-
-                <div className="capability-override-summary">
-                  <span className="section-label">Current overrides</span>
-                  <div className="pill-row">
-                    {hasCapabilityOverrides ? (
-                      capabilityDefinitions
-                        .filter(({ key }) => selectedModel.capabilityOverrides[key] !== undefined)
-                        .map(({ key, label }) => {
-                          const value = selectedModel.capabilityOverrides[key];
-                          return (
-                            <span className="meta-pill" key={key}>
-                              {label}:{" "}
-                              {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
-                            </span>
-                          );
-                        })
-                    ) : (
-                      <span className="meta-pill meta-pill-muted">No explicit overrides</span>
-                    )}
                   </div>
-                </div>
-              </div>
 
-              <div className="advanced-config-card modal-section-card">
-                <div className="panel-header">
-                  <div>
-                    <span className="section-label">Danger zone</span>
-                    <h3>Delete registration</h3>
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Danger zone</span>
+                        <h3>Delete registration</h3>
+                      </div>
+                      <span className="status-pill status-pill-negative">
+                        {selectedModel.loaded ? "Will evict first" : "Permanent change"}
+                      </span>
+                    </div>
+                    <p>
+                      Remove this model from the registered inventory. If file deletion is enabled,
+                      the gateway also removes the model artifact from disk, including any related
+                      MMProj sidecar it knows about.
+                    </p>
+                    <label className="checkbox-row">
+                      <input
+                        checked={deleteFilesOnRemove}
+                        disabled={!canDeleteModel}
+                        onChange={(event) => setDeleteFilesOnRemove(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span>
+                        Also delete related files from disk
+                        {selectedModel.artifactStatus === "missing"
+                          ? " if any remnants still exist."
+                          : "."}
+                      </span>
+                    </label>
+                    <div className="button-row">
+                      <button
+                        className="secondary-button danger-button"
+                        disabled={!canDeleteModel}
+                        onClick={() => void deleteModel()}
+                        type="button"
+                      >
+                        {pendingActionModelId === selectedModel.id
+                          ? "Deleting..."
+                          : deleteFilesOnRemove
+                            ? "Delete model and files"
+                            : "Delete model registration"}
+                      </button>
+                    </div>
                   </div>
-                  <span className="status-pill status-pill-negative">
-                    {selectedModel.loaded ? "Will evict first" : "Permanent change"}
-                  </span>
-                </div>
-                <p>
-                  Remove this model from the registered inventory. If file deletion is enabled, the
-                  gateway also removes the model artifact from disk, including any related MMProj
-                  sidecar it knows about.
-                </p>
-                <label className="checkbox-row">
-                  <input
-                    checked={deleteFilesOnRemove}
-                    disabled={!canDeleteModel}
-                    onChange={(event) => setDeleteFilesOnRemove(event.target.checked)}
-                    type="checkbox"
-                  />
-                  <span>
-                    Also delete related files from disk
-                    {selectedModel.artifactStatus === "missing"
-                      ? " if any remnants still exist."
-                      : "."}
-                  </span>
-                </label>
-                <div className="button-row">
-                  <button
-                    className="secondary-button danger-button"
-                    disabled={!canDeleteModel}
-                    onClick={() => void deleteModel()}
-                    type="button"
-                  >
-                    {pendingActionModelId === selectedModel.id
-                      ? "Deleting..."
-                      : deleteFilesOnRemove
-                        ? "Delete model and files"
-                        : "Delete model registration"}
-                  </button>
-                </div>
-              </div>
+                </>
+              )}
             </div>
           </div>
         </div>

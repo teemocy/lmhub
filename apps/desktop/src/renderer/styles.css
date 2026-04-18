@@ -1340,6 +1340,18 @@ select {
   -webkit-line-clamp: 2;
 }
 
+.modal-meta-grid dd.meta-value-wrap,
+.modal-meta-grid dd.meta-value-mono {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.modal-meta-grid dd.meta-value-mono {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 0.82rem;
+}
+
 .modal-section-card {
   margin-top: 0;
 }

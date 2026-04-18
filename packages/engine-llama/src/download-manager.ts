@@ -175,6 +175,23 @@ function hasCompletedMlxWeightShards(tasks: readonly DownloadTask[]): boolean {
   return shardTasks.length > 0 && shardTasks.every((task) => task.status === "completed");
 }
 
+function hasCompletedPrimaryBundleTask(tasks: readonly DownloadTask[]): boolean {
+  const primaryArtifactId = tasks
+    .map((task) => toTaskMetadata(task).bundlePrimaryArtifactId)
+    .find((value): value is string => typeof value === "string" && value.length > 0);
+  if (primaryArtifactId) {
+    return tasks.some((task) => {
+      const metadata = toTaskMetadata(task);
+      return metadata.artifactId === primaryArtifactId && task.status === "completed";
+    });
+  }
+
+  return tasks.some((task) => {
+    const metadata = toTaskMetadata(task);
+    return metadata.autoRegister === true && task.status === "completed";
+  });
+}
+
 function hasRequiredMlxTokenizerAssets(fileNames: Iterable<string>): boolean {
   let hasTokenizerCoreAsset = false;
   let hasVocabJson = false;
@@ -1027,7 +1044,7 @@ export class LlamaCppDownloadManager {
       if (
         !hasCompletedMlxWeightShards(bundleTasks) ||
         !hasCompletedMlxTokenizerAssets(bundleTasks) ||
-        completedTasks.length === 0
+        !hasCompletedPrimaryBundleTask(bundleTasks)
       ) {
         return undefined;
       }

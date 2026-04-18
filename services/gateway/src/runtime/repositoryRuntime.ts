@@ -760,6 +760,36 @@ function collectLocalModelCandidatesFromRoots(rootDirs: readonly string[]): Loca
   );
 }
 
+function shouldRefreshStoredMlxMetadata(stored: StoredModelRecord): boolean {
+  const isMlxRecord =
+    stored.profile?.engineType === "mlx" ||
+    stored.artifact.format === "mlx" ||
+    isMlxModelDirectoryPath(stored.artifact.localPath);
+  if (!isMlxRecord || !existsSync(stored.artifact.localPath)) {
+    return false;
+  }
+
+  const tokenizer = stored.artifact.metadata.tokenizer;
+  const tokenizerLooksLikeAssetFile =
+    typeof tokenizer === "string" &&
+    /(?:^tokenizer(?:\.|$)|\.json$|\.tiktoken$|^vocab\.json$|^merges\.txt$|^special_tokens_map\.json$)/i.test(
+      tokenizer,
+    );
+  const architectureNeedsNormalization =
+    typeof stored.artifact.architecture === "string" &&
+    /(?:For[A-Z]|Model$)/.test(stored.artifact.architecture);
+
+  return (
+    !stored.artifact.architecture ||
+    architectureNeedsNormalization ||
+    !stored.artifact.quantization ||
+    stored.artifact.metadata.contextLength === undefined ||
+    stored.artifact.metadata.parameterCount === undefined ||
+    !tokenizer ||
+    tokenizerLooksLikeAssetFile
+  );
+}
+
 function normalizeCapabilityOverrides(
   overrides: ModelProfile["capabilityOverrides"],
 ): CapabilityOverrides {
@@ -1844,6 +1874,33 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         undefined,
         "system",
       );
+    }
+    if (this.#mlxSupported) {
+      let refreshedMlxMetadataCount = 0;
+      for (const stored of this.#modelsRepository.list()) {
+        if (!shouldRefreshStoredMlxMetadata(stored)) {
+          continue;
+        }
+
+        try {
+          await this.getModelManager("mlx").registerLocalModel({
+            filePath: stored.artifact.localPath,
+          });
+          refreshedMlxMetadataCount += 1;
+        } catch {
+          // Ignore stale or unreadable MLX directories while backfilling stored metadata.
+        }
+      }
+
+      if (refreshedMlxMetadataCount > 0) {
+        this.publishLog(
+          "info",
+          `Refreshed metadata for ${refreshedMlxMetadataCount} MLX model registration(s).`,
+          undefined,
+          undefined,
+          "system",
+        );
+      }
     }
     const existingPaths = new Set(
       this.#modelsRepository.list().map((stored) => path.resolve(stored.artifact.localPath)),

@@ -794,7 +794,7 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     );
   }, 15_000);
 
-  it("registers an MLX bundle once core files complete even if config.json fails", async () => {
+  it("waits for the primary MLX config file before auto-registering a bundle", async () => {
     const supportRoot = await createSupportRoot();
     const database = createTestDatabase();
     cleanups.push(database.cleanup);
@@ -910,10 +910,10 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
       registrationPath: "4bit",
     });
 
-    await waitFor(() => registrarCalls.length === 1);
+    await waitFor(() => downloads.listDownloads()[0]?.errorFileCount === 1);
 
     const tasks = downloads.listDownloads();
-    expect(registrarCalls).toEqual([path.join(supportRoot, "models", "acme-stage3-mlx", "4bit")]);
+    expect(registrarCalls).toEqual([]);
     expect(tasks[0]?.status).toBe("error");
     expect(tasks[0]?.files.find((file) => file.artifactId === "mlx-config")?.status).toBe("error");
   }, 15_000);

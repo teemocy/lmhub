@@ -193,6 +193,14 @@ function collectCandidateModelDirectories(rootDir: string): string[] {
   return candidates.sort((left, right) => left.localeCompare(right));
 }
 
+const MAX_REASONABLE_CONTEXT_LENGTH = 10_000_000;
+const MAX_REASONABLE_PARAMETER_COUNT = 10_000_000_000_000;
+const GENERIC_TOKENIZER_CLASS_PATTERN = /^(?:AutoTokenizer|PreTrainedTokenizer(?:Fast)?)$/;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function readJsonRecord(filePath: string): Record<string, unknown> {
   try {
     return JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>;
@@ -201,76 +209,418 @@ function readJsonRecord(filePath: string): Record<string, unknown> {
   }
 }
 
-function getOptionalNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+function getOptionalNumber(
+  value: unknown,
+  options: { integer?: boolean; max?: number; min?: number } = {},
+): number | undefined {
+  const { integer = false, max, min = 0 } = options;
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim().length > 0
+        ? Number(value.trim())
+        : undefined;
+
+  if (parsed === undefined || !Number.isFinite(parsed)) {
+    return undefined;
+  }
+
+  const normalized = integer ? Math.floor(parsed) : parsed;
+  if (normalized <= min) {
+    return undefined;
+  }
+  if (max !== undefined && normalized > max) {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 function getOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function getArchitecture(config: Record<string, unknown>): string | undefined {
-  const modelType = getOptionalString(config.model_type);
-  if (modelType) {
-    return modelType;
+function getNestedRecord(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = record[key];
+  return isRecord(value) ? value : undefined;
+}
+
+function normalizeArchitectureLabel(value: string): string {
+  return value
+    .replace(
+      /(For(?:CausalLM|ConditionalGeneration|QuestionAnswering|SequenceClassification|TokenClassification|MaskedLM|SpeechSeq2Seq|VisionTextDualEncoder|ImageTextToText)|Model)$/u,
+      "",
+    )
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+}
+
+function getModelConfigRecords(config: Record<string, unknown>): Record<string, unknown>[] {
+  const records = [config];
+  const textConfig = getNestedRecord(config, "text_config");
+  if (textConfig) {
+    records.push(textConfig);
   }
 
-  const architectures = config.architectures;
-  if (Array.isArray(architectures)) {
-    return architectures.find(
-      (value): value is string => typeof value === "string" && value.length > 0,
-    );
+  return records;
+}
+
+function pickFirstInteger(
+  records: readonly Record<string, unknown>[],
+  keys: readonly string[],
+  max: number,
+): number | undefined {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = getOptionalNumber(record[key], { integer: true, max });
+      if (value !== undefined) {
+        return value;
+      }
+    }
   }
 
   return undefined;
 }
 
-function getContextLength(config: Record<string, unknown>): number | undefined {
-  return (
-    getOptionalNumber(config.max_position_embeddings) ??
-    getOptionalNumber(config.max_sequence_length) ??
-    getOptionalNumber(config.max_seq_len) ??
-    getOptionalNumber(config.n_ctx) ??
-    getOptionalNumber(
-      config.text_config &&
-        typeof config.text_config === "object" &&
-        !Array.isArray(config.text_config)
-        ? (config.text_config as Record<string, unknown>).max_position_embeddings
-        : undefined,
-    )
+function getArchitecture(config: Record<string, unknown>): string | undefined {
+  for (const record of getModelConfigRecords(config)) {
+    const modelType = getOptionalString(record.model_type);
+    if (modelType) {
+      return normalizeArchitectureLabel(modelType);
+    }
+  }
+
+  for (const record of getModelConfigRecords(config)) {
+    const architectures = record.architectures;
+    if (Array.isArray(architectures)) {
+      const architecture = architectures.find(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      );
+      if (architecture) {
+        return normalizeArchitectureLabel(architecture);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function getContextLength(
+  config: Record<string, unknown>,
+  generationConfig: Record<string, unknown>,
+  tokenizerConfig: Record<string, unknown>,
+): number | undefined {
+  const records = [
+    ...getModelConfigRecords(config),
+    generationConfig,
+    tokenizerConfig,
+  ].filter((record) => Object.keys(record).length > 0);
+  const directValue = pickFirstInteger(
+    records,
+    [
+      "max_position_embeddings",
+      "max_sequence_length",
+      "max_seq_len",
+      "n_ctx",
+      "seq_length",
+      "sequence_length",
+      "model_max_length",
+      "max_length",
+    ],
+    MAX_REASONABLE_CONTEXT_LENGTH,
   );
+  if (directValue !== undefined) {
+    return directValue;
+  }
+
+  for (const record of records) {
+    const ropeScaling = getNestedRecord(record, "rope_scaling");
+    if (!ropeScaling) {
+      continue;
+    }
+
+    const originalMaxPositionEmbeddings = getOptionalNumber(
+      ropeScaling.original_max_position_embeddings,
+      {
+        integer: true,
+        max: MAX_REASONABLE_CONTEXT_LENGTH,
+      },
+    );
+    if (originalMaxPositionEmbeddings !== undefined) {
+      return originalMaxPositionEmbeddings;
+    }
+  }
+
+  return undefined;
 }
 
-function getParameterCount(config: Record<string, unknown>): number | undefined {
-  return (
-    getOptionalNumber(config.num_parameters) ??
-    getOptionalNumber(config.parameter_count) ??
-    getOptionalNumber(
-      config.text_config &&
-        typeof config.text_config === "object" &&
-        !Array.isArray(config.text_config)
-        ? (config.text_config as Record<string, unknown>).num_parameters
-        : undefined,
-    )
-  );
+function roundParameterCount(value: number): number {
+  return Math.round(value / 1_000_000) * 1_000_000;
 }
 
-function getTokenizer(entries: readonly string[]): string | undefined {
-  return entries.find((entry) => isTokenizerAsset(entry));
+function getParameterCountFromName(...texts: Array<string | undefined>): number | undefined {
+  let bestMatch: number | undefined;
+
+  for (const text of texts) {
+    if (!text) {
+      continue;
+    }
+
+    for (const match of text.matchAll(/(\d+(?:\.\d+)?)\s*[xX]\s*(\d+(?:\.\d+)?)\s*B\b/g)) {
+      const value = Number(match[1]) * Number(match[2]) * 1_000_000_000;
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+      bestMatch = bestMatch === undefined ? value : Math.max(bestMatch, value);
+    }
+
+    for (const match of text.matchAll(/(\d+(?:\.\d+)?)\s*(T|B|M)\b/gi)) {
+      const scalar = Number(match[1]);
+      if (!Number.isFinite(scalar)) {
+        continue;
+      }
+
+      const unit = match[2]?.toUpperCase();
+      const multiplier =
+        unit === "T" ? 1_000_000_000_000 : unit === "B" ? 1_000_000_000 : 1_000_000;
+      const value = scalar * multiplier;
+      bestMatch = bestMatch === undefined ? value : Math.max(bestMatch, value);
+    }
+  }
+
+  return bestMatch !== undefined ? roundParameterCount(bestMatch) : undefined;
 }
 
-function getQuantization(directory: string): string | undefined {
-  const quantStrategyPath = path.join(directory, "quant_strategy.json");
-  if (!existsSync(quantStrategyPath)) {
+function inferUsesGatedMlp(architecture: string | undefined): boolean {
+  if (!architecture) {
+    return false;
+  }
+
+  return [
+    "llama",
+    "mistral",
+    "mixtral",
+    "gemma",
+    "qwen",
+    "qwen2",
+    "qwen3",
+    "phi3",
+    "deepseek",
+    "cohere",
+    "internlm",
+  ].some((prefix) => architecture.startsWith(prefix));
+}
+
+function estimateDenseTransformerParameterCount(
+  config: Record<string, unknown>,
+  architecture: string | undefined,
+): number | undefined {
+  const modelConfig = getNestedRecord(config, "text_config") ?? config;
+  const expertCount =
+    getOptionalNumber(modelConfig.num_local_experts, { integer: true }) ??
+    getOptionalNumber(modelConfig.num_experts, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_routed_experts, { integer: true });
+  if (expertCount !== undefined && expertCount > 1) {
     return undefined;
   }
 
-  const parsed = readJsonRecord(quantStrategyPath);
-  return getOptionalString(parsed.group_size)
-    ? `group-${parsed.group_size}`
-    : getOptionalString(parsed.bits)
-      ? `${parsed.bits}-bit`
-      : "quantized";
+  const hiddenSize =
+    getOptionalNumber(modelConfig.hidden_size, { integer: true }) ??
+    getOptionalNumber(modelConfig.d_model, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_embd, { integer: true });
+  const layerCount =
+    getOptionalNumber(modelConfig.num_hidden_layers, { integer: true }) ??
+    getOptionalNumber(modelConfig.num_layers, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_layer, { integer: true });
+  const vocabSize = getOptionalNumber(modelConfig.vocab_size, { integer: true });
+  const intermediateSize =
+    getOptionalNumber(modelConfig.intermediate_size, { integer: true }) ??
+    getOptionalNumber(modelConfig.ffn_hidden_size, { integer: true }) ??
+    getOptionalNumber(modelConfig.ffn_dim, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_inner, { integer: true });
+  const attentionHeadCount =
+    getOptionalNumber(modelConfig.num_attention_heads, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_head, { integer: true });
+
+  if (
+    hiddenSize === undefined ||
+    layerCount === undefined ||
+    vocabSize === undefined ||
+    intermediateSize === undefined ||
+    attentionHeadCount === undefined
+  ) {
+    return undefined;
+  }
+
+  const keyValueHeadCount =
+    getOptionalNumber(modelConfig.num_key_value_heads, { integer: true }) ??
+    getOptionalNumber(modelConfig.num_kv_heads, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_head_kv, { integer: true }) ??
+    attentionHeadCount;
+  const headDimension =
+    getOptionalNumber(modelConfig.head_dim, { integer: true }) ??
+    (hiddenSize % attentionHeadCount === 0 ? hiddenSize / attentionHeadCount : undefined);
+  if (headDimension === undefined) {
+    return undefined;
+  }
+
+  const queryProjection = hiddenSize * hiddenSize;
+  const keyValueProjectionWidth = headDimension * keyValueHeadCount;
+  const keyProjection = hiddenSize * keyValueProjectionWidth;
+  const valueProjection = hiddenSize * keyValueProjectionWidth;
+  const outputProjection = hiddenSize * hiddenSize;
+  const attentionParameters =
+    queryProjection + keyProjection + valueProjection + outputProjection;
+  const mlpProjectionCount = inferUsesGatedMlp(architecture) ? 3 : 2;
+  const mlpParameters = hiddenSize * intermediateSize * mlpProjectionCount;
+  const layerNormParameters = hiddenSize * 2;
+  const tieWordEmbeddings = modelConfig.tie_word_embeddings === true;
+
+  let embeddingParameters = vocabSize * hiddenSize * (tieWordEmbeddings ? 1 : 2);
+  if (architecture && /^(?:gpt2|gptj|bert|roberta|distilbert)/.test(architecture)) {
+    const positionEmbeddingCount = getOptionalNumber(modelConfig.max_position_embeddings, {
+      integer: true,
+      max: MAX_REASONABLE_CONTEXT_LENGTH,
+    });
+    if (positionEmbeddingCount !== undefined) {
+      embeddingParameters += positionEmbeddingCount * hiddenSize;
+    }
+  }
+
+  const total =
+    layerCount * (attentionParameters + mlpParameters + layerNormParameters) +
+    embeddingParameters +
+    hiddenSize;
+  if (!Number.isFinite(total) || total <= 0 || total > MAX_REASONABLE_PARAMETER_COUNT) {
+    return undefined;
+  }
+
+  return roundParameterCount(total);
+}
+
+function getParameterCount(
+  config: Record<string, unknown>,
+  directory: string,
+  displayName: string,
+  architecture: string | undefined,
+): number | undefined {
+  const explicitValue = pickFirstInteger(
+    getModelConfigRecords(config),
+    ["num_parameters", "parameter_count", "num_params"],
+    MAX_REASONABLE_PARAMETER_COUNT,
+  );
+  if (explicitValue !== undefined) {
+    return explicitValue;
+  }
+
+  const nameBasedValue = getParameterCountFromName(
+    displayName,
+    getOptionalString(config._name_or_path),
+    getOptionalString(config.name),
+    path.basename(directory),
+  );
+  if (nameBasedValue !== undefined) {
+    return nameBasedValue;
+  }
+
+  return estimateDenseTransformerParameterCount(config, architecture);
+}
+
+function getTokenizer(directory: string, entries: readonly string[]): string | undefined {
+  const tokenizerConfig = readJsonRecord(path.join(directory, "tokenizer_config.json"));
+  const tokenizerClass = getOptionalString(tokenizerConfig.tokenizer_class);
+  if (tokenizerClass && !GENERIC_TOKENIZER_CLASS_PATTERN.test(tokenizerClass)) {
+    return tokenizerClass;
+  }
+
+  const tokenizerJson = readJsonRecord(path.join(directory, "tokenizer.json"));
+  const tokenizerModel = getNestedRecord(tokenizerJson, "model");
+  const tokenizerType = tokenizerModel ? getOptionalString(tokenizerModel.type) : undefined;
+  if (tokenizerType) {
+    return tokenizerType.toLowerCase();
+  }
+
+  if (tokenizerClass) {
+    return tokenizerClass;
+  }
+  if (entries.some((entry) => /\.tiktoken$/i.test(entry))) {
+    return "tiktoken";
+  }
+  if (entries.some((entry) => /^tokenizer\.model$/i.test(entry))) {
+    return "sentencepiece";
+  }
+
+  return undefined;
+}
+
+function getQuantizationFromName(...texts: Array<string | undefined>): string | undefined {
+  for (const text of texts) {
+    if (!text) {
+      continue;
+    }
+
+    const bitMatch = /(\d+)\s*bit\b/i.exec(text);
+    if (bitMatch?.[1]) {
+      return `${bitMatch[1]}-bit`;
+    }
+
+    const dtypeMatch = /\b(bf16|fp16|f16|fp32|f32|int4|int8)\b/i.exec(text);
+    if (dtypeMatch?.[1]) {
+      const token = dtypeMatch[1].toUpperCase();
+      if (token === "F16") {
+        return "FP16";
+      }
+      if (token === "F32") {
+        return "FP32";
+      }
+      if (token === "INT4") {
+        return "4-bit";
+      }
+      if (token === "INT8") {
+        return "8-bit";
+      }
+
+      return token;
+    }
+  }
+
+  return undefined;
+}
+
+function getQuantization(directory: string, config: Record<string, unknown>): string | undefined {
+  const quantStrategyPath = path.join(directory, "quant_strategy.json");
+  if (existsSync(quantStrategyPath)) {
+    const parsed = readJsonRecord(quantStrategyPath);
+    const bits = getOptionalNumber(parsed.bits, { integer: true });
+    const groupSize = getOptionalNumber(parsed.group_size, { integer: true });
+    if (bits !== undefined && groupSize !== undefined) {
+      return `${bits}-bit-g${groupSize}`;
+    }
+    if (bits !== undefined) {
+      return `${bits}-bit`;
+    }
+    return "quantized";
+  }
+
+  const modelConfig = getNestedRecord(config, "text_config") ?? config;
+  const torchDtype = getOptionalString(modelConfig.torch_dtype);
+  if (torchDtype) {
+    const normalizedDtype = getQuantizationFromName(torchDtype);
+    if (normalizedDtype) {
+      return normalizedDtype;
+    }
+  }
+
+  return getQuantizationFromName(
+    path.basename(directory),
+    getOptionalString(config._name_or_path),
+    getOptionalString(config.name),
+  );
 }
 
 function inspectDirectory(directory: string): InspectedMlxDirectory {
@@ -278,11 +628,17 @@ function inspectDirectory(directory: string): InspectedMlxDirectory {
   const fileEntries = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
   const shardCount = fileEntries.filter((entry) => isSafetensorShard(entry)).length;
   const config = readJsonRecord(path.join(directory, "config.json"));
+  const generationConfig = readJsonRecord(path.join(directory, "generation_config.json"));
+  const tokenizerConfig = readJsonRecord(path.join(directory, "tokenizer_config.json"));
+  const displayName =
+    getOptionalString(config._name_or_path) ??
+    getOptionalString(config.name) ??
+    humanizeDirectoryName(directory);
   const architecture = getArchitecture(config);
-  const contextLength = getContextLength(config);
-  const parameterCount = getParameterCount(config);
-  const tokenizer = getTokenizer(fileEntries);
-  const quantization = getQuantization(directory);
+  const contextLength = getContextLength(config, generationConfig, tokenizerConfig);
+  const parameterCount = getParameterCount(config, directory, displayName, architecture);
+  const tokenizer = getTokenizer(directory, fileEntries);
+  const quantization = getQuantization(directory, config);
 
   let sizeBytes = 0;
   const hash = createHash("sha256");
@@ -301,10 +657,7 @@ function inspectDirectory(directory: string): InspectedMlxDirectory {
 
   return {
     rootPath: directory,
-    displayName:
-      getOptionalString(config._name_or_path) ??
-      getOptionalString(config.name) ??
-      humanizeDirectoryName(directory),
+    displayName,
     sizeBytes,
     checksumSha256: hash.digest("hex"),
     ...(architecture ? { architecture } : {}),
