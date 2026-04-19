@@ -14,6 +14,7 @@ import {
   flashAttentionTypeSchema,
   modelFormatSchema,
   modelSourceKindSchema,
+  poolingMethodSchema,
   runtimeRoleSchema,
 } from "./models.js";
 import {
@@ -92,6 +93,7 @@ export const desktopEngineInstallRequestSchema = z.union([
     engineType: z.literal("mlx"),
     action: z.literal("install-managed-runtime"),
     versionTag: nonEmptyStringSchema.optional(),
+    forceReinstall: z.boolean().optional(),
   }),
   z.object({
     engineType: z.literal("mlx"),
@@ -130,9 +132,11 @@ export const desktopModelRecordSchema = z.object({
   parameterCount: z.number().int().nonnegative().optional(),
   tokenizer: nonEmptyStringSchema.optional(),
   batchSize: positiveIntegerSchema.optional(),
+  ubatchSize: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
   parallelSlots: positiveIntegerSchema.optional(),
   flashAttentionType: flashAttentionTypeSchema.optional(),
+  poolingMethod: poolingMethodSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
   engineVersion: nonEmptyStringSchema.optional(),
   engineChannel: desktopEngineChannelSchema.optional(),
@@ -157,15 +161,28 @@ export const desktopLocalModelImportResponseSchema = z.object({
   model: desktopModelRecordSchema,
 });
 
+export const desktopModelDeleteRequestSchema = z.object({
+  deleteFiles: z.boolean().optional(),
+});
+
+export const desktopModelDeleteResponseSchema = z.object({
+  accepted: z.boolean(),
+  id: nonEmptyStringSchema,
+  deletedFiles: z.boolean(),
+  deletedPaths: z.array(fileSystemPathSchema).default([]),
+});
+
 export const desktopModelConfigUpdateRequestSchema = z.object({
   displayName: nonEmptyStringSchema.max(120).optional(),
   pinned: z.boolean().optional(),
   defaultTtlMs: positiveIntegerSchema.optional(),
   contextLength: positiveIntegerSchema.optional(),
   batchSize: positiveIntegerSchema.optional(),
+  ubatchSize: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
   parallelSlots: positiveIntegerSchema.optional(),
   flashAttentionType: flashAttentionTypeSchema.optional(),
+  poolingMethod: poolingMethodSchema.optional(),
   capabilityOverrides: capabilityOverridesSchema.optional(),
 });
 
@@ -278,6 +295,7 @@ export const desktopProviderCatalogFileSchema = z.object({
   id: nonEmptyStringSchema,
   artifactId: nonEmptyStringSchema,
   artifactName: nonEmptyStringSchema,
+  downloadUrl: z.string().url().optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
   quantization: nonEmptyStringSchema.optional(),
   architecture: nonEmptyStringSchema.optional(),
@@ -353,6 +371,17 @@ export const desktopDownloadListSchema = z.object({
   data: z.array(desktopDownloadTaskSchema),
 });
 
+export const desktopDownloadCreateFileSchema = z.object({
+  artifactId: nonEmptyStringSchema,
+  artifactName: nonEmptyStringSchema,
+  downloadUrl: z.string().url().optional(),
+  checksumSha256: nonEmptyStringSchema.optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  auxiliary: z.boolean().default(false),
+  auxiliaryKind: nonEmptyStringSchema.optional(),
+  metadata: jsonRecordSchema.default({}),
+});
+
 export const desktopDownloadCreateRequestSchema = z.object({
   provider: z.enum(["huggingface", "modelscope"]),
   providerModelId: nonEmptyStringSchema,
@@ -365,6 +394,7 @@ export const desktopDownloadCreateRequestSchema = z.object({
   checksumSha256: nonEmptyStringSchema.optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
   metadata: jsonRecordSchema.default({}),
+  files: z.array(desktopDownloadCreateFileSchema).min(1).optional(),
 });
 
 export const desktopDownloadActionResponseSchema = z.object({
@@ -402,6 +432,16 @@ export const desktopRuntimeContextSchema = z.object({
     platform: z.enum(["darwin", "linux", "win32"]),
     arch: nonEmptyStringSchema,
   }),
+  llama: z.object({
+    supported: z.boolean(),
+    installed: z.boolean(),
+    activeVersion: nonEmptyStringSchema.optional(),
+    activeReleaseTag: nonEmptyStringSchema.optional(),
+    activeSource: z.enum(["release", "manual", "unknown"]).optional(),
+    latestReleaseTag: nonEmptyStringSchema.optional(),
+    updateAvailable: z.boolean().default(false),
+    statusMessage: z.string().optional(),
+  }),
   mlx: z.object({
     supported: z.boolean(),
     installed: z.boolean(),
@@ -410,6 +450,7 @@ export const desktopRuntimeContextSchema = z.object({
     activeMlxLmVersion: nonEmptyStringSchema.optional(),
     latestMlxVersion: nonEmptyStringSchema.optional(),
     latestMlxLmVersion: nonEmptyStringSchema.optional(),
+    latestVersionTag: nonEmptyStringSchema.optional(),
     updateAvailable: z.boolean().default(false),
     statusMessage: z.string().optional(),
   }),
@@ -457,6 +498,8 @@ export type DesktopModelRecord = z.infer<typeof desktopModelRecordSchema>;
 export type DesktopModelLibrary = z.infer<typeof desktopModelLibrarySchema>;
 export type DesktopLocalModelImportRequest = z.infer<typeof desktopLocalModelImportRequestSchema>;
 export type DesktopLocalModelImportResponse = z.infer<typeof desktopLocalModelImportResponseSchema>;
+export type DesktopModelDeleteRequest = z.infer<typeof desktopModelDeleteRequestSchema>;
+export type DesktopModelDeleteResponse = z.infer<typeof desktopModelDeleteResponseSchema>;
 export type DesktopModelConfigUpdateRequest = z.infer<typeof desktopModelConfigUpdateRequestSchema>;
 export type DesktopModelConfigUpdateResponse = z.infer<
   typeof desktopModelConfigUpdateResponseSchema
@@ -479,6 +522,7 @@ export type DesktopProviderCatalogDetailResponse = z.infer<
 export type DesktopDownloadFile = z.infer<typeof desktopDownloadFileSchema>;
 export type DesktopDownloadTask = z.infer<typeof desktopDownloadTaskSchema>;
 export type DesktopDownloadList = z.infer<typeof desktopDownloadListSchema>;
+export type DesktopDownloadCreateFile = z.infer<typeof desktopDownloadCreateFileSchema>;
 export type DesktopDownloadCreateRequest = z.infer<typeof desktopDownloadCreateRequestSchema>;
 export type DesktopDownloadActionResponse = z.infer<typeof desktopDownloadActionResponseSchema>;
 export type DesktopDownloadDeleteResponse = z.infer<typeof desktopDownloadDeleteResponseSchema>;

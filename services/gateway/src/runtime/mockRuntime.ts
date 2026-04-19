@@ -21,6 +21,8 @@ import {
   type DesktopEngineInstallRequest,
   type DesktopEngineInstallResponse,
   type DesktopLocalModelImportResponse,
+  type DesktopModelDeleteRequest,
+  type DesktopModelDeleteResponse,
   type DesktopModelConfigUpdateRequest,
   type DesktopModelConfigUpdateResponse,
   type DesktopModelRecord,
@@ -32,6 +34,8 @@ import {
   type GatewayEvent,
   type OpenAiModelCard,
   type OpenAiToolCall,
+  type RerankRequest,
+  type RerankResponse,
   chatCompletionsChunkSchema,
   gatewayEventSchema,
 } from "@localhub/shared-contracts";
@@ -39,6 +43,7 @@ import {
   chatContentHasImages,
   countChatContentTokens,
   createChatSessionTitle,
+  estimateTextTokens,
   formatChatContentSummary,
 } from "./chat-content.js";
 
@@ -102,6 +107,14 @@ const CAPABILITY_LABELS = {
   promptCache: "prompt-cache",
 } as const;
 type CapabilityOverrideMap = NonNullable<DesktopModelConfigUpdateRequest["capabilityOverrides"]>;
+
+function normalizeRerankDocumentText(value: RerankRequest["documents"][number]): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return value.text;
+}
 
 interface StreamedAssistantAccumulator {
   responseId?: string;
@@ -200,22 +213,49 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
     input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
     input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
     input.capabilityOverrides !== undefined
   );
 }
 
-function validateBatchSize(batchSize: number | undefined): void {
-  if (batchSize === undefined) {
+function hasLaunchAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
+  return (
+    input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
+    input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
+    input.capabilityOverrides !== undefined
+  );
+}
+
+function validateBatchSettings(batchSize: number, ubatchSize: number): void {
+  if (batchSize % ubatchSize !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ubatch size (${ubatchSize}).`,
+      400,
+    );
+  }
+}
+
+function validateEmbeddingRoleConfig(model: DesktopModelRecord): void {
+  if (model.role !== "embeddings" && model.role !== "rerank") {
     return;
   }
 
-  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+  const batchSize = model.batchSize ?? DEFAULT_UBATCH_SIZE;
+  const ubatchSize = model.ubatchSize ?? DEFAULT_UBATCH_SIZE;
+  if (batchSize !== ubatchSize) {
     throw new GatewayRequestError(
-      "invalid_batch_size",
-      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      "invalid_ubatch_size",
+      "Embedding and rerank models must use the same ubatch size as batch size.",
       400,
     );
   }
@@ -498,9 +538,11 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     case "GET /control/models":
     case "POST /v1/chat/completions":
     case "POST /v1/embeddings":
+    case "POST /v1/rerank":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
+    case "DELETE /control/models/:id":
     case "GET /control/chat/sessions":
     case "GET /control/chat/messages":
     case "POST /control/chat/sessions":
@@ -518,6 +560,10 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     default:
       if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(path)) {
         return "PUT /config/models/:id";
+      }
+
+      if (method.toUpperCase() === "DELETE" && /^\/control\/models\/.+$/.test(path)) {
+        return "DELETE /control/models/:id";
       }
 
       if (method.toUpperCase() === "DELETE" && /^\/control\/chat\/sessions\/[^/]+$/.test(path)) {
@@ -1049,27 +1095,44 @@ export class MockGatewayRuntime {
     _traceId?: string,
   ): DesktopDownloadActionResponse {
     const groupId = input.taskGroupId ?? `download-${Date.now()}`;
-    const fileId = `download-file-${Date.now()}`;
-    const nextFile = {
-      id: fileId,
-      artifactId: input.artifactId,
-      artifactName: input.artifactName,
+    const now = new Date().toISOString();
+    const fallbackMetadata =
+      input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+        ? input.metadata
+        : {};
+    const requestedFiles =
+      input.files && input.files.length > 0
+        ? input.files
+        : [
+            {
+              artifactId: input.artifactId,
+              artifactName: input.artifactName,
+              ...(input.sizeBytes !== undefined ? { sizeBytes: input.sizeBytes } : {}),
+              auxiliary: fallbackMetadata.auxiliary === true,
+              ...(typeof fallbackMetadata.auxiliaryKind === "string"
+                ? { auxiliaryKind: fallbackMetadata.auxiliaryKind }
+                : {}),
+              metadata: fallbackMetadata,
+            },
+          ];
+    const nextFiles = requestedFiles.map((file, index) => ({
+      id: `download-file-${Date.now()}-${index}`,
+      artifactId: file.artifactId,
+      artifactName: file.artifactName,
       status: "pending" as const,
       progress: 0,
       downloadedBytes: 0,
-      ...(input.sizeBytes !== undefined ? { totalBytes: input.sizeBytes } : {}),
+      ...(file.sizeBytes !== undefined ? { totalBytes: file.sizeBytes } : {}),
       ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
-      updatedAt: new Date().toISOString(),
-      auxiliary: input.metadata?.auxiliary === true,
-      ...(typeof input.metadata?.auxiliaryKind === "string"
-        ? { auxiliaryKind: input.metadata.auxiliaryKind }
-        : {}),
+      updatedAt: now,
+      auxiliary: file.auxiliary,
+      ...(typeof file.auxiliaryKind === "string" ? { auxiliaryKind: file.auxiliaryKind } : {}),
       metadata: {},
-    };
+    }));
 
     const existingTask = this.#downloads.find((entry) => entry.id === groupId);
     if (existingTask) {
-      existingTask.files = [...existingTask.files, nextFile];
+      existingTask.files = [...existingTask.files, ...nextFiles];
       existingTask.fileCount = existingTask.files.length;
       existingTask.completedFileCount = existingTask.files.filter(
         (file) => file.status === "completed",
@@ -1084,7 +1147,7 @@ export class MockGatewayRuntime {
       existingTask.totalBytes = existingTask.files.every((file) => file.totalBytes !== undefined)
         ? existingTask.files.reduce((total, file) => total + (file.totalBytes ?? 0), 0)
         : undefined;
-      existingTask.updatedAt = nextFile.updatedAt;
+      existingTask.updatedAt = now;
       return {
         accepted: true,
         task: structuredClone(existingTask),
@@ -1096,17 +1159,19 @@ export class MockGatewayRuntime {
       provider: input.provider,
       providerModelId: input.providerModelId,
       title: input.title,
-      artifactName: input.artifactName,
+      artifactName: nextFiles[0]?.artifactName ?? input.artifactName,
       status: "pending" as const,
       progress: 0,
       downloadedBytes: 0,
-      ...(input.sizeBytes !== undefined ? { totalBytes: input.sizeBytes } : {}),
-      fileCount: 1,
+      ...(nextFiles.length > 0 && nextFiles.every((file) => file.totalBytes !== undefined)
+        ? { totalBytes: nextFiles.reduce((total, file) => total + (file.totalBytes ?? 0), 0) }
+        : {}),
+      fileCount: nextFiles.length,
       completedFileCount: 0,
       errorFileCount: 0,
       ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
-      updatedAt: nextFile.updatedAt,
-      files: [nextFile],
+      updatedAt: now,
+      files: nextFiles,
     };
 
     this.#downloads.unshift(task);
@@ -1142,16 +1207,25 @@ export class MockGatewayRuntime {
     }
 
     task.status = "downloading";
+    task.errorMessage = undefined;
     task.updatedAt = new Date().toISOString();
-    task.files = task.files.map((file) => ({
-      ...file,
-      status: file.status === "completed" ? "completed" : "downloading",
-      updatedAt: task.updatedAt,
-    }));
+    task.files = task.files.map((file) => {
+      const nextFile = { ...file };
+      nextFile.errorMessage = undefined;
+      return {
+        ...nextFile,
+        status: file.status === "completed" ? "completed" : "downloading",
+        updatedAt: task.updatedAt,
+      };
+    });
     return {
       accepted: true,
       task: structuredClone(task),
     };
+  }
+
+  retryDownload(id: string, traceId?: string): DesktopDownloadActionResponse {
+    return this.resumeDownload(id, traceId);
   }
 
   deleteDownload(
@@ -1325,6 +1399,29 @@ export class MockGatewayRuntime {
     };
   }
 
+  deleteRegisteredModel(
+    modelId: string,
+    _input: DesktopModelDeleteRequest = {},
+    traceId?: string,
+  ): DesktopModelDeleteResponse {
+    const resolvedModelId = this.resolveModelId(modelId);
+    const deleteFiles = _input.deleteFiles ?? false;
+    if (!resolvedModelId) {
+      throw new Error(`Unknown model: ${modelId}`);
+    }
+
+    this.#models.delete(resolvedModelId);
+    this.#modelDetails.delete(resolvedModelId);
+    this.publishLog("info", `Deleted mock model registration ${resolvedModelId}`, traceId);
+
+    return {
+      accepted: true,
+      id: resolvedModelId,
+      deletedFiles: deleteFiles,
+      deletedPaths: [],
+    };
+  }
+
   updateModelConfig(
     modelId: string,
     input: DesktopModelConfigUpdateRequest,
@@ -1334,8 +1431,6 @@ export class MockGatewayRuntime {
     if (!resolvedModelId) {
       throw new Error(`Unknown model: ${modelId}`);
     }
-
-    validateBatchSize(input.batchSize);
 
     const current = this.getDesktopModelRecord(resolvedModelId);
     if (current.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
@@ -1353,11 +1448,13 @@ export class MockGatewayRuntime {
       ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
       ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
       ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
+      ...(input.ubatchSize !== undefined ? { ubatchSize: input.ubatchSize } : {}),
       ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
       ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
       ...(input.flashAttentionType !== undefined
         ? { flashAttentionType: input.flashAttentionType }
         : {}),
+      ...(input.poolingMethod !== undefined ? { poolingMethod: input.poolingMethod } : {}),
       ...(input.capabilityOverrides !== undefined
         ? {
             capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides),
@@ -1374,6 +1471,20 @@ export class MockGatewayRuntime {
     updated.role = getModelRole(
       createModel(resolvedModelId, Math.floor(Date.now() / 1000), updated.capabilities),
     );
+    if (
+      (updated.role === "embeddings" || updated.role === "rerank") &&
+      input.batchSize === undefined &&
+      input.ubatchSize === undefined
+    ) {
+      updated.batchSize = updated.ubatchSize ?? DEFAULT_UBATCH_SIZE;
+    }
+    validateBatchSettings(
+      updated.batchSize ?? DEFAULT_BATCH_SIZE,
+      updated.ubatchSize ?? DEFAULT_UBATCH_SIZE,
+    );
+    if (hasLaunchAffectingModelConfigChanges(input)) {
+      validateEmbeddingRoleConfig(updated);
+    }
     this.#modelDetails.set(resolvedModelId, updated);
     const runtimeModel = this.#models.get(resolvedModelId);
     if (runtimeModel) {
@@ -1402,6 +1513,13 @@ export class MockGatewayRuntime {
         alreadyWarm: true,
       };
     }
+
+    const desktopModel = this.getDesktopModelRecord(modelId);
+    validateBatchSettings(
+      desktopModel.batchSize ?? DEFAULT_BATCH_SIZE,
+      desktopModel.ubatchSize ?? DEFAULT_UBATCH_SIZE,
+    );
+    validateEmbeddingRoleConfig(desktopModel);
 
     this.transitionModel(model, "Loading", false, traceId, "Model load requested.");
     this.publishLog("info", `Loading model ${modelId}`, traceId, modelId);
@@ -1626,6 +1744,54 @@ export class MockGatewayRuntime {
     };
   }
 
+  createRerank(input: RerankRequest, _context: GatewayExecutionContext): RerankResponse {
+    const model = this.getModel(input.model);
+    if (!model) {
+      throw new Error(`Unknown model: ${input.model}`);
+    }
+    if (!model.capabilities.includes("rerank")) {
+      throw new GatewayRequestError(
+        "unsupported_model_capability",
+        `Model ${input.model} does not support rerank requests.`,
+        409,
+      );
+    }
+
+    const queryTokens = new Set(
+      input.query
+        .toLowerCase()
+        .split(/[^a-z0-9]+/i)
+        .filter((token) => token.length >= 3),
+    );
+    const results = input.documents
+      .map((document, index) => {
+        const text = normalizeRerankDocumentText(document).toLowerCase();
+        const tokenMatches = [...queryTokens].filter((token) => text.includes(token)).length;
+        return {
+          index,
+          relevance_score: Number((tokenMatches / Math.max(queryTokens.size, 1)).toFixed(6)),
+        };
+      })
+      .sort((left, right) => right.relevance_score - left.relevance_score || left.index - right.index);
+
+    return {
+      object: "list",
+      model: input.model,
+      usage: {
+        prompt_tokens: estimateTextTokens([
+          input.query,
+          ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+        ]),
+        total_tokens: estimateTextTokens([
+          input.query,
+          ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+        ]),
+      },
+      results:
+        input.top_n !== undefined ? results.slice(0, Math.max(1, input.top_n)) : results,
+    };
+  }
+
   recordRequestTrace(payload: RequestTraceRecord): void {
     const route = mapRequestRoute(payload.method, payload.path);
     if (!route) {
@@ -1684,6 +1850,9 @@ export class MockGatewayRuntime {
           capabilities,
         }
       : createModel(modelId, Math.floor(Date.now() / 1000), capabilities);
+    const role = getModelRole(effectiveModel);
+    const pooledRuntime = role === "embeddings" || role === "rerank";
+    const ubatchSize = existing?.ubatchSize ?? DEFAULT_UBATCH_SIZE;
 
     return {
       id: modelId,
@@ -1697,7 +1866,7 @@ export class MockGatewayRuntime {
       format: "gguf",
       capabilities,
       capabilityOverrides,
-      role: getModelRole(effectiveModel),
+      role,
       tags: existing?.tags ?? ["mock"],
       localPath:
         overrides.localPath ??
@@ -1707,10 +1876,12 @@ export class MockGatewayRuntime {
       pinned: existing?.pinned ?? false,
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
       contextLength: existing?.contextLength ?? 8192,
-      batchSize: existing?.batchSize ?? DEFAULT_BATCH_SIZE,
+      batchSize: existing?.batchSize ?? (pooledRuntime ? ubatchSize : DEFAULT_BATCH_SIZE),
+      ubatchSize,
       gpuLayers: existing?.gpuLayers ?? 20,
       parallelSlots: existing?.parallelSlots,
       flashAttentionType: existing?.flashAttentionType ?? "auto",
+      poolingMethod: existing?.poolingMethod,
       quantization: existing?.quantization ?? "Q4_K_M",
       architecture: existing?.architecture ?? "llama",
       tokenizer: existing?.tokenizer ?? "gpt2",

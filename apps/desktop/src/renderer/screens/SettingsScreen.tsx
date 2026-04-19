@@ -1,4 +1,10 @@
-import type { DesktopRuntimeContext, DesktopShellState } from "@localhub/shared-contracts";
+import type {
+  DesktopEngineInstallRequest,
+  DesktopEngineInstallResponse,
+  DesktopEngineRecord,
+  DesktopRuntimeContext,
+  DesktopShellState,
+} from "@localhub/shared-contracts";
 import { useEffect, useState } from "react";
 
 type DesktopSystemPaths = {
@@ -10,12 +16,21 @@ type DesktopSystemPaths = {
 };
 
 type SettingsScreenProps = {
+  engines: DesktopEngineRecord[];
   shellState: DesktopShellState;
   paths: DesktopSystemPaths | null;
   runtimeContext: DesktopRuntimeContext | null;
+  onPickEngineBinaryFile(): Promise<string | null>;
   onPickModelsDirectory(): Promise<string | null>;
   onRestartGateway(): Promise<void>;
   onShutdownGateway(): Promise<void>;
+  onInstallEngineBinary(
+    payload: DesktopEngineInstallRequest,
+  ): Promise<DesktopEngineInstallResponse>;
+  onActivateEngineVersion(payload: {
+    engineType: "llama.cpp" | "mlx";
+    versionTag: string;
+  }): Promise<DesktopEngineInstallResponse>;
   onUpdateGatewaySettings(payload: {
     publicHost: string;
     publicPort: number;
@@ -27,18 +42,28 @@ type SettingsScreenProps = {
 
 const FIRST_RUN_KEY = "localhub.desktop.stage4.firstRunDismissed";
 
+type EngineFeedbackState = {
+  tone: "success" | "error";
+  title: string;
+  text: string;
+} | null;
+
 const isLoopbackHost = (host: string): boolean => {
   const normalized = host.trim().toLowerCase();
   return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
 };
 
 export function SettingsScreen({
+  engines,
   shellState,
   paths,
   runtimeContext,
+  onPickEngineBinaryFile,
   onPickModelsDirectory,
   onRestartGateway,
   onShutdownGateway,
+  onInstallEngineBinary,
+  onActivateEngineVersion,
   onUpdateGatewaySettings,
   onUpdateModelsDirectory,
 }: SettingsScreenProps) {
@@ -59,7 +84,32 @@ export function SettingsScreen({
   const [publicPortDraft, setPublicPortDraft] = useState("");
   const [maxActiveModelsDraft, setMaxActiveModelsDraft] = useState("");
   const [apiAuthTokenDraft, setApiAuthTokenDraft] = useState("");
+  const [pendingEngineAction, setPendingEngineAction] = useState<
+    "download" | "import" | "install-mlx" | "activate" | null
+  >(null);
+  const [engineFeedback, setEngineFeedback] = useState<EngineFeedbackState>(null);
+  const [selectedEngineVersionTag, setSelectedEngineVersionTag] = useState<string | null>(null);
   const currentMaxActiveModelsInMemory = runtimeContext?.gateway.maxActiveModelsInMemory;
+  const connected = shellState.phase === "connected";
+  const llamaSupported = runtimeContext?.llama.supported ?? false;
+  const llamaUpdateAvailable = runtimeContext?.llama.updateAvailable ?? false;
+  const llamaActiveSource = runtimeContext?.llama.activeSource;
+  const latestLlamaReleaseTag = runtimeContext?.llama.latestReleaseTag ?? null;
+  const mlxSupported = runtimeContext?.mlx.supported ?? false;
+  const mlxInstalled = runtimeContext?.mlx.installed ?? false;
+  const mlxUpdateAvailable = runtimeContext?.mlx.updateAvailable ?? false;
+  const latestMlxVersionTag = runtimeContext?.mlx.latestVersionTag;
+  const latestMlxRuntimeLabel =
+    runtimeContext?.mlx.latestMlxVersion && runtimeContext?.mlx.latestMlxLmVersion
+      ? `mlx ${runtimeContext.mlx.latestMlxVersion} / mlx-lm ${runtimeContext.mlx.latestMlxLmVersion}`
+      : null;
+  const activeEngineVersionTag =
+    engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
+  const selectedEngineVersion =
+    selectedEngineVersionTag &&
+    engines.some((engine) => engine.version === selectedEngineVersionTag)
+      ? (engines.find((engine) => engine.version === selectedEngineVersionTag) ?? null)
+      : (engines.find((engine) => engine.version === activeEngineVersionTag) ?? null);
 
   useEffect(() => {
     const dismissed = window.localStorage.getItem(FIRST_RUN_KEY) === "true";
@@ -90,6 +140,21 @@ export function SettingsScreen({
       runtimeContext?.gateway.publicAuthToken ?? runtimeContext?.desktop.controlAuthToken ?? "",
     );
   }, [runtimeContext?.desktop.controlAuthToken, runtimeContext?.gateway.publicAuthToken]);
+
+  useEffect(() => {
+    if (engines.length === 0) {
+      setSelectedEngineVersionTag(null);
+      return;
+    }
+
+    setSelectedEngineVersionTag((current) => {
+      if (current && engines.some((engine) => engine.version === current)) {
+        return current;
+      }
+
+      return engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
+    });
+  }, [engines]);
 
   const dismissOnboarding = () => {
     window.localStorage.setItem(FIRST_RUN_KEY, "true");
@@ -202,6 +267,139 @@ export function SettingsScreen({
       });
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const handleDownloadMetalBinary = async () => {
+    setEngineFeedback(null);
+    setPendingEngineAction("download");
+    const actionLabel =
+      llamaActiveSource === "release"
+        ? llamaUpdateAvailable
+          ? "Updated"
+          : "Reinstalled"
+        : "Downloaded";
+
+    try {
+      const result = await onInstallEngineBinary({
+        action: "download-latest-metal",
+      });
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: llamaUpdateAvailable ? "Runtime updated" : "Runtime ready",
+        text: `${actionLabel} llama.cpp Metal build ${result.engine.version}.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Install blocked",
+        text: error instanceof Error ? error.message : "Unable to download the Metal binary.",
+      });
+    } finally {
+      setPendingEngineAction(null);
+    }
+  };
+
+  const handleImportLocalBinary = async () => {
+    setEngineFeedback(null);
+
+    const filePath = await onPickEngineBinaryFile();
+    if (!filePath) {
+      return;
+    }
+
+    setPendingEngineAction("import");
+    try {
+      const result = await onInstallEngineBinary({
+        action: "import-local-binary",
+        filePath,
+      });
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: "Install complete",
+        text: `Packaged ${result.engine.version} into ${result.engine.binaryPath}.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Install blocked",
+        text: error instanceof Error ? error.message : "Unable to package the selected binary.",
+      });
+    } finally {
+      setPendingEngineAction(null);
+    }
+  };
+
+  const handleActivateEngineVersion = async () => {
+    if (
+      !selectedEngineVersion ||
+      (selectedEngineVersion.engineType !== "llama.cpp" &&
+        selectedEngineVersion.engineType !== "mlx")
+    ) {
+      return;
+    }
+
+    setEngineFeedback(null);
+    setPendingEngineAction("activate");
+
+    try {
+      const result = await onActivateEngineVersion({
+        engineType: selectedEngineVersion.engineType,
+        versionTag: selectedEngineVersion.version,
+      });
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: "Version activated",
+        text: `Activated ${result.engine.version}. Future launches will use that ${result.engine.engineType} runtime.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Action blocked",
+        text: error instanceof Error ? error.message : "Unable to activate the selected version.",
+      });
+    } finally {
+      setPendingEngineAction(null);
+    }
+  };
+
+  const handleInstallMlxRuntime = async () => {
+    setEngineFeedback(null);
+    setPendingEngineAction("install-mlx");
+    const actionLabel = !mlxInstalled
+      ? "Downloaded"
+      : mlxUpdateAvailable
+        ? "Updated"
+        : "Reinstalled";
+
+    try {
+      const result = await onInstallEngineBinary({
+        engineType: "mlx",
+        action: "install-managed-runtime",
+        ...(latestMlxVersionTag ? { versionTag: latestMlxVersionTag } : {}),
+        ...(mlxInstalled && !mlxUpdateAvailable ? { forceReinstall: true } : {}),
+      });
+
+      setSelectedEngineVersionTag(result.engine.version);
+      setEngineFeedback({
+        tone: "success",
+        title: mlxUpdateAvailable ? "Runtime updated" : "Runtime ready",
+        text: `${actionLabel} managed MLX runtime ${result.engine.version}.`,
+      });
+    } catch (error) {
+      setEngineFeedback({
+        tone: "error",
+        title: "Install blocked",
+        text: error instanceof Error ? error.message : "Unable to install the MLX runtime.",
+      });
+    } finally {
+      setPendingEngineAction(null);
     }
   };
 
@@ -334,6 +532,184 @@ export function SettingsScreen({
             </dd>
           </div>
         </dl>
+      </article>
+
+      <article className="wide-card">
+        <span className="section-label">Engine versions</span>
+        <h3>Resolved runtimes</h3>
+        <p>
+          The gateway records the engine version that actually served the worker so the desktop
+          detail view can show what is running across both `llama.cpp` and MLX.
+        </p>
+
+        <div className="button-row">
+          <button
+            className="primary-button"
+            disabled={!connected || !llamaSupported || pendingEngineAction !== null}
+            onClick={() => void handleDownloadMetalBinary()}
+            type="button"
+          >
+            {pendingEngineAction === "download"
+              ? llamaUpdateAvailable
+                ? "Updating..."
+                : "Downloading..."
+              : llamaActiveSource === "release"
+                ? llamaUpdateAvailable
+                  ? "Update Metal build"
+                  : "Reinstall latest Metal build"
+                : "Download latest Metal build"}
+          </button>
+          {mlxSupported ? (
+            <button
+              className="secondary-button"
+              disabled={!connected || pendingEngineAction !== null}
+              onClick={() => void handleInstallMlxRuntime()}
+              type="button"
+            >
+              {pendingEngineAction === "install-mlx"
+                ? mlxUpdateAvailable
+                  ? "Updating..."
+                  : "Downloading..."
+                : !mlxInstalled
+                  ? "Download latest MLX runtime"
+                  : mlxUpdateAvailable
+                    ? "Update MLX runtime"
+                    : "Reinstall latest MLX runtime"}
+            </button>
+          ) : null}
+          <button
+            className="secondary-button"
+            disabled={!connected || pendingEngineAction !== null}
+            onClick={() => void handleImportLocalBinary()}
+            type="button"
+          >
+            {pendingEngineAction === "import" ? "Packaging..." : "Import local binary"}
+          </button>
+        </div>
+
+        <p className="search-detail-note">
+          Downloaded Metal builds and managed MLX runtimes are copied into the app support engines
+          directory. Local binary imports are packaged the same way so the app owns the installed
+          executable. Use the picker below to switch the active version for future launches.
+        </p>
+        {mlxSupported && latestMlxRuntimeLabel ? (
+          <p className="search-detail-note">
+            Latest managed MLX runtime: {latestMlxRuntimeLabel}
+            {runtimeContext?.mlx.activeMlxVersion && runtimeContext?.mlx.activeMlxLmVersion
+              ? ` · active stack: mlx ${runtimeContext.mlx.activeMlxVersion} / mlx-lm ${runtimeContext.mlx.activeMlxLmVersion}`
+              : ""}
+            {runtimeContext?.mlx.updateAvailable ? " · update available" : ""}
+          </p>
+        ) : null}
+        {latestLlamaReleaseTag ? (
+          <p className="search-detail-note">
+            Latest llama.cpp release: {latestLlamaReleaseTag}
+            {runtimeContext?.llama.activeReleaseTag
+              ? ` · active release: ${runtimeContext.llama.activeReleaseTag}`
+              : runtimeContext?.llama.activeVersion
+                ? ` · active runtime: ${runtimeContext.llama.activeVersion}`
+                : ""}
+            {runtimeContext?.llama.activeSource === "manual" ? " · active source: imported binary" : ""}
+            {runtimeContext?.llama.updateAvailable ? " · update available" : ""}
+          </p>
+        ) : runtimeContext?.llama.statusMessage ? (
+          <p className="search-detail-note">{runtimeContext.llama.statusMessage}</p>
+        ) : null}
+
+        {engines.length > 0 ? (
+          <>
+            <label className="field-stack">
+              <span className="section-label">Active engine version</span>
+              <select
+                className="text-input"
+                disabled={!connected || pendingEngineAction !== null}
+                onChange={(event) => setSelectedEngineVersionTag(event.target.value)}
+                value={selectedEngineVersion?.version ?? ""}
+              >
+                {engines.map((engine) => (
+                  <option key={engine.id} value={engine.version}>
+                    {engine.engineType} / {engine.version}
+                    {engine.active ? " (active)" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="button-row">
+              <button
+                className="primary-button"
+                disabled={!connected || !selectedEngineVersion || pendingEngineAction !== null}
+                onClick={() => void handleActivateEngineVersion()}
+                type="button"
+              >
+                {pendingEngineAction === "activate"
+                  ? "Activating..."
+                  : "Activate selected version"}
+              </button>
+            </div>
+
+            <p className="search-detail-note">
+              Switching versions updates the registry used for future worker launches. Existing
+              workers keep running until they are evicted or restarted.
+            </p>
+          </>
+        ) : null}
+
+        {engineFeedback ? (
+          <div
+            className={
+              engineFeedback.tone === "error"
+                ? "detail-alert feedback-card-error"
+                : "detail-alert"
+            }
+          >
+            <strong>{engineFeedback.title}</strong>
+            <p>{engineFeedback.text}</p>
+          </div>
+        ) : null}
+
+        {engines.length === 0 ? (
+          <div className="empty-panel compact-empty">
+            <strong>No engine versions recorded yet.</strong>
+            <p>The first preload or runtime install will materialize the resolved engine here.</p>
+          </div>
+        ) : (
+          <div className="engine-list">
+            {engines.map((engine) => (
+              <div
+                className={engine.active ? "engine-card engine-card-active" : "engine-card"}
+                key={engine.id}
+              >
+                <div className="model-card-head">
+                  <div>
+                    <span className="section-label">{engine.engineType}</span>
+                    <h4>{engine.version}</h4>
+                  </div>
+                  <span
+                    className={
+                      engine.active
+                        ? "status-pill status-pill-positive"
+                        : "status-pill status-pill-neutral"
+                    }
+                  >
+                    {engine.active ? "Active" : "Installed"}
+                  </span>
+                </div>
+                <p>{engine.compatibilityNotes ?? "Resolved engine binary."}</p>
+                <dl className="meta-grid compact-meta-grid">
+                  <div>
+                    <dt>Channel</dt>
+                    <dd>{engine.channel}</dd>
+                  </div>
+                  <div>
+                    <dt>Installed</dt>
+                    <dd>{engine.installed ? "Yes" : "No"}</dd>
+                  </div>
+                </dl>
+              </div>
+            ))}
+          </div>
+        )}
       </article>
 
       <article className="wide-card">

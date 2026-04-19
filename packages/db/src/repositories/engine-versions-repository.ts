@@ -103,4 +103,10 @@ export class EngineVersionsRepository {
       .run(engineType);
     this.#database.prepare("UPDATE engine_versions SET is_active = 1 WHERE id = ?").run(id);
   }
+
+  removeByEngineVersion(engineType: string, versionTag: string): void {
+    this.#database
+      .prepare("DELETE FROM engine_versions WHERE engine_type = ? AND version_tag = ?")
+      .run(engineType, versionTag);
+  }
 }

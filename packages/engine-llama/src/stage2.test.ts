@@ -226,6 +226,140 @@ describe("llama.cpp stage 2 vertical slice", () => {
     );
   });
 
+  it("registers companion config metadata for a local GGUF when sidecars are present", async () => {
+    const supportRoot = await createSupportRoot();
+    const artifactPath = path.join(supportRoot, "models", "qwen3.5-35b-a3b.gguf");
+    await writeSampleGgufFile(artifactPath, {
+      modelName: "Qwen3.5-35B-A3B",
+      architecture: "llama",
+      contextLength: 32768,
+      parameterCount: 123_000_000,
+      tokenizer: "gpt2",
+    });
+    await writeFile(
+      path.join(path.dirname(artifactPath), "config.json"),
+      `${JSON.stringify(
+        {
+          _name_or_path: "Qwen3.5-35B-A3B",
+          model_type: "qwen3_moe",
+          max_position_embeddings: 262144,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      path.join(path.dirname(artifactPath), "tokenizer_config.json"),
+      `${JSON.stringify(
+        {
+          tokenizer_class: "Qwen2TokenizerFast",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const testDatabase = createTestDatabase();
+    cleanups.push(testDatabase.cleanup);
+
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+        fakeWorkerStartupDelayMs: 20,
+      }),
+      modelsRepository: new ModelsRepository(testDatabase.database),
+      engineVersionsRepository: new EngineVersionsRepository(testDatabase.database),
+    });
+
+    const registered = await manager.registerLocalModel({
+      filePath: artifactPath,
+    });
+
+    expect(registered.artifact.architecture).toBe("qwen3_moe");
+    expect(registered.artifact.metadata.contextLength).toBe(262144);
+    expect(registered.artifact.metadata.parameterCount).toBe(35_000_000_000);
+    expect(registered.artifact.metadata.tokenizer).toBe("Qwen2TokenizerFast");
+    expect(registered.profile.parameterOverrides.contextLength).toBe(262144);
+    expect(registered.artifact.metadata.metadata["companion.files"]).toEqual(
+      expect.arrayContaining(["config.json", "tokenizer_config.json"]),
+    );
+  });
+
+  it("refreshes registered GGUF metadata from companion config without clobbering custom overrides", async () => {
+    const supportRoot = await createSupportRoot();
+    const artifactPath = path.join(supportRoot, "models", "qwen3.5-35b-a3b.gguf");
+    await writeSampleGgufFile(artifactPath, {
+      modelName: "Qwen3.5-35B-A3B",
+      architecture: "llama",
+      contextLength: 32768,
+      parameterCount: 123_000_000,
+      tokenizer: "gpt2",
+    });
+
+    const testDatabase = createTestDatabase();
+    cleanups.push(testDatabase.cleanup);
+    const modelsRepository = new ModelsRepository(testDatabase.database);
+
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+        fakeWorkerStartupDelayMs: 20,
+      }),
+      modelsRepository,
+      engineVersionsRepository: new EngineVersionsRepository(testDatabase.database),
+    });
+
+    const registered = await manager.registerLocalModel({
+      filePath: artifactPath,
+    });
+    expect(registered.profile.parameterOverrides.contextLength).toBe(32768);
+
+    await writeFile(
+      path.join(path.dirname(artifactPath), "config.json"),
+      `${JSON.stringify(
+        {
+          _name_or_path: "Qwen3.5-35B-A3B",
+          model_type: "qwen3_moe",
+          max_position_embeddings: 262144,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      path.join(path.dirname(artifactPath), "tokenizer_config.json"),
+      `${JSON.stringify(
+        {
+          tokenizer_class: "Qwen2TokenizerFast",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const refreshed = await manager.refreshLocalModelMetadata(artifactPath);
+    expect(refreshed.artifact.metadata.contextLength).toBe(262144);
+    expect(refreshed.profile.parameterOverrides.contextLength).toBe(262144);
+
+    modelsRepository.save(refreshed.artifact, {
+      ...refreshed.profile,
+      parameterOverrides: {
+        ...refreshed.profile.parameterOverrides,
+        contextLength: 65536,
+      },
+    });
+
+    const preserved = await manager.refreshLocalModelMetadata(artifactPath);
+    expect(preserved.artifact.metadata.contextLength).toBe(262144);
+    expect(preserved.profile.parameterOverrides.contextLength).toBe(65536);
+  });
+
   it("classifies embedding, rerank, and multimodal companion models from local GGUF metadata", async () => {
     const supportRoot = await createSupportRoot();
     const modelsRoot = path.join(supportRoot, "models");

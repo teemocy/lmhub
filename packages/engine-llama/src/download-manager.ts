@@ -17,6 +17,7 @@ import type { DownloadTasksRepository } from "@localhub/db";
 import type { GatewayEvent } from "@localhub/shared-contracts/foundation-events";
 import type { DownloadTask } from "@localhub/shared-contracts/foundation-persistence";
 import type {
+  ProviderDownloadPlan,
   ProviderDownloadRequest,
   ProviderId,
   ProviderModelSummary,
@@ -87,6 +88,12 @@ export interface Stage3DownloadRequest {
   provider: ProviderId;
   providerModelId: string;
   artifactId: string;
+  artifactName?: string;
+  downloadUrl?: string;
+  requestHeaders?: Record<string, string>;
+  supportsRange?: boolean;
+  checksumSha256?: string;
+  sizeBytes?: number;
   taskGroupId?: string;
   displayName?: string;
   autoRegister?: boolean;
@@ -168,6 +175,23 @@ function hasCompletedMlxWeightShards(tasks: readonly DownloadTask[]): boolean {
   return shardTasks.length > 0 && shardTasks.every((task) => task.status === "completed");
 }
 
+function hasCompletedPrimaryBundleTask(tasks: readonly DownloadTask[]): boolean {
+  const primaryArtifactId = tasks
+    .map((task) => toTaskMetadata(task).bundlePrimaryArtifactId)
+    .find((value): value is string => typeof value === "string" && value.length > 0);
+  if (primaryArtifactId) {
+    return tasks.some((task) => {
+      const metadata = toTaskMetadata(task);
+      return metadata.artifactId === primaryArtifactId && task.status === "completed";
+    });
+  }
+
+  return tasks.some((task) => {
+    const metadata = toTaskMetadata(task);
+    return metadata.autoRegister === true && task.status === "completed";
+  });
+}
+
 function hasRequiredMlxTokenizerAssets(fileNames: Iterable<string>): boolean {
   let hasTokenizerCoreAsset = false;
   let hasVocabJson = false;
@@ -220,13 +244,18 @@ function resolveRegistrationPath(localModelsDir: string, metadata: DownloadTaskM
     return engineType === "mlx" ? path.dirname(metadata.destinationPath) : metadata.destinationPath;
   }
 
+  const providerRoot = path.join(localModelsDir, sanitizePathPart(metadata.providerModelId));
+  const sanitizedRegistrationSegments = sanitizeRelativeSegments(metadata.registrationPath);
+  const sanitizedRegistrationPath =
+    sanitizedRegistrationSegments.length > 0
+      ? path.join(...sanitizedRegistrationSegments)
+      : undefined;
+
   return path.isAbsolute(metadata.registrationPath)
     ? metadata.registrationPath
-    : path.join(
-        localModelsDir,
-        sanitizePathPart(metadata.providerModelId),
-        metadata.registrationPath,
-      );
+    : sanitizedRegistrationPath
+      ? path.join(providerRoot, sanitizedRegistrationPath)
+      : providerRoot;
 }
 
 function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
@@ -436,15 +465,28 @@ export class LlamaCppDownloadManager {
   }
 
   async startDownload(request: Stage3DownloadRequest): Promise<Stage3DownloadRecord> {
-    const provider = this.#providerSearch.getProvider(request.provider);
     const now = this.#now();
     const taskId = randomUUID();
-    const plan = await provider.resolveDownload({
-      provider: request.provider,
-      providerModelId: request.providerModelId,
-      artifactId: request.artifactId,
-      destinationPath: path.join(this.#localModelsDir, sanitizePathPart(request.providerModelId)),
-    } satisfies ProviderDownloadRequest);
+    const plan: ProviderDownloadPlan =
+      request.downloadUrl && request.artifactName
+        ? {
+            provider: request.provider,
+            artifactId: request.artifactId,
+            url: request.downloadUrl,
+            headers: request.requestHeaders ?? {},
+            fileName: request.artifactName,
+            supportsRange: request.supportsRange ?? false,
+            ...(request.sizeBytes !== undefined ? { estimatedSizeBytes: request.sizeBytes } : {}),
+          }
+        : await this.#providerSearch.getProvider(request.provider).resolveDownload({
+            provider: request.provider,
+            providerModelId: request.providerModelId,
+            artifactId: request.artifactId,
+            destinationPath: path.join(
+              this.#localModelsDir,
+              sanitizePathPart(request.providerModelId),
+            ),
+          } satisfies ProviderDownloadRequest);
     const fileName = path.basename(plan.fileName);
     const partialPath = path.join(this.#partialsRoot, `${taskId}.part`);
     const destinationPath = buildDestinationPath(
@@ -457,10 +499,14 @@ export class LlamaCppDownloadManager {
       id: taskId,
       provider: request.provider,
       url: plan.url,
-      totalBytes: plan.estimatedSizeBytes,
+      totalBytes: request.sizeBytes ?? plan.estimatedSizeBytes,
       downloadedBytes: 0,
       status: "pending",
-      ...(plan.checksum?.algorithm === "sha256" ? { checksumSha256: plan.checksum.value } : {}),
+      ...(request.checksumSha256
+        ? { checksumSha256: request.checksumSha256 }
+        : plan.checksum?.algorithm === "sha256"
+          ? { checksumSha256: plan.checksum.value }
+          : {}),
       metadata: {
         providerModelId: request.providerModelId,
         artifactId: request.artifactId,
@@ -507,8 +553,11 @@ export class LlamaCppDownloadManager {
     const tasks = this.resolveGroupTasks(id);
     await Promise.all(
       tasks
-        .filter((task) => task.status === "paused" || task.status === "pending")
-        .map((task) => this.resumeTask(task.id).catch(() => undefined)),
+        .filter(
+          (task) =>
+            task.status === "paused" || task.status === "pending" || task.status === "error",
+        )
+        .map((task) => this.resumeTask(task.id)),
     );
     return this.getGroupedRecordOrThrow(getTaskGroupId(tasks[0]!));
   }
@@ -567,7 +616,7 @@ export class LlamaCppDownloadManager {
     const running = this.#activeRuns.get(taskId);
     const currentTask = this.#downloadsRepository.findById(taskId);
 
-    if (running && currentTask?.status !== "paused") {
+    if (running && currentTask?.status !== "paused" && currentTask?.status !== "error") {
       return running;
     }
     if (running) {
@@ -765,7 +814,11 @@ export class LlamaCppDownloadManager {
         return this.toRecord([task]);
       }
 
-      if (message === "paused") {
+      const pausedByUser =
+        message === "paused" ||
+        (controller.signal.aborted && String(controller.signal.reason ?? "") === "paused");
+
+      if (pausedByUser) {
         const pausedTask: DownloadTask = {
           ...task,
           status: "paused",
@@ -991,7 +1044,7 @@ export class LlamaCppDownloadManager {
       if (
         !hasCompletedMlxWeightShards(bundleTasks) ||
         !hasCompletedMlxTokenizerAssets(bundleTasks) ||
-        completedTasks.length === 0
+        !hasCompletedPrimaryBundleTask(bundleTasks)
       ) {
         return undefined;
       }

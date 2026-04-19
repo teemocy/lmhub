@@ -1,4 +1,4 @@
-import type { FlashAttentionType } from "../models.js";
+import type { FlashAttentionType, PoolingMethod } from "../models.js";
 import type { CapabilitySet } from "./capabilities.js";
 import type { EngineFamily } from "./engine.js";
 import type { ProviderId } from "./providers.js";
@@ -94,9 +94,11 @@ export interface ModelArtifact {
 export interface ModelParameterOverrides {
   contextLength?: number;
   batchSize?: number;
+  ubatchSize?: number;
   gpuLayers?: number;
   parallelSlots?: number;
   flashAttentionType?: FlashAttentionType;
+  poolingMethod?: PoolingMethod;
   tensorSplit?: number[];
   temperature?: number;
   topP?: number;

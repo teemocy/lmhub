@@ -311,30 +311,48 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
       globalThis.crypto?.randomUUID?.() ??
       `download-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const displayTitle = buildDownloadTitle(detail, selectedVariant);
+    const bundleFiles = selectedFiles.map((file) => ({
+      artifactId: file.artifactId,
+      artifactName: file.artifactName,
+      ...(file.downloadUrl ? { downloadUrl: file.downloadUrl } : {}),
+      ...(file.checksumSha256 ? { checksumSha256: file.checksumSha256 } : {}),
+      ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+      auxiliary: file.auxiliary,
+      ...(file.auxiliaryKind ? { auxiliaryKind: file.auxiliaryKind } : {}),
+      metadata: {
+        ...file.metadata,
+        autoRegister: file.artifactId === selectedVariant.primaryArtifactId,
+        bundleId: taskGroupId,
+        bundlePrimaryArtifactId: selectedVariant.primaryArtifactId,
+        auxiliary: file.auxiliary,
+        ...(file.auxiliaryKind ? { auxiliaryKind: file.auxiliaryKind } : {}),
+      },
+    }));
+    const primaryBundleFile = bundleFiles[0];
+    if (!primaryBundleFile) {
+      return;
+    }
 
     setBusy(true);
     setError(null);
     try {
-      for (const file of selectedFiles) {
-        await window.desktopApi.gateway.createDownload({
-          provider: detail.provider,
-          providerModelId: detail.providerModelId,
-          artifactId: file.artifactId,
-          title: displayTitle,
-          artifactName: file.artifactName,
-          taskGroupId,
-          ...(file.checksumSha256 ? { checksumSha256: file.checksumSha256 } : {}),
-          ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
-          metadata: {
-            ...file.metadata,
-            autoRegister: file.artifactId === selectedVariant.primaryArtifactId,
-            bundleId: taskGroupId,
-            bundlePrimaryArtifactId: selectedVariant.primaryArtifactId,
-            auxiliary: file.auxiliary,
-            ...(file.auxiliaryKind ? { auxiliaryKind: file.auxiliaryKind } : {}),
-          },
-        });
-      }
+      await window.desktopApi.gateway.createDownload({
+        provider: detail.provider,
+        providerModelId: detail.providerModelId,
+        artifactId: primaryBundleFile.artifactId,
+        title: displayTitle,
+        artifactName: primaryBundleFile.artifactName,
+        taskGroupId,
+        ...(primaryBundleFile.downloadUrl ? { downloadUrl: primaryBundleFile.downloadUrl } : {}),
+        ...(primaryBundleFile.checksumSha256
+          ? { checksumSha256: primaryBundleFile.checksumSha256 }
+          : {}),
+        ...(primaryBundleFile.sizeBytes !== undefined
+          ? { sizeBytes: primaryBundleFile.sizeBytes }
+          : {}),
+        metadata: primaryBundleFile.metadata,
+        files: bundleFiles,
+      });
 
       await refreshDownloads();
     } catch (reason) {
@@ -348,7 +366,9 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
     setBusy(true);
     setError(null);
     try {
-      if (task.status === "paused") {
+      if (task.status === "error") {
+        await window.desktopApi.gateway.retryDownload(task.id);
+      } else if (task.status === "paused") {
         await window.desktopApi.gateway.resumeDownload(task.id);
       } else if (task.status === "downloading" || task.status === "pending") {
         await window.desktopApi.gateway.pauseDownload(task.id);
@@ -675,14 +695,19 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
                 >
                   {(task.status === "pending" ||
                     task.status === "downloading" ||
-                    task.status === "paused") && (
+                    task.status === "paused" ||
+                    task.status === "error") && (
                     <button
                       className="secondary-button"
                       disabled={busy}
                       onClick={() => void toggleDownload(task)}
                       type="button"
                     >
-                      {task.status === "paused" ? "Resume" : "Pause"}
+                      {task.status === "paused"
+                        ? "Resume"
+                        : task.status === "error"
+                          ? "Retry"
+                          : "Pause"}
                     </button>
                   )}
                   {task.status === "completed" ? (

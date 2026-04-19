@@ -142,6 +142,46 @@ export const embeddingsResponseSchema = z.object({
   usage: openAiUsageSchema.optional(),
 });
 
+export const rerankRequestSchema = z.object({
+  model: nonEmptyStringSchema,
+  query: nonEmptyStringSchema,
+  documents: z
+    .array(
+      z.union([
+        nonEmptyStringSchema,
+        z
+          .object({
+            text: nonEmptyStringSchema,
+          })
+          .passthrough(),
+      ]),
+    )
+    .min(1),
+  top_n: positiveIntegerSchema.optional(),
+  return_text: z.boolean().optional(),
+  return_documents: z.boolean().optional(),
+  normalize: z.boolean().optional(),
+});
+
+export const rerankResponseSchema = z.object({
+  object: z.literal("list"),
+  model: nonEmptyStringSchema,
+  usage: z
+    .object({
+      prompt_tokens: positiveIntegerSchema.optional(),
+      total_tokens: positiveIntegerSchema.optional(),
+    })
+    .optional(),
+  results: z.array(
+    z
+      .object({
+        index: z.number().int().nonnegative(),
+        relevance_score: z.number(),
+      })
+      .passthrough(),
+  ),
+});
+
 export const openAiModelCardSchema = z.object({
   id: nonEmptyStringSchema,
   name: nonEmptyStringSchema.optional(),
@@ -170,6 +210,8 @@ export type ChatCompletionsResponse = z.infer<typeof chatCompletionsResponseSche
 export type ChatCompletionsChunk = z.infer<typeof chatCompletionsChunkSchema>;
 export type EmbeddingsRequest = z.infer<typeof embeddingsRequestSchema>;
 export type EmbeddingsResponse = z.infer<typeof embeddingsResponseSchema>;
+export type RerankRequest = z.infer<typeof rerankRequestSchema>;
+export type RerankResponse = z.infer<typeof rerankResponseSchema>;
 export type OpenAiModelCard = z.infer<typeof openAiModelCardSchema>;
 export type OpenAiModelList = z.infer<typeof openAiModelListSchema>;
 export type OpenAiErrorResponse = z.infer<typeof openAiErrorResponseSchema>;

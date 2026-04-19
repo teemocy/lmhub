@@ -17,6 +17,8 @@ import type {
   DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelDeleteRequest,
+  DesktopModelDeleteResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
@@ -25,6 +27,8 @@ import type {
   EmbeddingsRequest,
   EmbeddingsResponse,
   OpenAiModelCard,
+  RerankRequest,
+  RerankResponse,
   RequestRoute,
   RequestTrace,
   RuntimeKey,
@@ -168,6 +172,7 @@ export interface GatewayRuntime {
   ): MaybePromise<DesktopDownloadActionResponse>;
   pauseDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
   resumeDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
+  retryDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
   deleteDownload(
     id: string,
     options?: { deleteFiles?: boolean },
@@ -178,6 +183,11 @@ export interface GatewayRuntime {
     input: DesktopLocalModelImportRequest,
     traceId?: string,
   ): MaybePromise<DesktopLocalModelImportResponse>;
+  deleteRegisteredModel(
+    modelId: string,
+    input?: DesktopModelDeleteRequest,
+    traceId?: string,
+  ): MaybePromise<DesktopModelDeleteResponse>;
   updateModelConfig(
     modelId: string,
     input: DesktopModelConfigUpdateRequest,
@@ -197,5 +207,9 @@ export interface GatewayRuntime {
     input: EmbeddingsRequest,
     context: GatewayExecutionContext,
   ): MaybePromise<EmbeddingsResponse>;
+  createRerank(
+    input: RerankRequest,
+    context: GatewayExecutionContext,
+  ): MaybePromise<RerankResponse>;
   recordRequestTrace(payload: RequestTraceRecord): void;
 }

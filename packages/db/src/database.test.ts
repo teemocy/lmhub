@@ -117,6 +117,55 @@ describe("db foundation", () => {
     });
   });
 
+  it("removes a superseded engine version without disturbing the active runtime", () => {
+    const testDatabase = createTestDatabase();
+    cleanup = testDatabase.cleanup;
+
+    const engines = new EngineVersionsRepository(testDatabase.database);
+
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_old",
+      versionTag: "b9000",
+      binaryPath: "/engines/llama.cpp/b9000/llama-server",
+      isActive: false,
+      installedAt: "2026-04-18T12:00:00.000Z",
+    });
+
+    const activeId = engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_new",
+      versionTag: "b9001",
+      binaryPath: "/engines/llama.cpp/b9001/llama-server",
+      isActive: true,
+      installedAt: "2026-04-19T12:00:00.000Z",
+    });
+
+    engines.setActive("llama.cpp", activeId);
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_mlx_current",
+      engineType: "mlx",
+      versionTag: "mlx-0.31.2",
+      binaryPath: "/engines/mlx/0.31.2/python",
+      isActive: true,
+      installedAt: "2026-04-19T12:05:00.000Z",
+    });
+
+    engines.removeByEngineVersion("llama.cpp", "b9000");
+
+    expect(engines.list().find((record) => record.versionTag === "b9000")).toBeUndefined();
+    expect(engines.findActive("llama.cpp")).toMatchObject({
+      id: activeId,
+      versionTag: "b9001",
+      isActive: true,
+    });
+    expect(engines.findActive("mlx")).toMatchObject({
+      versionTag: "mlx-0.31.2",
+      isActive: true,
+    });
+  });
+
   it("persists chat and audit records", () => {
     const testDatabase = createTestDatabase();
     cleanup = testDatabase.cleanup;
@@ -180,6 +229,24 @@ describe("db foundation", () => {
     expect(chat.deleteSession(fixtureChatSession.id)).toBe(true);
     expect(chat.listSessions()).toHaveLength(0);
     expect(chat.listMessages(fixtureChatSession.id)).toHaveLength(0);
+  });
+
+  it("deletes model registrations and applies foreign-key cleanup", () => {
+    const testDatabase = createTestDatabase();
+    cleanup = testDatabase.cleanup;
+
+    const models = new ModelsRepository(testDatabase.database);
+    const downloads = new DownloadTasksRepository(testDatabase.database);
+    const promptCaches = new PromptCachesRepository(testDatabase.database);
+
+    models.save(fixtureModelArtifact, fixtureModelProfile);
+    downloads.upsert(fixtureDownloadTask);
+    promptCaches.upsert(fixturePromptCacheRecord, { source: "test" });
+
+    expect(models.delete(fixtureModelArtifact.id)).toBe(true);
+    expect(models.findById(fixtureModelArtifact.id)).toBeUndefined();
+    expect(downloads.findById(fixtureDownloadTask.id)?.modelId).toBeUndefined();
+    expect(promptCaches.listByModelId(fixtureModelArtifact.id)).toEqual([]);
   });
 
   it("maps request traces into persisted api logs", () => {

@@ -221,9 +221,10 @@ select {
 
 .gateway-panel-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 6px;
 }
 
 .gateway-panel-head .status-chip {
@@ -1278,6 +1279,9 @@ select {
 
 .modal-shell-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
   align-items: flex-start;
 }
 
@@ -1335,6 +1339,18 @@ select {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.modal-meta-grid dd.meta-value-wrap,
+.modal-meta-grid dd.meta-value-mono {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.modal-meta-grid dd.meta-value-mono {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 0.82rem;
 }
 
 .modal-section-card {

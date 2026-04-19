@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
-  type EngineAdapter,
   type EngineActivationResult,
+  type EngineAdapter,
   type EngineHealthCheck,
   type EngineInstallResult,
   type EngineProbeResult,
@@ -25,6 +25,7 @@ import type {
   FlashAttentionType,
   ModelArtifact,
   ModelProfile,
+  PoolingMethod,
 } from "@localhub/shared-contracts/foundation-models";
 import type { RuntimeKey } from "@localhub/shared-contracts/foundation-runtime";
 
@@ -49,6 +50,10 @@ const DEFAULT_FAKE_BASE_PORT = 46_000;
 const DEFAULT_UBATCH_SIZE = 512;
 const DEFAULT_BATCH_SIZE = 3_072;
 const PROMPT_CACHE_DIRNAME = "prompt-caches";
+
+function isPooledRuntimeRole(role: RuntimeKey["role"]): boolean {
+  return role === "embeddings" || role === "rerank";
+}
 
 interface RuntimePlan {
   command: ResolvedCommand;
@@ -108,13 +113,26 @@ function getGpuLayers(profile: ModelProfile): number | undefined {
   return undefined;
 }
 
-function getBatchSize(profile: ModelProfile): number {
+function getBatchSize(profile: ModelProfile, role: RuntimeKey["role"]): number {
   const overrideValue = profile.parameterOverrides.batchSize;
   if (isFinitePositiveNumber(overrideValue)) {
     return Math.floor(overrideValue);
   }
 
+  if (isPooledRuntimeRole(role)) {
+    return getUBatchSize(profile);
+  }
+
   return DEFAULT_BATCH_SIZE;
+}
+
+function getUBatchSize(profile: ModelProfile): number {
+  const overrideValue = profile.parameterOverrides.ubatchSize;
+  if (isFinitePositiveNumber(overrideValue)) {
+    return Math.floor(overrideValue);
+  }
+
+  return DEFAULT_UBATCH_SIZE;
 }
 
 function getFlashAttentionType(profile: ModelProfile): FlashAttentionType {
@@ -126,7 +144,33 @@ function getFlashAttentionType(profile: ModelProfile): FlashAttentionType {
   return "auto";
 }
 
-function getParallelSlots(profile: ModelProfile): number | undefined {
+function getPoolingMethod(
+  profile: ModelProfile,
+  role: RuntimeKey["role"],
+): PoolingMethod | undefined {
+  if (role === "rerank") {
+    return "rank";
+  }
+
+  const overrideValue = profile.parameterOverrides.poolingMethod;
+  if (
+    overrideValue === "none" ||
+    overrideValue === "mean" ||
+    overrideValue === "cls" ||
+    overrideValue === "last" ||
+    overrideValue === "rank"
+  ) {
+    return overrideValue;
+  }
+
+  return undefined;
+}
+
+function getParallelSlots(profile: ModelProfile, role: RuntimeKey["role"]): number | undefined {
+  if (role === "rerank") {
+    return 1;
+  }
+
   const overrideValue = profile.parameterOverrides.parallelSlots;
   if (isFinitePositiveNumber(overrideValue)) {
     return Math.floor(overrideValue);
@@ -187,6 +231,26 @@ function getMmprojPath(artifact: ModelArtifact): string | undefined {
   return typeof mmprojPath === "string" && mmprojPath.length > 0 ? mmprojPath : undefined;
 }
 
+function hasMetadataKey(artifact: ModelArtifact, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(artifact.metadata.metadata, key);
+}
+
+function getRerankPoolingOverride(artifact: ModelArtifact): string | undefined {
+  const architecture = artifact.metadata.architecture ?? artifact.architecture;
+  if (!architecture) {
+    return undefined;
+  }
+
+  if (
+    hasMetadataKey(artifact, "general.pooling_type") ||
+    hasMetadataKey(artifact, `${architecture}.pooling_type`)
+  ) {
+    return undefined;
+  }
+
+  return `${architecture}.pooling_type=int:4`;
+}
+
 function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number): string[] {
   const args = [
     "--model",
@@ -198,9 +262,9 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
     "--ctx-size",
     String(getContextLength(input.artifact, input.profile)),
     "--batch-size",
-    String(getBatchSize(input.profile)),
+    String(getBatchSize(input.profile, input.runtimeKey.role)),
     "--ubatch-size",
-    String(DEFAULT_UBATCH_SIZE),
+    String(getUBatchSize(input.profile)),
   ];
 
   const gpuLayers = getGpuLayers(input.profile);
@@ -208,7 +272,7 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
     args.push("--n-gpu-layers", String(gpuLayers));
   }
 
-  const parallelSlots = getParallelSlots(input.profile);
+  const parallelSlots = getParallelSlots(input.profile, input.runtimeKey.role);
   if (parallelSlots !== undefined) {
     args.push("--parallel", String(parallelSlots));
   }
@@ -216,15 +280,25 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
   const flashAttentionType = getFlashAttentionType(input.profile);
   args.push(
     "--flash-attn",
-    flashAttentionType === "enabled"
-      ? "on"
-      : flashAttentionType === "disabled"
-        ? "off"
-        : "auto",
+    flashAttentionType === "enabled" ? "on" : flashAttentionType === "disabled" ? "off" : "auto",
   );
 
   if (input.runtimeKey.role === "embeddings") {
     args.push("--embedding");
+  }
+
+  if (input.runtimeKey.role === "rerank") {
+    args.push("--rerank");
+
+    const poolingOverride = getRerankPoolingOverride(input.artifact);
+    if (poolingOverride) {
+      args.push("--override-kv", poolingOverride);
+    }
+  }
+
+  const poolingMethod = getPoolingMethod(input.profile, input.runtimeKey.role);
+  if (poolingMethod) {
+    args.push("--pooling", poolingMethod);
   }
 
   const mmprojPath = getMmprojPath(input.artifact);
@@ -313,7 +387,10 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     const installPath = path.join(paths.versionsRoot, sanitizedVersionTag);
     const manifestPath = path.join(installPath, "manifest.json");
 
-    const installedBinary = await getInstalledPackagedLlamaCppBinary(paths.supportRoot, sanitizedVersionTag);
+    const installedBinary = await getInstalledPackagedLlamaCppBinary(
+      paths.supportRoot,
+      sanitizedVersionTag,
+    );
     if (installedBinary) {
       return installedBinary;
     }
@@ -416,7 +493,10 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     }
 
     if (!existsSync(activeVersion.binaryPath)) {
-      const installResult = await ensureInstalledVersion(activeVersion.versionTag, input.supportRoot);
+      const installResult = await ensureInstalledVersion(
+        activeVersion.versionTag,
+        input.supportRoot,
+      );
       return {
         versionTag: installResult.versionTag,
         managedBy: installResult.binaryPath === process.execPath ? "fake-worker" : "binary",
@@ -502,7 +582,12 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
 
       return unavailableResult;
     },
-    async install(versionTag: string): Promise<EngineInstallResult> {
+    async install(
+      versionTag: string,
+      _options?: {
+        force?: boolean;
+      },
+    ): Promise<EngineInstallResult> {
       return ensureInstalledVersion(versionTag);
     },
     async activate(
@@ -510,7 +595,9 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
       supportRootOverride?: string,
     ): Promise<EngineActivationResult> {
       const { paths, registry } = loadRegistry(supportRootOverride);
-      const existingVersion = registry.versions.find((candidate) => candidate.versionTag === versionTag);
+      const existingVersion = registry.versions.find(
+        (candidate) => candidate.versionTag === versionTag,
+      );
 
       if (!existingVersion) {
         const installResult = await ensureInstalledVersion(versionTag, supportRootOverride);

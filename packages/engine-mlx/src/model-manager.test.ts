@@ -25,7 +25,7 @@ const fakeAdapter: EngineAdapter = {
       notes: [],
     };
   },
-  async install(versionTag) {
+  async install(versionTag, _options) {
     return {
       success: true,
       versionTag,
@@ -111,5 +111,71 @@ describe("mlx model manager", () => {
       },
     });
     expect(registered[0]?.artifact.name).toBe("Qwen3.5 9B MLX 4bit");
+  });
+
+  it("derives MLX metadata from bundled configuration sidecars", async () => {
+    const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-engine-mlx-"));
+    tempDirs.push(supportRoot);
+
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const localModelsDir = path.join(supportRoot, "models");
+    const modelDir = path.join(localModelsDir, "Qwen3.5-1.5B-Instruct-4bit");
+    await mkdir(modelDir, { recursive: true });
+    await writeFile(
+      path.join(modelDir, "config.json"),
+      JSON.stringify({
+        _name_or_path: "mlx-community/Qwen3.5-1.5B-Instruct-4bit",
+        model_type: "qwen2",
+        max_position_embeddings: 32768,
+        hidden_size: 1536,
+        num_hidden_layers: 28,
+        intermediate_size: 8960,
+        num_attention_heads: 12,
+        num_key_value_heads: 2,
+        vocab_size: 151936,
+      }),
+    );
+    await writeFile(
+      path.join(modelDir, "tokenizer_config.json"),
+      JSON.stringify({
+        tokenizer_class: "Qwen2Tokenizer",
+      }),
+    );
+    await writeFile(path.join(modelDir, "tokenizer.json"), '{"model":{"type":"BPE"}}\n');
+    await writeFile(
+      path.join(modelDir, "quant_strategy.json"),
+      JSON.stringify({
+        bits: 4,
+        group_size: 64,
+      }),
+    );
+    await writeFile(path.join(modelDir, "model.safetensors"), "");
+
+    const manager = new MlxModelManager({
+      supportRoot,
+      localModelsDir,
+      adapter: fakeAdapter,
+      modelsRepository: new ModelsRepository(database.database),
+    });
+
+    const registered = await manager.registerLocalModel({ filePath: modelDir });
+
+    expect(registered.metadata).toMatchObject({
+      architecture: "qwen2",
+      contextLength: 32768,
+      parameterCount: 1_500_000_000,
+      tokenizer: "Qwen2Tokenizer",
+      quantization: "4-bit-g64",
+      shardCount: 1,
+    });
+    expect(registered.artifact.metadata).toMatchObject({
+      architecture: "qwen2",
+      contextLength: 32768,
+      parameterCount: 1_500_000_000,
+      tokenizer: "Qwen2Tokenizer",
+      quantization: "4-bit-g64",
+    });
   });
 });

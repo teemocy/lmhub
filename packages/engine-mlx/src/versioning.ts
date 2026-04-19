@@ -11,3 +11,26 @@ export interface MlxRuntimeVersionSpec {
 export function buildMlxVersionTag(spec: MlxRuntimeVersionSpec): string {
   return `py${spec.pythonVersion.replace(/\./g, "")}-mlx${spec.mlxVersion}-mlx-lm${spec.mlxLmVersion}`;
 }
+
+export function parseMlxVersionTag(versionTag: string): MlxRuntimeVersionSpec | undefined {
+  const match =
+    /^py(?<pythonDigits>\d+)-mlx(?<mlxVersion>[0-9][0-9A-Za-z.+-]*)-mlx-lm(?<mlxLmVersion>[0-9][0-9A-Za-z.+-]*)$/.exec(
+      versionTag,
+    );
+
+  const pythonDigits = match?.groups?.pythonDigits;
+  const mlxVersion = match?.groups?.mlxVersion;
+  const mlxLmVersion = match?.groups?.mlxLmVersion;
+  if (!pythonDigits || !mlxVersion || !mlxLmVersion) {
+    return undefined;
+  }
+
+  const pythonVersion =
+    pythonDigits.length > 1 ? `${pythonDigits.slice(0, 1)}.${pythonDigits.slice(1)}` : pythonDigits;
+
+  return {
+    pythonVersion,
+    mlxVersion,
+    mlxLmVersion,
+  };
+}

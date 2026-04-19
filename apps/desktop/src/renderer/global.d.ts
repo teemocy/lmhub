@@ -17,6 +17,7 @@ import type {
   DesktopEngineList,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelDeleteResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelLibrary,
@@ -60,6 +61,10 @@ type DesktopApi = {
     registerLocalModel(
       payload: DesktopLocalModelImportRequest,
     ): Promise<DesktopLocalModelImportResponse>;
+    deleteRegisteredModel(
+      modelId: string,
+      options?: { deleteFiles?: boolean },
+    ): Promise<DesktopModelDeleteResponse>;
     updateModelConfig(
       modelId: string,
       payload: DesktopModelConfigUpdateRequest,
@@ -83,6 +88,7 @@ type DesktopApi = {
     createDownload(payload: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse>;
     pauseDownload(id: string): Promise<DesktopDownloadActionResponse>;
     resumeDownload(id: string): Promise<DesktopDownloadActionResponse>;
+    retryDownload(id: string): Promise<DesktopDownloadActionResponse>;
     deleteDownload(
       id: string,
       options?: { deleteFiles?: boolean },

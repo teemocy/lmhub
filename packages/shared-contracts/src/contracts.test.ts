@@ -9,8 +9,8 @@ import {
   deserializeGatewayEvent,
   deserializeRequestTrace,
   deserializeToolCalls,
-  desktopDownloadCreateRequestSchema,
   desktopChatRunRequestSchema,
+  desktopDownloadCreateRequestSchema,
   desktopProviderSearchItemSchema,
   downloadTaskSchema,
   embeddingsRequestSchema,
@@ -23,6 +23,8 @@ import {
   openAiModelListSchema,
   openAiToolCallSchema,
   requestTraceSchema,
+  rerankRequestSchema,
+  rerankResponseSchema,
   runtimeKeySchema,
   serializeGatewayEvent,
   serializeRequestTrace,
@@ -103,6 +105,42 @@ describe("shared contracts", () => {
     expect(response.data).toHaveLength(1);
   });
 
+  it("parses rerank request and response payloads", () => {
+    const request = rerankRequestSchema.parse({
+      model: "model_jina_reranker",
+      query: "Which section explains interconnect responsibilities?",
+      documents: [
+        "Snoop transactions use the snoop address, snoop response, and snoop data channels.",
+        {
+          text: "It is the responsibility of the interconnect to receive transactions and generate the response for the initiating master.",
+        },
+      ],
+      top_n: 2,
+      normalize: true,
+    });
+    const response = rerankResponseSchema.parse({
+      object: "list",
+      model: "model_jina_reranker",
+      usage: {
+        prompt_tokens: 42,
+        total_tokens: 42,
+      },
+      results: [
+        {
+          index: 1,
+          relevance_score: 0.91,
+        },
+        {
+          index: 0,
+          relevance_score: 0.12,
+        },
+      ],
+    });
+
+    expect(request.documents).toHaveLength(2);
+    expect(response.results[0]?.index).toBe(1);
+  });
+
   it("parses the stage 3 request-trace and model-list fixtures", () => {
     const trace = requestTraceSchema.parse(loadFixture("foundation-request-trace.sample.json"));
     const modelList = openAiModelListSchema.parse(loadFixture("openai-model-list.sample.json"));
@@ -147,10 +185,19 @@ describe("shared contracts", () => {
       title: item.title,
       artifactName: "gateway-stage3-chat-q4.gguf",
       metadata: {},
+      files: [
+        {
+          artifactId: "gateway-stage3-chat-q4",
+          artifactName: "gateway-stage3-chat-q4.gguf",
+          downloadUrl: "https://example.invalid/artifacts/gateway-stage3-chat-q4.gguf",
+          metadata: {},
+        },
+      ],
     });
 
     expect(createRequest.providerModelId).toBe("acme/stage3-gateway-chat");
     expect(createRequest.artifactId).toBe("gateway-stage3-chat-q4");
+    expect(createRequest.files?.length).toBe(1);
     expect(item.id).not.toBe(item.providerModelId);
   });
 

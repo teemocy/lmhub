@@ -1,9 +1,7 @@
 import type {
-  DesktopEngineInstallRequest,
-  DesktopEngineInstallResponse,
-  DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelDeleteResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
@@ -13,24 +11,19 @@ import type {
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
 
 type ModelsScreenProps = {
-  engines: DesktopEngineRecord[];
   models: DesktopModelRecord[];
   runtimeContext: DesktopRuntimeContext | null;
   selectedModelId: string | null;
   shellState: DesktopShellState;
   onSelectModel(modelId: string): void;
   onPickImportFile(): Promise<string | null>;
-  onPickEngineBinaryFile(): Promise<string | null>;
   onRegisterModel(
     payload: DesktopLocalModelImportRequest,
   ): Promise<DesktopLocalModelImportResponse>;
-  onInstallEngineBinary(
-    payload: DesktopEngineInstallRequest,
-  ): Promise<DesktopEngineInstallResponse>;
-  onActivateEngineVersion(payload: {
-    engineType: "llama.cpp" | "mlx";
-    versionTag: string;
-  }): Promise<DesktopEngineInstallResponse>;
+  onDeleteModel(
+    modelId: string,
+    options?: { deleteFiles?: boolean },
+  ): Promise<DesktopModelDeleteResponse>;
   onUpdateModelConfig(
     modelId: string,
     payload: DesktopModelConfigUpdateRequest,
@@ -51,17 +44,12 @@ type CapabilityKey =
 
 type CapabilityToggleValue = "inherit" | "enabled" | "disabled";
 type FlashAttentionValue = "auto" | "enabled" | "disabled";
+type PoolingMethodValue = "none" | "mean" | "cls" | "last" | "rank";
 
 type ModelDetailTab = "details" | "config";
 
 type FeedbackState = {
   tone: "success" | "error";
-  text: string;
-} | null;
-
-type EngineFeedbackState = {
-  tone: "success" | "error";
-  title: string;
   text: string;
 } | null;
 
@@ -152,6 +140,36 @@ const formatParameterCount = (value?: number): string => {
   return value.toLocaleString();
 };
 
+const formatParameterCountDetail = (value?: number): string => {
+  if (value === undefined) {
+    return "Unknown";
+  }
+
+  const compact = formatParameterCount(value);
+  const exact = value.toLocaleString();
+  return compact === exact ? exact : `${compact} (${exact})`;
+};
+
+const formatContextLengthDetail = (value?: number): string =>
+  value !== undefined ? `${value.toLocaleString()} tokens` : "Unknown";
+
+const formatTextValue = (value?: string): string =>
+  value && value.trim().length > 0 ? value : "Unknown";
+
+const formatLabel = (value: string): string =>
+  humanize(value).replace(/\b\w/g, (character) => character.toUpperCase());
+
+const formatEngineType = (value: DesktopModelRecord["engineType"]): string => {
+  switch (value) {
+    case "mlx":
+      return "MLX";
+    case "llama.cpp":
+      return "llama.cpp";
+    default:
+      return "Unknown";
+  }
+};
+
 const formatModelCardSummary = (model: DesktopModelRecord): string => {
   const architecture = model.architecture ? humanize(model.architecture) : "Unknown";
   const parameters = formatParameterCount(model.parameterCount);
@@ -164,7 +182,7 @@ const formatModelCardSummary = (model: DesktopModelRecord): string => {
 };
 
 const modelMetadataHint =
-  "For exact parameter count and tokenizer details, include a companion model metadata file or manifest with explicit values. Lightweight local detection can be incomplete or wrong for those fields.";
+  "GGUF metadata starts with the model header and can be enriched from sidecars like config.json, generation_config.json, tokenizer_config.json, and tokenizer.json when they are present next to the artifact. MLX metadata is derived from bundled sidecars like config.json, generation_config.json, tokenizer_config.json, tokenizer.json, and quant_strategy.json when available. Parameter counts may still be estimated when a repository does not publish an explicit total.";
 
 const getStateToneClass = (state: DesktopModelRecord["state"]): string => {
   switch (state) {
@@ -305,17 +323,14 @@ const formatCapabilityToggle = (value: CapabilityToggleValue): string => {
 };
 
 export function ModelsScreen({
-  engines,
   models,
   runtimeContext,
   selectedModelId,
   shellState,
   onSelectModel,
   onPickImportFile,
-  onPickEngineBinaryFile,
   onRegisterModel,
-  onInstallEngineBinary,
-  onActivateEngineVersion,
+  onDeleteModel,
   onUpdateModelConfig,
   onPreloadModel,
   onEvictModel,
@@ -326,23 +341,21 @@ export function ModelsScreen({
   const [aliasDraft, setAliasDraft] = useState("");
   const [pendingImport, setPendingImport] = useState(false);
   const [pendingActionModelId, setPendingActionModelId] = useState<string | null>(null);
-  const [pendingEngineAction, setPendingEngineAction] = useState<
-    "download" | "import" | "install-mlx" | "activate" | null
-  >(null);
-  const [engineFeedback, setEngineFeedback] = useState<EngineFeedbackState>(null);
-  const [selectedEngineVersionTag, setSelectedEngineVersionTag] = useState<string | null>(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
+  const [deleteFilesOnRemove, setDeleteFilesOnRemove] = useState(false);
   const [detailTab, setDetailTab] = useState<ModelDetailTab>("details");
   const [configDraft, setConfigDraft] = useState({
     pinned: false,
     defaultTtlMinutes: "15",
     contextLength: "",
     batchSize: "",
+    ubatchSize: "",
     gpuLayers: "",
     parallelSlots: "",
     flashAttentionType: "auto" as FlashAttentionValue,
+    poolingMethod: "" as "" | PoolingMethodValue,
     capabilityOverrides: createCapabilityDraft({}),
   });
 
@@ -350,20 +363,7 @@ export function ModelsScreen({
     (selectedModelId ? models.find((model) => model.id === selectedModelId) : undefined) ??
     models[0];
   const mlxSupported = runtimeContext?.mlx.supported ?? false;
-  const mlxInstalled = runtimeContext?.mlx.installed ?? false;
-  const mlxUpdateAvailable = runtimeContext?.mlx.updateAvailable ?? false;
-  const latestMlxRuntimeLabel =
-    runtimeContext?.mlx.latestMlxVersion && runtimeContext?.mlx.latestMlxLmVersion
-      ? `mlx ${runtimeContext.mlx.latestMlxVersion} / mlx-lm ${runtimeContext.mlx.latestMlxLmVersion}`
-      : null;
   const connected = shellState.phase === "connected";
-  const activeEngineVersionTag =
-    engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
-  const selectedEngineVersion =
-    selectedEngineVersionTag &&
-    engines.some((engine) => engine.version === selectedEngineVersionTag)
-      ? (engines.find((engine) => engine.version === selectedEngineVersionTag) ?? null)
-      : (engines.find((engine) => engine.version === activeEngineVersionTag) ?? null);
   const canRegister = connected && Boolean(importFilePath) && !pendingImport;
   const canPreload =
     connected &&
@@ -401,9 +401,18 @@ export function ModelsScreen({
     !!selectedModel &&
     !selectedModel.loaded &&
     pendingActionModelId !== selectedModel.id;
+  const canDeleteModel =
+    connected &&
+    !!selectedModel &&
+    selectedModel.state !== "loading" &&
+    selectedModel.state !== "evicting" &&
+    pendingActionModelId !== selectedModel.id;
   const hasCapabilityOverrides =
     !!selectedModel && Object.keys(selectedModel.capabilityOverrides).length > 0;
   const selectedModelUsesLlamaRuntime = selectedModel?.engineType === "llama.cpp";
+  const selectedModelRequiresPooledRuntime =
+    selectedModelUsesLlamaRuntime &&
+    (selectedModel?.role === "embeddings" || selectedModel?.role === "rerank");
 
   useEffect(() => {
     if (!selectedModel) {
@@ -421,28 +430,16 @@ export function ModelsScreen({
       defaultTtlMinutes: String(Math.max(1, Math.round(selectedModel.defaultTtlMs / 60_000))),
       contextLength: selectedModel.contextLength ? String(selectedModel.contextLength) : "",
       batchSize: String(selectedModel.batchSize ?? 3072),
+      ubatchSize: String(selectedModel.ubatchSize ?? 512),
       gpuLayers: selectedModel.gpuLayers ? String(selectedModel.gpuLayers) : "",
       parallelSlots: selectedModel.parallelSlots ? String(selectedModel.parallelSlots) : "",
       flashAttentionType:
         (selectedModel.flashAttentionType as FlashAttentionValue | undefined) ?? "auto",
+      poolingMethod: (selectedModel.poolingMethod as PoolingMethodValue | undefined) ?? "",
       capabilityOverrides,
     });
+    setDeleteFilesOnRemove(false);
   }, [selectedModel?.id]);
-
-  useEffect(() => {
-    if (engines.length === 0) {
-      setSelectedEngineVersionTag(null);
-      return;
-    }
-
-    setSelectedEngineVersionTag((current) => {
-      if (current && engines.some((engine) => engine.version === current)) {
-        return current;
-      }
-
-      return engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
-    });
-  }, [engines]);
 
   useEffect(() => {
     if (!isDetailModalOpen) {
@@ -479,8 +476,9 @@ export function ModelsScreen({
     setDetailModelId(null);
   };
 
-  const openModelConfigPanel = (modelId: string) => {
+  const openModelConfigPanel = (modelId: string, tab: ModelDetailTab = "details") => {
     onSelectModel(modelId);
+    setDetailTab(tab);
     setIsConfigModalOpen(true);
     setIsDetailModalOpen(false);
     setDetailModelId(null);
@@ -549,131 +547,6 @@ export function ModelsScreen({
       });
     } finally {
       setPendingImport(false);
-    }
-  };
-
-  const handleDownloadMetalBinary = async () => {
-    setEngineFeedback(null);
-    setPendingEngineAction("download");
-
-    try {
-      const result = await onInstallEngineBinary({
-        action: "download-latest-metal",
-      });
-
-      setSelectedEngineVersionTag(result.engine.version);
-      setEngineFeedback({
-        tone: "success",
-        title: "Install complete",
-        text: `Installed ${result.engine.version} into ${result.engine.binaryPath}.`,
-      });
-    } catch (error) {
-      setEngineFeedback({
-        tone: "error",
-        title: "Install blocked",
-        text: error instanceof Error ? error.message : "Unable to download the Metal binary.",
-      });
-    } finally {
-      setPendingEngineAction(null);
-    }
-  };
-
-  const handleImportLocalBinary = async () => {
-    setEngineFeedback(null);
-
-    const filePath = await onPickEngineBinaryFile();
-    if (!filePath) {
-      return;
-    }
-
-    setPendingEngineAction("import");
-    try {
-      const result = await onInstallEngineBinary({
-        action: "import-local-binary",
-        filePath,
-      });
-
-      setSelectedEngineVersionTag(result.engine.version);
-      setEngineFeedback({
-        tone: "success",
-        title: "Install complete",
-        text: `Packaged ${result.engine.version} into ${result.engine.binaryPath}.`,
-      });
-    } catch (error) {
-      setEngineFeedback({
-        tone: "error",
-        title: "Install blocked",
-        text: error instanceof Error ? error.message : "Unable to package the selected binary.",
-      });
-    } finally {
-      setPendingEngineAction(null);
-    }
-  };
-
-  const handleActivateEngineVersion = async () => {
-    if (
-      !selectedEngineVersion ||
-      (selectedEngineVersion.engineType !== "llama.cpp" &&
-        selectedEngineVersion.engineType !== "mlx")
-    ) {
-      return;
-    }
-
-    setEngineFeedback(null);
-    setPendingEngineAction("activate");
-
-    try {
-      const result = await onActivateEngineVersion({
-        engineType: selectedEngineVersion.engineType,
-        versionTag: selectedEngineVersion.version,
-      });
-
-      setSelectedEngineVersionTag(result.engine.version);
-      setEngineFeedback({
-        tone: "success",
-        title: "Version activated",
-        text: `Activated ${result.engine.version}. Future launches will use that ${result.engine.engineType} runtime.`,
-      });
-    } catch (error) {
-      setEngineFeedback({
-        tone: "error",
-        title: "Action blocked",
-        text: error instanceof Error ? error.message : "Unable to activate the selected version.",
-      });
-    } finally {
-      setPendingEngineAction(null);
-    }
-  };
-
-  const handleInstallMlxRuntime = async () => {
-    setEngineFeedback(null);
-    setPendingEngineAction("install-mlx");
-    const actionLabel = !mlxInstalled
-      ? "Downloaded"
-      : mlxUpdateAvailable
-        ? "Updated"
-        : "Reinstalled";
-
-    try {
-      const result = await onInstallEngineBinary({
-        engineType: "mlx",
-        action: "install-managed-runtime",
-      });
-
-      setSelectedEngineVersionTag(result.engine.version);
-      setEngineFeedback({
-        tone: "success",
-        title: mlxUpdateAvailable ? "Runtime updated" : "Runtime ready",
-        text: `${actionLabel} managed MLX runtime ${result.engine.version}.`,
-      });
-    } catch (error) {
-      setEngineFeedback({
-        tone: "error",
-        title: "Install blocked",
-        text: error instanceof Error ? error.message : "Unable to install the MLX runtime.",
-      });
-    } finally {
-      setPendingEngineAction(null);
     }
   };
 
@@ -751,6 +624,49 @@ export function ModelsScreen({
     }
   };
 
+  const deleteModel = async () => {
+    if (!selectedModel) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      deleteFilesOnRemove
+        ? `Delete the ${selectedModel.displayName} registration and remove its related files from disk?`
+        : `Delete the ${selectedModel.displayName} registration and keep its files on disk?`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setPendingActionModelId(selectedModel.id);
+    setFeedback(null);
+
+    try {
+      const result = await onDeleteModel(selectedModel.id, {
+        deleteFiles: deleteFilesOnRemove,
+      });
+      closeModelConfigPanel();
+      closeModelDetail();
+      setDeleteFilesOnRemove(false);
+      setFeedback({
+        tone: "success",
+        text: result.deletedFiles
+          ? result.deletedPaths.length > 0
+            ? `Deleted ${selectedModel.displayName} and removed ${result.deletedPaths.length} related file(s).`
+            : `Deleted ${selectedModel.displayName}. Any related files were already missing.`
+          : `Deleted ${selectedModel.displayName} from the registered model list and kept its files on disk.`,
+      });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        text:
+          error instanceof Error ? error.message : `Unable to delete ${selectedModel.displayName}.`,
+      });
+    } finally {
+      setPendingActionModelId(null);
+    }
+  };
+
   const saveAdvancedConfig = async () => {
     if (!selectedModel) {
       return;
@@ -772,8 +688,14 @@ export function ModelsScreen({
       const batchSize = configDraft.batchSize.trim()
         ? Number.parseInt(configDraft.batchSize, 10)
         : 3072;
-      if (selectedModel.engineType === "llama.cpp" && batchSize % 512 !== 0) {
-        throw new Error("Batch size must be a multiple of 512.");
+      const ubatchSize = configDraft.ubatchSize.trim()
+        ? Number.parseInt(configDraft.ubatchSize, 10)
+        : 512;
+      if (selectedModel.engineType === "llama.cpp" && batchSize % ubatchSize !== 0) {
+        throw new Error(`Batch size must be a multiple of ubatch size (${ubatchSize}).`);
+      }
+      if (selectedModelRequiresPooledRuntime && batchSize !== ubatchSize) {
+        throw new Error("Embedding and rerank models must use the same ubatch size as batch size.");
       }
 
       const result = await onUpdateModelConfig(selectedModel.id, {
@@ -784,6 +706,7 @@ export function ModelsScreen({
                 ? { contextLength: Number.parseInt(configDraft.contextLength, 10) }
                 : {}),
               batchSize,
+              ubatchSize,
               ...(configDraft.gpuLayers.trim()
                 ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
                 : {}),
@@ -791,6 +714,7 @@ export function ModelsScreen({
                 ? { parallelSlots: Number.parseInt(configDraft.parallelSlots, 10) }
                 : {}),
               flashAttentionType: configDraft.flashAttentionType,
+              ...(configDraft.poolingMethod ? { poolingMethod: configDraft.poolingMethod } : {}),
             }
           : {}),
       });
@@ -799,10 +723,12 @@ export function ModelsScreen({
         defaultTtlMinutes: String(Math.max(1, Math.round(result.model.defaultTtlMs / 60_000))),
         contextLength: result.model.contextLength ? String(result.model.contextLength) : "",
         batchSize: String(result.model.batchSize ?? 3072),
+        ubatchSize: String(result.model.ubatchSize ?? 512),
         gpuLayers: result.model.gpuLayers ? String(result.model.gpuLayers) : "",
         parallelSlots: result.model.parallelSlots ? String(result.model.parallelSlots) : "",
         flashAttentionType:
           (result.model.flashAttentionType as FlashAttentionValue | undefined) ?? "auto",
+        poolingMethod: (result.model.poolingMethod as PoolingMethodValue | undefined) ?? "",
         capabilityOverrides: createCapabilityDraft(result.model.capabilityOverrides),
       });
       setFeedback({
@@ -917,11 +843,11 @@ export function ModelsScreen({
                           className="secondary-button model-card-config-button"
                           onClick={(event) => {
                             event.stopPropagation();
-                            openModelConfigPanel(model.id);
+                            openModelConfigPanel(model.id, "details");
                           }}
                           type="button"
                         >
-                          Config
+                          Details
                         </button>
                       </div>
                     </div>
@@ -948,305 +874,624 @@ export function ModelsScreen({
           >
             <div className="modal-shell-header">
               <div>
-                <span className="section-label">Model config</span>
+                <span className="section-label">Model details</span>
                 <h3 id="model-config-modal-title">{selectedModel.displayName}</h3>
                 <p>{formatModelCardSummary(selectedModel)}</p>
               </div>
               <div className="modal-shell-actions">
+                <span
+                  className={
+                    selectedModel.loaded
+                      ? "status-pill status-pill-caution"
+                      : `status-pill ${getStateToneClass(selectedModel.state)}`
+                  }
+                >
+                  {selectedModel.loaded ? "Loaded in memory" : humanize(selectedModel.state)}
+                </span>
+                <button
+                  className={detailModelAction === "evict" ? "secondary-button" : "primary-button"}
+                  disabled={detailModelActionDisabled}
+                  onClick={() => void runModelAction(detailModelAction)}
+                  type="button"
+                >
+                  {detailModelActionLabel}
+                </button>
                 <button className="secondary-button" onClick={closeModelConfigPanel} type="button">
                   Close
                 </button>
               </div>
             </div>
 
-            <div className="modal-panel" role="tabpanel">
-              <div className="advanced-config-card modal-section-card alias-config-card">
-                <div className="panel-header alias-panel-header">
-                  <div className="alias-header-copy">
-                    <span className="section-label">Alias name</span>
-                    <div className="alias-inline-row">
-                      <h3>Rename this model</h3>
-                      <input
-                        aria-label="Alias name"
-                        className="text-input alias-inline-input"
-                        disabled={!connected || pendingActionModelId !== null}
-                        onChange={(event) => setAliasDraft(event.target.value)}
-                        type="text"
-                        value={aliasDraft}
-                      />
-                      <button
-                        className="secondary-button alias-inline-save"
-                        disabled={
-                          !connected ||
-                          pendingActionModelId !== null ||
-                          aliasDraft.trim().length === 0 ||
-                          aliasDraft.trim() === selectedModel.displayName.trim()
+            <div aria-label="Model details sections" className="modal-tabbar" role="tablist">
+              <button
+                aria-selected={detailTab === "details"}
+                className={detailTab === "details" ? "modal-tab modal-tab-active" : "modal-tab"}
+                id="model-tab-details"
+                onClick={() => setDetailTab("details")}
+                role="tab"
+                type="button"
+              >
+                Details
+              </button>
+              <button
+                aria-selected={detailTab === "config"}
+                className={detailTab === "config" ? "modal-tab modal-tab-active" : "modal-tab"}
+                id="model-tab-config"
+                onClick={() => setDetailTab("config")}
+                role="tab"
+                type="button"
+              >
+                Config
+              </button>
+            </div>
+
+            <div
+              aria-labelledby={detailTab === "details" ? "model-tab-details" : "model-tab-config"}
+              className="modal-panel"
+              role="tabpanel"
+            >
+              {detailTab === "details" ? (
+                <>
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Model metadata</span>
+                        <h3>Detected artifact details</h3>
+                      </div>
+                      <div className="detail-status-row">
+                        <span
+                          className={`status-pill ${getArtifactToneClass(selectedModel.artifactStatus)}`}
+                        >
+                          {formatLabel(selectedModel.artifactStatus)}
+                        </span>
+                        <span className={`status-pill ${getStateToneClass(selectedModel.state)}`}>
+                          {selectedModel.loaded
+                            ? "Loaded in memory"
+                            : formatLabel(selectedModel.state)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <dl className="meta-grid compact-meta-grid modal-meta-grid">
+                      <div>
+                        <dt>Original name</dt>
+                        <dd>{selectedModel.name}</dd>
+                      </div>
+                      <div>
+                        <dt>Architecture</dt>
+                        <dd>{formatTextValue(selectedModel.architecture)}</dd>
+                      </div>
+                      <div>
+                        <dt>Parameters</dt>
+                        <dd>{formatParameterCountDetail(selectedModel.parameterCount)}</dd>
+                      </div>
+                      <div>
+                        <dt>Quantization</dt>
+                        <dd>{formatTextValue(selectedModel.quantization)}</dd>
+                      </div>
+                      <div>
+                        <dt>Tokenizer</dt>
+                        <dd>{formatTextValue(selectedModel.tokenizer)}</dd>
+                      </div>
+                      <div>
+                        <dt>Context length</dt>
+                        <dd>{formatContextLengthDetail(selectedModel.contextLength)}</dd>
+                      </div>
+                      <div>
+                        <dt>Runtime</dt>
+                        <dd>{formatEngineType(selectedModel.engineType)}</dd>
+                      </div>
+                      <div>
+                        <dt>Format</dt>
+                        <dd>
+                          {selectedModel.format === "mlx"
+                            ? "MLX"
+                            : selectedModel.format.toUpperCase()}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Role</dt>
+                        <dd>{formatLabel(selectedModel.role)}</dd>
+                      </div>
+                      <div>
+                        <dt>Source</dt>
+                        <dd>{formatSourceKind(selectedModel.sourceKind)}</dd>
+                      </div>
+                      <div>
+                        <dt>Artifact size</dt>
+                        <dd>{formatBytes(selectedModel.sizeBytes)}</dd>
+                      </div>
+                      <div>
+                        <dt>Warm TTL</dt>
+                        <dd>{formatTtl(selectedModel.defaultTtlMs)}</dd>
+                      </div>
+                    </dl>
+
+                    <details className="detail-meta-note">
+                      <summary>Metadata detection notes</summary>
+                      <p>{modelMetadataHint}</p>
+                    </details>
+                  </div>
+
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Storage and lifecycle</span>
+                        <h3>Runtime state and local files</h3>
+                      </div>
+                      <span
+                        className={
+                          selectedModel.loaded
+                            ? "status-pill status-pill-caution"
+                            : "status-pill status-pill-neutral"
                         }
-                        onClick={() => void saveAlias()}
+                      >
+                        {selectedModel.loaded ? "Resident in memory" : "Cold on disk"}
+                      </span>
+                    </div>
+
+                    <dl className="meta-grid compact-meta-grid modal-meta-grid">
+                      <div>
+                        <dt>Engine version</dt>
+                        <dd>{formatTextValue(selectedModel.engineVersion)}</dd>
+                      </div>
+                      <div>
+                        <dt>Engine channel</dt>
+                        <dd>
+                          {selectedModel.engineChannel
+                            ? formatLabel(selectedModel.engineChannel)
+                            : "Unknown"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Pinned</dt>
+                        <dd>{selectedModel.pinned ? "Yes" : "No"}</dd>
+                      </div>
+                      <div>
+                        <dt>Checksum (SHA-256)</dt>
+                        <dd className="meta-value-mono meta-value-wrap">
+                          {selectedModel.checksumSha256 ?? "Unavailable"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Local path</dt>
+                        <dd className="meta-value-mono meta-value-wrap">
+                          {selectedModel.localPath}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Model ID</dt>
+                        <dd className="meta-value-mono meta-value-wrap">{selectedModel.id}</dd>
+                      </div>
+                      <div>
+                        <dt>Last used</dt>
+                        <dd>
+                          {selectedModel.lastUsedAt
+                            ? formatTime(selectedModel.lastUsedAt)
+                            : "Never"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Registered</dt>
+                        <dd>{formatTime(selectedModel.createdAt)}</dd>
+                      </div>
+                      <div>
+                        <dt>Updated</dt>
+                        <dd>{formatTime(selectedModel.updatedAt)}</dd>
+                      </div>
+                    </dl>
+
+                    {selectedModel.errorMessage ? (
+                      <div className="detail-alert feedback-card-error">
+                        <strong>Latest runtime issue</strong>
+                        <p>{selectedModel.errorMessage}</p>
+                      </div>
+                    ) : null}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="advanced-config-card modal-section-card alias-config-card">
+                    <div className="panel-header alias-panel-header">
+                      <div className="alias-header-copy">
+                        <span className="section-label">Alias name</span>
+                        <div className="alias-inline-row">
+                          <h3>Rename this model</h3>
+                          <input
+                            aria-label="Alias name"
+                            className="text-input alias-inline-input"
+                            disabled={!connected || pendingActionModelId !== null}
+                            onChange={(event) => setAliasDraft(event.target.value)}
+                            type="text"
+                            value={aliasDraft}
+                          />
+                          <button
+                            className="secondary-button alias-inline-save"
+                            disabled={
+                              !connected ||
+                              pendingActionModelId !== null ||
+                              aliasDraft.trim().length === 0 ||
+                              aliasDraft.trim() === selectedModel.displayName.trim()
+                            }
+                            onClick={() => void saveAlias()}
+                            type="button"
+                          >
+                            {pendingActionModelId === selectedModel.id ? "Saving..." : "Save alias"}
+                          </button>
+                        </div>
+                      </div>
+                      <span
+                        className={
+                          selectedModel.loaded
+                            ? "status-pill status-pill-neutral"
+                            : "status-pill status-pill-positive"
+                        }
+                      >
+                        {selectedModel.loaded ? "Alias edits stay live" : "No eviction needed"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Advanced configuration</span>
+                        <h3>
+                          {selectedModelUsesLlamaRuntime
+                            ? "Safe cold-start overrides"
+                            : "Shared runtime settings"}
+                        </h3>
+                      </div>
+                      <span
+                        className={
+                          selectedModel.loaded
+                            ? "status-pill status-pill-caution"
+                            : "status-pill status-pill-neutral"
+                        }
+                      >
+                        {selectedModel.loaded ? "Evict before editing" : "Editable"}
+                      </span>
+                    </div>
+                    <p>
+                      {selectedModelUsesLlamaRuntime
+                        ? selectedModel.loaded
+                          ? "These settings persist to the model profile and apply on the next preload. Use Evict from memory above first so the runtime key stays consistent."
+                          : "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
+                        : selectedModel.loaded
+                          ? "MLX models only expose cross-engine settings in this build. Use Evict from memory above first so the runtime key stays consistent."
+                          : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
+                    </p>
+                    {selectedModelRequiresPooledRuntime ? (
+                      <p>
+                        Embedding and rerank workers need matching batch and ubatch sizes. If
+                        pooling is left unset, llama.cpp will use the model default.
+                      </p>
+                    ) : null}
+
+                    <div className="settings-grid">
+                      <label className="field-stack">
+                        <span className="section-label">Warm TTL (minutes)</span>
+                        <input
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          min="1"
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              defaultTtlMinutes: event.target.value,
+                            }))
+                          }
+                          type="number"
+                          value={configDraft.defaultTtlMinutes}
+                        />
+                      </label>
+                      {selectedModelUsesLlamaRuntime ? (
+                        <>
+                          <label className="field-stack">
+                            <span className="section-label">Context length</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  contextLength: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.contextLength}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Batch size</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="512"
+                              step="512"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  batchSize: event.target.value,
+                                  ...(selectedModelRequiresPooledRuntime
+                                    ? { ubatchSize: event.target.value }
+                                    : {}),
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.batchSize}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Ubatch size</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  ubatchSize: event.target.value,
+                                  ...(selectedModelRequiresPooledRuntime
+                                    ? { batchSize: event.target.value }
+                                    : {}),
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.ubatchSize}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">GPU layers</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  gpuLayers: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.gpuLayers}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Parallel slots</span>
+                            <input
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              min="1"
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  parallelSlots: event.target.value,
+                                }))
+                              }
+                              type="number"
+                              value={configDraft.parallelSlots}
+                            />
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Flash attention</span>
+                            <select
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  flashAttentionType: event.target.value as FlashAttentionValue,
+                                }))
+                              }
+                              value={configDraft.flashAttentionType}
+                            >
+                              <option value="auto">Auto</option>
+                              <option value="enabled">Enabled</option>
+                              <option value="disabled">Disabled</option>
+                            </select>
+                          </label>
+                          <label className="field-stack">
+                            <span className="section-label">Pooling method</span>
+                            <select
+                              className="text-input"
+                              disabled={!canSaveConfig}
+                              onChange={(event) =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  poolingMethod: event.target.value as "" | PoolingMethodValue,
+                                }))
+                              }
+                              value={configDraft.poolingMethod}
+                            >
+                              <option value="">Not set</option>
+                              <option value="none">None</option>
+                              <option value="mean">Mean</option>
+                              <option value="cls">CLS</option>
+                              <option value="last">Last</option>
+                              <option value="rank">Rank</option>
+                            </select>
+                          </label>
+                        </>
+                      ) : null}
+                    </div>
+
+                    <label className="checkbox-row">
+                      <input
+                        checked={configDraft.pinned}
+                        disabled={!canSaveConfig}
+                        onChange={(event) =>
+                          setConfigDraft((current) => ({
+                            ...current,
+                            pinned: event.target.checked,
+                          }))
+                        }
+                        type="checkbox"
+                      />
+                      <span>Pin this model in memory after the next successful preload.</span>
+                    </label>
+
+                    <div className="button-row">
+                      <button
+                        className="secondary-button"
+                        disabled={!canSaveConfig}
+                        onClick={() => void saveAdvancedConfig()}
                         type="button"
                       >
-                        {pendingActionModelId === selectedModel.id ? "Saving..." : "Save alias"}
+                        {pendingActionModelId === selectedModel.id
+                          ? "Saving..."
+                          : "Save advanced settings"}
                       </button>
                     </div>
                   </div>
-                  <span className="status-pill status-pill-positive">No eviction needed</span>
-                </div>
-              </div>
 
-              <div className="advanced-config-card modal-section-card">
-                <div className="panel-header">
-                  <div>
-                    <span className="section-label">Advanced configuration</span>
-                    <h3>
-                      {selectedModelUsesLlamaRuntime
-                        ? "Safe cold-start overrides"
-                        : "Shared runtime settings"}
-                    </h3>
-                  </div>
-                  <span
-                    className={
-                      selectedModel.loaded
-                        ? "status-pill status-pill-caution"
-                        : "status-pill status-pill-neutral"
-                    }
-                  >
-                    {selectedModel.loaded ? "Evict before editing" : "Editable"}
-                  </span>
-                </div>
-                <p>
-                  {selectedModelUsesLlamaRuntime
-                    ? "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
-                    : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
-                </p>
-
-                <div className="settings-grid">
-                  <label className="field-stack">
-                    <span className="section-label">Warm TTL (minutes)</span>
-                    <input
-                      className="text-input"
-                      disabled={!canSaveConfig}
-                      min="1"
-                      onChange={(event) =>
-                        setConfigDraft((current) => ({
-                          ...current,
-                          defaultTtlMinutes: event.target.value,
-                        }))
-                      }
-                      type="number"
-                      value={configDraft.defaultTtlMinutes}
-                    />
-                  </label>
-                  {selectedModelUsesLlamaRuntime ? (
-                    <>
-                      <label className="field-stack">
-                        <span className="section-label">Context length</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="1"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              contextLength: event.target.value,
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.contextLength}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Batch size</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="512"
-                          step="512"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              batchSize: event.target.value,
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.batchSize}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">GPU layers</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="1"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              gpuLayers: event.target.value,
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.gpuLayers}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Parallel slots</span>
-                        <input
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          min="1"
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              parallelSlots: event.target.value,
-                            }))
-                          }
-                          type="number"
-                          value={configDraft.parallelSlots}
-                        />
-                      </label>
-                      <label className="field-stack">
-                        <span className="section-label">Flash attention</span>
-                        <select
-                          className="text-input"
-                          disabled={!canSaveConfig}
-                          onChange={(event) =>
-                            setConfigDraft((current) => ({
-                              ...current,
-                              flashAttentionType: event.target.value as FlashAttentionValue,
-                            }))
-                          }
-                          value={configDraft.flashAttentionType}
-                        >
-                          <option value="auto">Auto</option>
-                          <option value="enabled">Enabled</option>
-                          <option value="disabled">Disabled</option>
-                        </select>
-                      </label>
-                    </>
-                  ) : null}
-                </div>
-
-                <label className="checkbox-row">
-                  <input
-                    checked={configDraft.pinned}
-                    disabled={!canSaveConfig}
-                    onChange={(event) =>
-                      setConfigDraft((current) => ({ ...current, pinned: event.target.checked }))
-                    }
-                    type="checkbox"
-                  />
-                  <span>Pin this model in memory after the next successful preload.</span>
-                </label>
-
-                <div className="button-row">
-                  <button
-                    className="secondary-button"
-                    disabled={!canSaveConfig}
-                    onClick={() => void saveAdvancedConfig()}
-                    type="button"
-                  >
-                    {pendingActionModelId === selectedModel.id
-                      ? "Saving..."
-                      : "Save advanced settings"}
-                  </button>
-                </div>
-              </div>
-
-              <div className="advanced-config-card modal-section-card">
-                <div className="panel-header">
-                  <div>
-                    <span className="section-label">Capability overrides</span>
-                    <h3>Force model abilities on or off</h3>
-                  </div>
-                  <span
-                    className={
-                      hasCapabilityOverrides
-                        ? "status-pill status-pill-caution"
-                        : "status-pill status-pill-neutral"
-                    }
-                  >
-                    {hasCapabilityOverrides ? "Overrides active" : "Using defaults"}
-                  </span>
-                </div>
-                <p>
-                  Leave a capability on <strong>Auto</strong> to keep the detected default from the
-                  registered model metadata. Explicit overrides are saved to the profile and apply
-                  on the next preload.
-                </p>
-
-                <div className="capability-override-list">
-                  {capabilityDefinitions.map(({ key, label, description }) => (
-                    <div className="capability-override-row" key={key}>
-                      <div className="capability-override-copy">
-                        <strong>{label}</strong>
-                        <span>{description}</span>
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Capability overrides</span>
+                        <h3>Force model abilities on or off</h3>
                       </div>
-                      <div
-                        aria-label={`${label} capability override`}
-                        className="capability-toggle-group"
-                        role="group"
+                      <span
+                        className={
+                          hasCapabilityOverrides
+                            ? "status-pill status-pill-caution"
+                            : "status-pill status-pill-neutral"
+                        }
                       >
-                        {capabilityToggleOptions.map((option) => {
-                          const isSelected = configDraft.capabilityOverrides[key] === option.value;
-                          const optionTone =
-                            option.value === "inherit"
-                              ? "auto"
-                              : option.value === "enabled"
-                                ? "enabled"
-                                : "disabled";
+                        {hasCapabilityOverrides ? "Overrides active" : "Using defaults"}
+                      </span>
+                    </div>
+                    <p>
+                      Leave a capability on <strong>Auto</strong> to keep the detected default from
+                      the registered model metadata. Explicit overrides are saved to the profile and
+                      apply on the next preload.
+                    </p>
 
-                          return (
-                            <button
-                              aria-pressed={isSelected}
-                              className={[
-                                "capability-toggle-button",
-                                `capability-toggle-button-${optionTone}`,
-                                isSelected ? "capability-toggle-button-selected" : "",
-                              ]
-                                .filter(Boolean)
-                                .join(" ")}
-                              disabled={!canSaveConfig}
-                              key={option.value}
-                              onClick={() =>
-                                setConfigDraft((current) => ({
-                                  ...current,
-                                  capabilityOverrides: {
-                                    ...current.capabilityOverrides,
-                                    [key]: option.value,
-                                  },
-                                }))
-                              }
-                              type="button"
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
+                    <div className="capability-override-list">
+                      {capabilityDefinitions.map(({ key, label, description }) => (
+                        <div className="capability-override-row" key={key}>
+                          <div className="capability-override-copy">
+                            <strong>{label}</strong>
+                            <span>{description}</span>
+                          </div>
+                          <div
+                            aria-label={`${label} capability override`}
+                            className="capability-toggle-group"
+                            role="group"
+                          >
+                            {capabilityToggleOptions.map((option) => {
+                              const isSelected =
+                                configDraft.capabilityOverrides[key] === option.value;
+                              const optionTone =
+                                option.value === "inherit"
+                                  ? "auto"
+                                  : option.value === "enabled"
+                                    ? "enabled"
+                                    : "disabled";
+
+                              return (
+                                <button
+                                  aria-pressed={isSelected}
+                                  className={[
+                                    "capability-toggle-button",
+                                    `capability-toggle-button-${optionTone}`,
+                                    isSelected ? "capability-toggle-button-selected" : "",
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" ")}
+                                  disabled={!canSaveConfig}
+                                  key={option.value}
+                                  onClick={() =>
+                                    setConfigDraft((current) => ({
+                                      ...current,
+                                      capabilityOverrides: {
+                                        ...current.capabilityOverrides,
+                                        [key]: option.value,
+                                      },
+                                    }))
+                                  }
+                                  type="button"
+                                >
+                                  {option.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="capability-override-summary">
+                      <span className="section-label">Current overrides</span>
+                      <div className="pill-row">
+                        {hasCapabilityOverrides ? (
+                          capabilityDefinitions
+                            .filter(
+                              ({ key }) => selectedModel.capabilityOverrides[key] !== undefined,
+                            )
+                            .map(({ key, label }) => {
+                              const value = selectedModel.capabilityOverrides[key];
+                              return (
+                                <span className="meta-pill" key={key}>
+                                  {label}:{" "}
+                                  {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
+                                </span>
+                              );
+                            })
+                        ) : (
+                          <span className="meta-pill meta-pill-muted">No explicit overrides</span>
+                        )}
                       </div>
                     </div>
-                  ))}
-                </div>
-
-                <div className="capability-override-summary">
-                  <span className="section-label">Current overrides</span>
-                  <div className="pill-row">
-                    {hasCapabilityOverrides ? (
-                      capabilityDefinitions
-                        .filter(({ key }) => selectedModel.capabilityOverrides[key] !== undefined)
-                        .map(({ key, label }) => {
-                          const value = selectedModel.capabilityOverrides[key];
-                          return (
-                            <span className="meta-pill" key={key}>
-                              {label}:{" "}
-                              {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
-                            </span>
-                          );
-                        })
-                    ) : (
-                      <span className="meta-pill meta-pill-muted">No explicit overrides</span>
-                    )}
                   </div>
-                </div>
-              </div>
+
+                  <div className="advanced-config-card modal-section-card">
+                    <div className="panel-header">
+                      <div>
+                        <span className="section-label">Danger zone</span>
+                        <h3>Delete registration</h3>
+                      </div>
+                      <span className="status-pill status-pill-negative">
+                        {selectedModel.loaded ? "Will evict first" : "Permanent change"}
+                      </span>
+                    </div>
+                    <p>
+                      Remove this model from the registered inventory. If file deletion is enabled,
+                      the gateway also removes the model artifact from disk, including any related
+                      MMProj sidecar it knows about.
+                    </p>
+                    <label className="checkbox-row">
+                      <input
+                        checked={deleteFilesOnRemove}
+                        disabled={!canDeleteModel}
+                        onChange={(event) => setDeleteFilesOnRemove(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span>
+                        Also delete related files from disk
+                        {selectedModel.artifactStatus === "missing"
+                          ? " if any remnants still exist."
+                          : "."}
+                      </span>
+                    </label>
+                    <div className="button-row">
+                      <button
+                        className="secondary-button danger-button"
+                        disabled={!canDeleteModel}
+                        onClick={() => void deleteModel()}
+                        type="button"
+                      >
+                        {pendingActionModelId === selectedModel.id
+                          ? "Deleting..."
+                          : deleteFilesOnRemove
+                            ? "Delete model and files"
+                            : "Delete model registration"}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -1302,161 +1547,6 @@ export function ModelsScreen({
           </div>
         </article>
 
-        <article className="info-card">
-          <span className="section-label">Engine versions</span>
-          <h3>Resolved runtimes</h3>
-          <p>
-            The gateway records the engine version that actually served the worker so the desktop
-            detail view can show what is running across both `llama.cpp` and MLX.
-          </p>
-
-          <div className="button-row">
-            <button
-              className="primary-button"
-              disabled={!connected || pendingEngineAction !== null}
-              onClick={() => void handleDownloadMetalBinary()}
-              type="button"
-            >
-              {pendingEngineAction === "download" ? "Downloading..." : "Download Metal build"}
-            </button>
-            {mlxSupported ? (
-              <button
-                className="secondary-button"
-                disabled={!connected || pendingEngineAction !== null}
-                onClick={() => void handleInstallMlxRuntime()}
-                type="button"
-              >
-                {pendingEngineAction === "install-mlx"
-                  ? mlxUpdateAvailable
-                    ? "Updating..."
-                    : "Downloading..."
-                  : !mlxInstalled
-                    ? "Download latest MLX runtime"
-                    : mlxUpdateAvailable
-                      ? "Update MLX runtime"
-                      : "Reinstall latest MLX runtime"}
-              </button>
-            ) : null}
-            <button
-              className="secondary-button"
-              disabled={!connected || pendingEngineAction !== null}
-              onClick={() => void handleImportLocalBinary()}
-              type="button"
-            >
-              {pendingEngineAction === "import" ? "Packaging..." : "Import local binary"}
-            </button>
-          </div>
-
-          <p className="search-detail-note">
-            Downloaded Metal builds and managed MLX runtimes are copied into the app support engines
-            directory. Local binary imports are packaged the same way so the app owns the installed
-            executable. Use the picker below to switch the active version for future launches.
-          </p>
-          {mlxSupported && latestMlxRuntimeLabel ? (
-            <p className="search-detail-note">
-              Latest managed MLX runtime: {latestMlxRuntimeLabel}
-              {runtimeContext?.mlx.activeMlxVersion && runtimeContext?.mlx.activeMlxLmVersion
-                ? ` · active stack: mlx ${runtimeContext.mlx.activeMlxVersion} / mlx-lm ${runtimeContext.mlx.activeMlxLmVersion}`
-                : ""}
-              {runtimeContext?.mlx.updateAvailable ? " · update available" : ""}
-            </p>
-          ) : null}
-
-          {engines.length > 0 ? (
-            <>
-              <label className="field-stack">
-                <span className="section-label">Active engine version</span>
-                <select
-                  className="text-input"
-                  disabled={!connected || pendingEngineAction !== null}
-                  onChange={(event) => setSelectedEngineVersionTag(event.target.value)}
-                  value={selectedEngineVersion?.version ?? ""}
-                >
-                  {engines.map((engine) => (
-                    <option key={engine.id} value={engine.version}>
-                      {engine.engineType} / {engine.version}
-                      {engine.active ? " (active)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="button-row">
-                <button
-                  className="primary-button"
-                  disabled={!connected || !selectedEngineVersion || pendingEngineAction !== null}
-                  onClick={() => void handleActivateEngineVersion()}
-                  type="button"
-                >
-                  {pendingEngineAction === "activate"
-                    ? "Activating..."
-                    : "Activate selected version"}
-                </button>
-              </div>
-
-              <p className="search-detail-note">
-                Switching versions updates the registry used for future worker launches. Existing
-                workers keep running until they are evicted or restarted.
-              </p>
-            </>
-          ) : null}
-
-          {engineFeedback ? (
-            <div
-              className={
-                engineFeedback.tone === "error"
-                  ? "detail-alert feedback-card-error"
-                  : "detail-alert"
-              }
-            >
-              <strong>{engineFeedback.title}</strong>
-              <p>{engineFeedback.text}</p>
-            </div>
-          ) : null}
-
-          {engines.length === 0 ? (
-            <div className="empty-panel compact-empty">
-              <strong>No engine versions recorded yet.</strong>
-              <p>The first preload or runtime install will materialize the resolved engine here.</p>
-            </div>
-          ) : (
-            <div className="engine-list">
-              {engines.map((engine) => (
-                <div
-                  className={engine.active ? "engine-card engine-card-active" : "engine-card"}
-                  key={engine.id}
-                >
-                  <div className="model-card-head">
-                    <div>
-                      <span className="section-label">{engine.engineType}</span>
-                      <h4>{engine.version}</h4>
-                    </div>
-                    <span
-                      className={
-                        engine.active
-                          ? "status-pill status-pill-positive"
-                          : "status-pill status-pill-neutral"
-                      }
-                    >
-                      {engine.active ? "Active" : "Installed"}
-                    </span>
-                  </div>
-                  <p>{engine.compatibilityNotes ?? "Resolved engine binary."}</p>
-                  <dl className="meta-grid compact-meta-grid">
-                    <div>
-                      <dt>Channel</dt>
-                      <dd>{engine.channel}</dd>
-                    </div>
-                    <div>
-                      <dt>Installed</dt>
-                      <dd>{engine.installed ? "Yes" : "No"}</dd>
-                    </div>
-                  </dl>
-                </div>
-              ))}
-            </div>
-          )}
-        </article>
       </div>
     </section>
   );

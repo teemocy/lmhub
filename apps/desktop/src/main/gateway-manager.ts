@@ -31,6 +31,8 @@ import {
   type DesktopLocalModelImportResponse,
   type DesktopModelConfigUpdateRequest,
   type DesktopModelConfigUpdateResponse,
+  type DesktopModelDeleteRequest,
+  type DesktopModelDeleteResponse,
   type DesktopModelLibrary,
   type DesktopModelRecord,
   type DesktopProviderCatalogDetailResponse,
@@ -55,6 +57,7 @@ import {
   desktopEngineListSchema,
   desktopLocalModelImportResponseSchema,
   desktopModelConfigUpdateResponseSchema,
+  desktopModelDeleteResponseSchema,
   desktopModelLibrarySchema,
   desktopProviderCatalogDetailResponseSchema,
   desktopProviderSearchResultSchema,
@@ -334,6 +337,7 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     case "GET /control/health":
     case "GET /control/models":
     case "POST /control/models/register-local":
+    case "DELETE /control/models/:id":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "GET /control/chat/sessions":
@@ -352,6 +356,9 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     default:
       if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(pathName)) {
         return "PUT /config/models/:id";
+      }
+      if (method.toUpperCase() === "DELETE" && /^\/control\/models\/.+$/.test(pathName)) {
+        return "DELETE /control/models/:id";
       }
       if (
         method.toUpperCase() === "DELETE" &&
@@ -710,7 +717,7 @@ export class GatewayManager extends EventEmitter {
         }),
         body: JSON.stringify(payload),
       }),
-      "Unable to install the selected llama.cpp binary.",
+      "Unable to install the selected engine runtime.",
     );
 
     return desktopEngineInstallResponseSchema.parse(json);
@@ -732,6 +739,26 @@ export class GatewayManager extends EventEmitter {
     );
 
     return desktopLocalModelImportResponseSchema.parse(json);
+  }
+
+  async deleteRegisteredModel(
+    modelId: string,
+    payload: DesktopModelDeleteRequest = {},
+  ): Promise<DesktopModelDeleteResponse> {
+    const discovery = this.requireDiscovery();
+    const encodedModelId = encodeURIComponent(modelId);
+    const json = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/models/${encodedModelId}`, {
+        method: "DELETE",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify(payload),
+      }),
+      `Unable to delete ${modelId}.`,
+    );
+
+    return desktopModelDeleteResponseSchema.parse(json);
   }
 
   async updateModelConfig(
@@ -1225,6 +1252,22 @@ export class GatewayManager extends EventEmitter {
         body: JSON.stringify({ action: "resume", id }),
       }),
       "Unable to resume download task.",
+    );
+
+    return desktopDownloadActionResponseSchema.parse(payload);
+  }
+
+  async retryDownload(id: string): Promise<DesktopDownloadActionResponse> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ action: "retry", id }),
+      }),
+      "Unable to retry download task.",
     );
 
     return desktopDownloadActionResponseSchema.parse(payload);

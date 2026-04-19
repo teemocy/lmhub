@@ -427,8 +427,10 @@ describe("gateway skeleton", () => {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
         batchSize: 3072,
+        ubatchSize: 3072,
         gpuLayers: 16,
         flashAttentionType: "enabled",
+        poolingMethod: "mean",
         parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
@@ -446,8 +448,10 @@ describe("gateway skeleton", () => {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
         batchSize: 3072,
+        ubatchSize: 3072,
         gpuLayers: 16,
         flashAttentionType: "enabled",
+        poolingMethod: "mean",
         parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
@@ -457,6 +461,35 @@ describe("gateway skeleton", () => {
         },
         role: "embeddings",
         capabilities: expect.arrayContaining(["embeddings"]),
+      }),
+    });
+  });
+
+  it("allows switching a model into embeddings mode without an explicit pooling override", async () => {
+    const gateway = await createTestGateway();
+
+    const response = await gateway.controlApp.inject({
+      method: "PUT",
+      url: "/config/models/localhub/tinyllama-1.1b-chat-q4",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        batchSize: 3072,
+        ubatchSize: 3072,
+        capabilityOverrides: {
+          chat: false,
+          embeddings: true,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      model: expect.objectContaining({
+        role: "embeddings",
+        batchSize: 3072,
+        ubatchSize: 3072,
       }),
     });
   });
@@ -503,6 +536,9 @@ describe("gateway skeleton", () => {
       async registerLocalModel() {
         throw new Error("not implemented");
       },
+      async deleteRegisteredModel() {
+        throw new Error("not implemented");
+      },
       deleteChatSession() {
         return false;
       },
@@ -510,6 +546,12 @@ describe("gateway skeleton", () => {
         throw new Error("not implemented");
       },
       async evictModel() {
+        throw new Error("not implemented");
+      },
+      async retryDownload() {
+        throw new Error("not implemented");
+      },
+      async createRerank() {
         throw new Error("not implemented");
       },
       recordRequestTrace() {},
@@ -605,6 +647,47 @@ describe("gateway skeleton", () => {
     expect(downloadCreateResponse.statusCode).toBe(400);
     expect(downloadCreateResponse.json()).toMatchObject({
       error: "validation_error",
+    });
+  });
+
+  it("handles dedicated retry actions for download tasks", async () => {
+    const gateway = await createTestGateway();
+
+    const missingIdResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/downloads",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        action: "retry",
+      },
+    });
+
+    const retryResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/downloads",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        action: "retry",
+        id: "download-demo-1",
+      },
+    });
+
+    expect(missingIdResponse.statusCode).toBe(400);
+    expect(missingIdResponse.json()).toMatchObject({
+      error: "invalid_request",
+      message: "Download id is required for retry.",
+    });
+    expect(retryResponse.statusCode).toBe(202);
+    expect(retryResponse.json()).toMatchObject({
+      accepted: true,
+      task: expect.objectContaining({
+        id: "download-demo-1",
+        status: "downloading",
+      }),
     });
   });
 
@@ -727,6 +810,9 @@ describe("gateway skeleton", () => {
       async resumeDownload() {
         throw new Error("not implemented");
       },
+      async retryDownload() {
+        throw new Error("not implemented");
+      },
       async deleteDownload() {
         throw new Error("not implemented");
       },
@@ -740,6 +826,9 @@ describe("gateway skeleton", () => {
         };
       },
       async registerLocalModel() {
+        throw new Error("not implemented");
+      },
+      async deleteRegisteredModel() {
         throw new Error("not implemented");
       },
       async deleteChatSession() {
@@ -766,6 +855,9 @@ describe("gateway skeleton", () => {
         throw new Error("not implemented");
       },
       async createEmbeddings() {
+        throw new Error("not implemented");
+      },
+      async createRerank() {
         throw new Error("not implemented");
       },
       recordRequestTrace() {},

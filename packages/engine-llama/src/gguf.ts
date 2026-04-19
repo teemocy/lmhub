@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync, readFileSync, readdirSync } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
 
@@ -8,6 +8,16 @@ import type { GgufMetadata, ModelArtifact } from "@localhub/shared-contracts/fou
 const GGUF_MAGIC = "GGUF";
 const MAX_SAFE_U64 = BigInt(Number.MAX_SAFE_INTEGER);
 const MAX_ARRAY_SAMPLE = 8;
+const MAX_REASONABLE_CONTEXT_LENGTH = 10_000_000;
+const MAX_REASONABLE_PARAMETER_COUNT = 10_000_000_000_000;
+const GENERIC_TOKENIZER_CLASS_PATTERN = /^(?:AutoTokenizer|PreTrainedTokenizer(?:Fast)?)$/;
+const GENERIC_TOKENIZER_PATTERN = /^(?:gpt2|bpe|sentencepiece|llama|unknown)$/i;
+const GGUF_COMPANION_FILE_NAMES = [
+  "config.json",
+  "generation_config.json",
+  "tokenizer_config.json",
+  "tokenizer.json",
+] as const;
 
 enum GgufValueType {
   Uint8 = 0,
@@ -27,6 +37,15 @@ enum GgufValueType {
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+interface GgufCompanionMetadata {
+  files: string[];
+  modelName?: string;
+  architecture?: string;
+  contextLength?: number;
+  parameterCount?: number;
+  tokenizer?: string;
+}
 
 export interface SniffedGgufMetadata {
   format: "gguf";
@@ -230,6 +249,474 @@ function firstNumber(value: JsonValue | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function getOptionalNumber(
+  value: unknown,
+  options: {
+    integer?: boolean;
+    max?: number;
+  } = {},
+): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const normalized = options.integer ? Math.floor(value) : value;
+  if (normalized <= 0) {
+    return undefined;
+  }
+  if (options.max !== undefined && normalized > options.max) {
+    return undefined;
+  }
+
+  return normalized;
+}
+
+function getNestedRecord(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = record[key];
+  return isRecord(value) ? value : undefined;
+}
+
+function readJsonRecord(filePath: string): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function normalizeArchitectureLabel(value: string): string {
+  return value
+    .replace(
+      /(For(?:CausalLM|ConditionalGeneration|QuestionAnswering|SequenceClassification|TokenClassification|MaskedLM|SpeechSeq2Seq|VisionTextDualEncoder|ImageTextToText)|Model)$/u,
+      "",
+    )
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+}
+
+function getModelConfigRecords(config: Record<string, unknown>): Record<string, unknown>[] {
+  const records = [config];
+  const textConfig = getNestedRecord(config, "text_config");
+  if (textConfig) {
+    records.push(textConfig);
+  }
+
+  return records;
+}
+
+function pickFirstInteger(
+  records: readonly Record<string, unknown>[],
+  keys: readonly string[],
+  max: number,
+): number | undefined {
+  for (const record of records) {
+    for (const key of keys) {
+      const value = getOptionalNumber(record[key], { integer: true, max });
+      if (value !== undefined) {
+        return value;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function getCompanionArchitecture(config: Record<string, unknown>): string | undefined {
+  for (const record of getModelConfigRecords(config)) {
+    const modelType = getOptionalString(record.model_type);
+    if (modelType) {
+      return normalizeArchitectureLabel(modelType);
+    }
+  }
+
+  for (const record of getModelConfigRecords(config)) {
+    const architectures = record.architectures;
+    if (!Array.isArray(architectures)) {
+      continue;
+    }
+
+    const architecture = architectures.find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (architecture) {
+      return normalizeArchitectureLabel(architecture);
+    }
+  }
+
+  return undefined;
+}
+
+function getCompanionContextLength(
+  config: Record<string, unknown>,
+  generationConfig: Record<string, unknown>,
+  tokenizerConfig: Record<string, unknown>,
+): number | undefined {
+  const records = [...getModelConfigRecords(config), generationConfig, tokenizerConfig].filter(
+    (record) => Object.keys(record).length > 0,
+  );
+  const directValue = pickFirstInteger(
+    records,
+    [
+      "max_position_embeddings",
+      "max_sequence_length",
+      "max_seq_len",
+      "n_ctx",
+      "seq_length",
+      "sequence_length",
+      "model_max_length",
+      "max_length",
+    ],
+    MAX_REASONABLE_CONTEXT_LENGTH,
+  );
+  if (directValue !== undefined) {
+    return directValue;
+  }
+
+  for (const record of records) {
+    const ropeScaling = getNestedRecord(record, "rope_scaling");
+    if (!ropeScaling) {
+      continue;
+    }
+
+    const originalMaxPositionEmbeddings = getOptionalNumber(
+      ropeScaling.original_max_position_embeddings,
+      {
+        integer: true,
+        max: MAX_REASONABLE_CONTEXT_LENGTH,
+      },
+    );
+    if (originalMaxPositionEmbeddings !== undefined) {
+      return originalMaxPositionEmbeddings;
+    }
+  }
+
+  return undefined;
+}
+
+function roundParameterCount(value: number): number {
+  return Math.round(value / 1_000_000) * 1_000_000;
+}
+
+function getParameterCountFromName(...texts: Array<string | undefined>): number | undefined {
+  let bestMatch: number | undefined;
+
+  for (const text of texts) {
+    if (!text) {
+      continue;
+    }
+
+    for (const match of text.matchAll(/(\d+(?:\.\d+)?)\s*[xX]\s*(\d+(?:\.\d+)?)\s*B\b/g)) {
+      const value = Number(match[1]) * Number(match[2]) * 1_000_000_000;
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+      bestMatch = bestMatch === undefined ? value : Math.max(bestMatch, value);
+    }
+
+    for (const match of text.matchAll(/(\d+(?:\.\d+)?)\s*(T|B|M)\b/gi)) {
+      const scalar = Number(match[1]);
+      if (!Number.isFinite(scalar)) {
+        continue;
+      }
+
+      const unit = match[2]?.toUpperCase();
+      const multiplier =
+        unit === "T" ? 1_000_000_000_000 : unit === "B" ? 1_000_000_000 : 1_000_000;
+      const value = scalar * multiplier;
+      bestMatch = bestMatch === undefined ? value : Math.max(bestMatch, value);
+    }
+  }
+
+  return bestMatch !== undefined ? roundParameterCount(bestMatch) : undefined;
+}
+
+function inferUsesGatedMlp(architecture: string | undefined): boolean {
+  if (!architecture) {
+    return false;
+  }
+
+  return [
+    "llama",
+    "mistral",
+    "mixtral",
+    "gemma",
+    "qwen",
+    "qwen2",
+    "qwen3",
+    "phi3",
+    "deepseek",
+    "cohere",
+    "internlm",
+  ].some((prefix) => architecture.startsWith(prefix));
+}
+
+function estimateDenseTransformerParameterCount(
+  config: Record<string, unknown>,
+  architecture: string | undefined,
+): number | undefined {
+  const modelConfig = getNestedRecord(config, "text_config") ?? config;
+  const expertCount =
+    getOptionalNumber(modelConfig.num_local_experts, { integer: true }) ??
+    getOptionalNumber(modelConfig.num_experts, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_routed_experts, { integer: true });
+  if (expertCount !== undefined && expertCount > 1) {
+    return undefined;
+  }
+
+  const hiddenSize =
+    getOptionalNumber(modelConfig.hidden_size, { integer: true }) ??
+    getOptionalNumber(modelConfig.d_model, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_embd, { integer: true });
+  const layerCount =
+    getOptionalNumber(modelConfig.num_hidden_layers, { integer: true }) ??
+    getOptionalNumber(modelConfig.num_layers, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_layer, { integer: true });
+  const vocabSize = getOptionalNumber(modelConfig.vocab_size, { integer: true });
+  const intermediateSize =
+    getOptionalNumber(modelConfig.intermediate_size, { integer: true }) ??
+    getOptionalNumber(modelConfig.ffn_hidden_size, { integer: true }) ??
+    getOptionalNumber(modelConfig.ffn_dim, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_inner, { integer: true });
+  const attentionHeadCount =
+    getOptionalNumber(modelConfig.num_attention_heads, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_head, { integer: true });
+
+  if (
+    hiddenSize === undefined ||
+    layerCount === undefined ||
+    vocabSize === undefined ||
+    intermediateSize === undefined ||
+    attentionHeadCount === undefined
+  ) {
+    return undefined;
+  }
+
+  const keyValueHeadCount =
+    getOptionalNumber(modelConfig.num_key_value_heads, { integer: true }) ??
+    getOptionalNumber(modelConfig.num_kv_heads, { integer: true }) ??
+    getOptionalNumber(modelConfig.n_head_kv, { integer: true }) ??
+    attentionHeadCount;
+  const headDimension =
+    getOptionalNumber(modelConfig.head_dim, { integer: true }) ??
+    (hiddenSize % attentionHeadCount === 0 ? hiddenSize / attentionHeadCount : undefined);
+  if (headDimension === undefined) {
+    return undefined;
+  }
+
+  const queryProjection = hiddenSize * hiddenSize;
+  const keyValueProjectionWidth = headDimension * keyValueHeadCount;
+  const keyProjection = hiddenSize * keyValueProjectionWidth;
+  const valueProjection = hiddenSize * keyValueProjectionWidth;
+  const outputProjection = hiddenSize * hiddenSize;
+  const attentionParameters = queryProjection + keyProjection + valueProjection + outputProjection;
+  const mlpProjectionCount = inferUsesGatedMlp(architecture) ? 3 : 2;
+  const mlpParameters = hiddenSize * intermediateSize * mlpProjectionCount;
+  const layerNormParameters = hiddenSize * 2;
+  const tieWordEmbeddings = modelConfig.tie_word_embeddings === true;
+
+  let embeddingParameters = vocabSize * hiddenSize * (tieWordEmbeddings ? 1 : 2);
+  if (architecture && /^(?:gpt2|gptj|bert|roberta|distilbert)/.test(architecture)) {
+    const positionEmbeddingCount = getOptionalNumber(modelConfig.max_position_embeddings, {
+      integer: true,
+      max: MAX_REASONABLE_CONTEXT_LENGTH,
+    });
+    if (positionEmbeddingCount !== undefined) {
+      embeddingParameters += positionEmbeddingCount * hiddenSize;
+    }
+  }
+
+  const total =
+    layerCount * (attentionParameters + mlpParameters + layerNormParameters) +
+    embeddingParameters +
+    hiddenSize;
+  if (!Number.isFinite(total) || total <= 0 || total > MAX_REASONABLE_PARAMETER_COUNT) {
+    return undefined;
+  }
+
+  return roundParameterCount(total);
+}
+
+function getCompanionParameterCount(
+  config: Record<string, unknown>,
+  filePath: string,
+  modelName: string | undefined,
+  architecture: string | undefined,
+): number | undefined {
+  const explicitValue = pickFirstInteger(
+    getModelConfigRecords(config),
+    ["num_parameters", "parameter_count", "num_params"],
+    MAX_REASONABLE_PARAMETER_COUNT,
+  );
+  if (explicitValue !== undefined) {
+    return explicitValue;
+  }
+
+  const nameBasedValue = getParameterCountFromName(
+    modelName,
+    getOptionalString(config._name_or_path),
+    getOptionalString(config.name),
+    path.basename(filePath, path.extname(filePath)),
+    path.basename(path.dirname(filePath)),
+  );
+  if (nameBasedValue !== undefined) {
+    return nameBasedValue;
+  }
+
+  return estimateDenseTransformerParameterCount(config, architecture);
+}
+
+function getCompanionTokenizer(
+  directory: string,
+  fileEntries: readonly string[],
+  tokenizerConfig: Record<string, unknown>,
+): string | undefined {
+  const tokenizerClass = getOptionalString(tokenizerConfig.tokenizer_class);
+  if (tokenizerClass && !GENERIC_TOKENIZER_CLASS_PATTERN.test(tokenizerClass)) {
+    return tokenizerClass;
+  }
+
+  const tokenizerJson = readJsonRecord(path.join(directory, "tokenizer.json"));
+  const tokenizerModel = getNestedRecord(tokenizerJson, "model");
+  const tokenizerType = tokenizerModel ? getOptionalString(tokenizerModel.type) : undefined;
+  if (tokenizerType) {
+    return tokenizerType.toLowerCase();
+  }
+
+  if (tokenizerClass) {
+    return tokenizerClass;
+  }
+  if (fileEntries.some((entry) => /\.tiktoken$/i.test(entry))) {
+    return "tiktoken";
+  }
+  if (fileEntries.some((entry) => /^tokenizer\.model$/i.test(entry))) {
+    return "sentencepiece";
+  }
+
+  return undefined;
+}
+
+function shouldPreferCompanionTokenizer(
+  tokenizer: string | undefined,
+  companionTokenizer: string | undefined,
+): boolean {
+  if (!companionTokenizer) {
+    return false;
+  }
+  if (!tokenizer) {
+    return true;
+  }
+
+  return (
+    GENERIC_TOKENIZER_PATTERN.test(tokenizer) ||
+    GENERIC_TOKENIZER_CLASS_PATTERN.test(tokenizer)
+  );
+}
+
+function readGgufCompanionMetadata(
+  filePath: string,
+  sniffed: SniffedGgufMetadata,
+): GgufCompanionMetadata | undefined {
+  const directory = path.dirname(filePath);
+  const files = GGUF_COMPANION_FILE_NAMES.filter((fileName) =>
+    existsSync(path.join(directory, fileName)),
+  );
+  if (files.length === 0) {
+    return undefined;
+  }
+
+  const config = readJsonRecord(path.join(directory, "config.json"));
+  const generationConfig = readJsonRecord(path.join(directory, "generation_config.json"));
+  const tokenizerConfig = readJsonRecord(path.join(directory, "tokenizer_config.json"));
+  const fileEntries = (() => {
+    try {
+      return readdirSync(directory);
+    } catch {
+      return [] as string[];
+    }
+  })();
+  const modelName =
+    getOptionalString(config._name_or_path) ??
+    getOptionalString(config.name) ??
+    sniffed.modelName;
+  const architecture = getCompanionArchitecture(config);
+  const contextLength = getCompanionContextLength(config, generationConfig, tokenizerConfig);
+  const parameterCount = getCompanionParameterCount(config, filePath, modelName, architecture);
+  const tokenizer = getCompanionTokenizer(directory, fileEntries, tokenizerConfig);
+
+  return {
+    files,
+    ...(modelName ? { modelName } : {}),
+    ...(architecture ? { architecture } : {}),
+    ...(contextLength !== undefined ? { contextLength } : {}),
+    ...(parameterCount !== undefined ? { parameterCount } : {}),
+    ...(tokenizer ? { tokenizer } : {}),
+  };
+}
+
+function mergeCompanionMetadata(
+  filePath: string,
+  sniffed: SniffedGgufMetadata,
+): SniffedGgufMetadata {
+  const companion = readGgufCompanionMetadata(filePath, sniffed);
+  if (!companion) {
+    return sniffed;
+  }
+
+  const metadata: Record<string, JsonValue> = {
+    ...sniffed.metadata,
+    "companion.files": companion.files,
+  };
+  if (companion.modelName) {
+    metadata["companion.model_name"] = companion.modelName;
+  }
+  if (companion.architecture) {
+    metadata["companion.architecture"] = companion.architecture;
+  }
+  if (companion.contextLength !== undefined) {
+    metadata["companion.context_length"] = companion.contextLength;
+  }
+  if (companion.parameterCount !== undefined) {
+    metadata["companion.parameter_count"] = companion.parameterCount;
+  }
+  if (companion.tokenizer) {
+    metadata["companion.tokenizer"] = companion.tokenizer;
+  }
+
+  const tokenizer = shouldPreferCompanionTokenizer(sniffed.tokenizer, companion.tokenizer)
+    ? companion.tokenizer
+    : sniffed.tokenizer ?? companion.tokenizer;
+
+  return {
+    ...sniffed,
+    metadata,
+    ...(!sniffed.modelName && companion.modelName ? { modelName: companion.modelName } : {}),
+    ...(companion.architecture ? { architecture: companion.architecture } : {}),
+    ...(companion.contextLength !== undefined ? { contextLength: companion.contextLength } : {}),
+    ...(companion.parameterCount !== undefined
+      ? { parameterCount: companion.parameterCount }
+      : {}),
+    ...(tokenizer ? { tokenizer } : {}),
+  };
+}
+
+export function hasGgufCompanionMetadataFiles(filePath: string): boolean {
+  const directory = path.dirname(filePath);
+  return GGUF_COMPANION_FILE_NAMES.some((fileName) => existsSync(path.join(directory, fileName)));
+}
+
 function deriveQuantization(
   metadata: Record<string, JsonValue>,
   fileName: string,
@@ -395,6 +882,10 @@ export async function sniffGgufFile(filePath: string): Promise<SniffedGgufMetada
   }
 }
 
+export async function inspectGgufFile(filePath: string): Promise<SniffedGgufMetadata> {
+  return mergeCompanionMetadata(filePath, await sniffGgufFile(filePath));
+}
+
 export async function computeFileSha256(filePath: string): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     const hash = createHash("sha256");
@@ -419,7 +910,7 @@ export async function verifyGgufFile(
   }
 
   const [metadata, checksumSha256, stats] = await Promise.all([
-    sniffGgufFile(filePath),
+    inspectGgufFile(filePath),
     computeFileSha256(filePath),
     open(filePath, "r").then(async (handle) => {
       try {

@@ -6,6 +6,7 @@ import type {
   DesktopLocalModelImportResponse,
   DesktopModelConfigUpdateRequest,
   DesktopModelConfigUpdateResponse,
+  DesktopModelDeleteResponse,
   DesktopModelRecord,
   DesktopRuntimeContext,
   DesktopShellState,
@@ -165,16 +166,18 @@ export function App() {
     let cancelled = false;
 
     const refresh = async () => {
-      const [library, engineList, healthSnapshot] = await Promise.all([
+      const [library, engineList, healthSnapshot, context] = await Promise.all([
         window.desktopApi.gateway.listModelLibrary(),
         window.desktopApi.gateway.listEngines(),
         window.desktopApi.gateway.getHealth(),
+        window.desktopApi.system.getRuntimeContext(),
       ]);
 
       if (!cancelled) {
         setModelLibrary(library.data);
         setEngines(engineList.data);
         setHealth(healthSnapshot);
+        setRuntimeContext(context);
       }
     };
 
@@ -268,6 +271,7 @@ export function App() {
     payload: DesktopEngineInstallRequest,
   ): Promise<DesktopEngineInstallResponse> => {
     const result = await window.desktopApi.gateway.installEngineBinary(payload);
+    await refreshRuntimeContext();
     requestRefresh();
     return result;
   };
@@ -281,6 +285,7 @@ export function App() {
       action: "activate-installed-version",
       versionTag: payload.versionTag,
     });
+    await refreshRuntimeContext();
     requestRefresh();
     return result;
   };
@@ -288,6 +293,15 @@ export function App() {
   const preloadModel = async (modelId: string): Promise<void> => {
     await window.desktopApi.gateway.preloadModel(modelId);
     requestRefresh();
+  };
+
+  const deleteRegisteredModel = async (
+    modelId: string,
+    options?: { deleteFiles?: boolean },
+  ): Promise<DesktopModelDeleteResponse> => {
+    const result = await window.desktopApi.gateway.deleteRegisteredModel(modelId, options);
+    requestRefresh();
+    return result;
   };
 
   const evictModel = async (modelId: string): Promise<void> => {
@@ -453,15 +467,12 @@ export function App() {
               path="/models"
               element={
                 <ModelsScreen
-                  engines={engines}
                   models={modelLibrary}
                   runtimeContext={runtimeContext}
+                  onDeleteModel={deleteRegisteredModel}
                   onEvictModel={evictModel}
                   onPickImportFile={pickLocalModel}
-                  onPickEngineBinaryFile={pickEngineBinary}
                   onPreloadModel={preloadModel}
-                  onInstallEngineBinary={installEngineBinary}
-                  onActivateEngineVersion={activateEngineVersion}
                   onRegisterModel={registerLocalModel}
                   onUpdateModelConfig={updateModelConfig}
                   onSelectModel={setSelectedModelId}
@@ -492,6 +503,10 @@ export function App() {
               path="/settings"
               element={
                 <SettingsScreen
+                  engines={engines}
+                  onActivateEngineVersion={activateEngineVersion}
+                  onInstallEngineBinary={installEngineBinary}
+                  onPickEngineBinaryFile={pickEngineBinary}
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}

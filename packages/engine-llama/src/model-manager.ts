@@ -25,7 +25,13 @@ import {
   downloadPrebuiltMetalLlamaCppBinary,
   importLocalLlamaCppBinary,
 } from "./binary-installer.js";
-import { type GgufVerificationResult, toArtifactMetadata, verifyGgufFile } from "./gguf.js";
+import {
+  hasGgufCompanionMetadataFiles,
+  inspectGgufFile,
+  type GgufVerificationResult,
+  toArtifactMetadata,
+  verifyGgufFile,
+} from "./gguf.js";
 import { type LiveLlamaCppSession, launchLlamaCppSession } from "./session.js";
 
 export interface IndexedModelRecord {
@@ -330,6 +336,21 @@ function getContextLength(artifact: ModelArtifact, profile: ModelProfile): numbe
   return 4096;
 }
 
+function shouldReplaceStoredContextOverride(
+  overrideValue: unknown,
+  detectedContextLength: number | undefined,
+): boolean {
+  if (typeof overrideValue !== "number" || !Number.isFinite(overrideValue) || overrideValue <= 0) {
+    return true;
+  }
+
+  if (detectedContextLength === undefined) {
+    return false;
+  }
+
+  return Math.floor(overrideValue) === detectedContextLength;
+}
+
 function createRuntimeKey(profile: ModelProfile): RuntimeKey {
   const configHash = createHash("sha1")
     .update(
@@ -592,6 +613,94 @@ export class LlamaCppModelManager {
       indexed: toIndexedRecord(artifact, profile, existing?.loadCount ?? 0, existing?.lastLoadedAt),
       metadata: verification.metadata,
     };
+  }
+
+  async refreshLocalModelMetadata(filePath: string): Promise<RegisteredLocalModel> {
+    const normalizedPath = path.resolve(filePath);
+    const existing = this.#modelsRepository
+      .list()
+      .find((record) => path.resolve(record.artifact.localPath) === normalizedPath);
+    if (!existing) {
+      return this.registerLocalModel({ filePath: normalizedPath });
+    }
+
+    const now = this.#now();
+    const metadata = await inspectGgufFile(normalizedPath);
+    const stats = statSync(normalizedPath);
+    const mmprojPath = findMmprojCompanionPath(normalizedPath);
+    const capabilities = deriveCapabilities(normalizedPath, metadata, mmprojPath);
+    const capabilityOverrides = normalizeCapabilityOverrides(existing.profile?.capabilityOverrides);
+    const effectiveCapabilities = applyCapabilityOverrides(capabilities, capabilityOverrides);
+    const role = deriveRole(effectiveCapabilities);
+    const artifactName = metadata.modelName ?? existing.artifact.name;
+    const architecture = metadata.architecture ?? existing.artifact.architecture;
+    const quantization = metadata.quantization ?? existing.artifact.quantization;
+    const currentContextOverride = existing.profile?.parameterOverrides.contextLength;
+    const nextParameterOverrides = {
+      ...(existing.profile?.parameterOverrides ?? {}),
+    };
+
+    if (
+      metadata.contextLength !== undefined &&
+      shouldReplaceStoredContextOverride(
+        currentContextOverride,
+        existing.artifact.metadata.contextLength,
+      )
+    ) {
+      nextParameterOverrides.contextLength = metadata.contextLength;
+    }
+
+    const artifact: ModelArtifact = {
+      schemaVersion: existing.artifact.schemaVersion,
+      id: existing.artifact.id,
+      name: artifactName,
+      localPath: normalizedPath,
+      format: "gguf",
+      sizeBytes: stats.size,
+      ...(architecture ? { architecture } : {}),
+      ...(quantization ? { quantization } : {}),
+      createdAt: existing.artifact.createdAt,
+      updatedAt: now,
+      source: existing.artifact.source,
+      metadata: toRegisteredArtifactMetadata(normalizedPath, metadata, mmprojPath),
+      capabilities,
+      tags: existing.artifact.tags,
+    };
+
+    const displayName = existing.profile?.displayName ?? existing.artifact.name;
+    const checksumSeed = existing.artifact.source.checksumSha256 ?? existing.artifact.id;
+    const profile: ModelProfile = {
+      schemaVersion: existing.profile?.schemaVersion ?? 1,
+      id:
+        existing.profile?.id ?? createDeterministicId("profile", displayName, checksumSeed),
+      modelId: artifact.id,
+      displayName,
+      engineType: "llama.cpp",
+      pinned: existing.profile?.pinned ?? false,
+      defaultTtlMs: existing.profile?.defaultTtlMs ?? 900_000,
+      ...(existing.profile?.promptCacheKey
+        ? { promptCacheKey: existing.profile.promptCacheKey }
+        : {}),
+      role,
+      parameterOverrides: nextParameterOverrides,
+      capabilityOverrides,
+      createdAt: existing.profile?.createdAt ?? now,
+      updatedAt: now,
+    };
+
+    this.#modelsRepository.save(artifact, profile);
+
+    return {
+      artifact,
+      profile,
+      checksumSha256: existing.artifact.source.checksumSha256 ?? "",
+      indexed: toIndexedRecord(artifact, profile, existing.loadCount, existing.lastLoadedAt),
+      metadata,
+    };
+  }
+
+  hasCompanionMetadataFiles(filePath: string): boolean {
+    return hasGgufCompanionMetadataFiles(path.resolve(filePath));
   }
 
   listIndexedModels(): IndexedModelRecord[] {

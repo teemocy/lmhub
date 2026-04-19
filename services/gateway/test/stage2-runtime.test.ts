@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +12,11 @@ import {
   fixtureModelProfile,
   openDatabase,
 } from "@localhub/db";
-import { readEngineVersionRegistry, resolveEngineSupportPaths } from "@localhub/engine-core";
+import {
+  readEngineVersionRegistry,
+  resolveEngineSupportPaths,
+  writeEngineVersionRegistry,
+} from "@localhub/engine-core";
 import { resolveAppPaths } from "@localhub/platform";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -246,6 +251,28 @@ const embeddingsModelProfile = {
   modelId: embeddingsModelArtifact.id,
   displayName: "BGE Small Embed",
   role: "embeddings" as const,
+  parameterOverrides: {},
+};
+const rerankModelArtifact = {
+  ...fixtureModelArtifact,
+  id: "model_jina_reranker",
+  name: "Jina Reranker",
+  localPath: "/models/jina-reranker.gguf",
+  capabilities: {
+    ...fixtureModelArtifact.capabilities,
+    chat: false,
+    rerank: true,
+    tools: false,
+    promptCache: false,
+  },
+};
+const rerankModelProfile = {
+  ...fixtureModelProfile,
+  id: "profile_jina_reranker_default",
+  modelId: rerankModelArtifact.id,
+  displayName: "Jina Reranker",
+  role: "rerank" as const,
+  parameterOverrides: {},
 };
 const secondaryChatModelArtifact = {
   ...fixtureModelArtifact,
@@ -302,13 +329,16 @@ async function createStage2Fixture(
   const models = new ModelsRepository(seeded.database);
   const seededArtifactPath = path.join(appPaths.modelsDir, "fixture-qwen25-coder.gguf");
   const seededEmbeddingPath = path.join(appPaths.modelsDir, "fixture-bge-small-embed.gguf");
+  const seededRerankPath = path.join(appPaths.modelsDir, "fixture-jina-reranker.gguf");
   const artifactPaths: Record<string, string> = {
     [fixtureModelArtifact.id]: seededArtifactPath,
     [embeddingsModelArtifact.id]: seededEmbeddingPath,
+    [rerankModelArtifact.id]: seededRerankPath,
   };
 
   await writeSampleGgufFile(seededArtifactPath);
   await writeSampleGgufFile(seededEmbeddingPath);
+  await writeSampleGgufFile(seededRerankPath);
 
   models.save(
     {
@@ -323,6 +353,13 @@ async function createStage2Fixture(
       localPath: seededEmbeddingPath,
     },
     embeddingsModelProfile,
+  );
+  models.save(
+    {
+      ...rerankModelArtifact,
+      localPath: seededRerankPath,
+    },
+    rerankModelProfile,
   );
 
   for (const seedModel of options.extraSeedModels ?? []) {
@@ -920,6 +957,49 @@ describe("gateway stage 2 runtime", () => {
     expect(stored?.loadCount).toBe(1);
   });
 
+  it("preloads pooled embedding and rerank models without requiring explicit batch overrides", async () => {
+    const fixture = await createStage2Fixture();
+
+    const embeddingLoad = await fixture.runtime.preloadModel(
+      embeddingsModelArtifact.id,
+      "trace-preload-embedding",
+    );
+    const rerankLoad = await fixture.runtime.preloadModel(
+      rerankModelArtifact.id,
+      "trace-preload-rerank",
+    );
+    const desktopModels = await fixture.runtime.listDesktopModels();
+    const embeddingDesktopModel = desktopModels.find(
+      (model) => model.id === embeddingsModelArtifact.id,
+    );
+    const rerankDesktopModel = desktopModels.find((model) => model.id === rerankModelArtifact.id);
+
+    expect(embeddingLoad.alreadyWarm).toBe(false);
+    expect(embeddingLoad.model).toMatchObject({
+      id: embeddingsModelArtifact.id,
+      state: "Ready",
+      loaded: true,
+    });
+    expect(rerankLoad.alreadyWarm).toBe(false);
+    expect(rerankLoad.model).toMatchObject({
+      id: rerankModelArtifact.id,
+      state: "Ready",
+      loaded: true,
+    });
+    expect(embeddingDesktopModel).toMatchObject({
+      id: embeddingsModelArtifact.id,
+      role: "embeddings",
+      batchSize: 512,
+      ubatchSize: 512,
+    });
+    expect(rerankDesktopModel).toMatchObject({
+      id: rerankModelArtifact.id,
+      role: "rerank",
+      batchSize: 512,
+      ubatchSize: 512,
+    });
+  });
+
   it("preloads and evicts through the control routes with real runtime state", async () => {
     const fixture = await createStage2Fixture();
     const gateway = await buildGateway({
@@ -1184,6 +1264,404 @@ describe("gateway stage 2 runtime", () => {
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });
+
+  it("deletes a registered model while keeping its artifact on disk when requested", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+    const artifactPath = fixture.artifactPaths[fixtureModelArtifact.id];
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const deleteResponse = await gateway.controlApp.inject({
+      method: "DELETE",
+      url: `/control/models/${encodeURIComponent(fixtureModelArtifact.id)}`,
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        deleteFiles: false,
+      },
+    });
+
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json()).toMatchObject({
+      accepted: true,
+      id: fixtureModelArtifact.id,
+      deletedFiles: false,
+      deletedPaths: [],
+    });
+
+    const desktopModels = await fixture.runtime.listDesktopModels();
+    expect(desktopModels.map((model) => model.id)).not.toContain(fixtureModelArtifact.id);
+    expect(existsSync(artifactPath)).toBe(true);
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("deletes a registered model and removes related files when requested", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+    const artifactPath = path.join(fixture.appPaths.modelsDir, "delete-me.gguf");
+    const mmprojPath = path.join(fixture.appPaths.modelsDir, "mmproj-delete-me.gguf");
+
+    await writeSampleGgufFile(artifactPath);
+    await writeSampleGgufFile(mmprojPath);
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const registerResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/models/register-local",
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        filePath: artifactPath,
+        displayName: "Delete Me",
+      },
+    });
+
+    expect(registerResponse.statusCode).toBe(201);
+    const registeredModelId = registerResponse.json().model.id as string;
+
+    const deleteResponse = await gateway.controlApp.inject({
+      method: "DELETE",
+      url: `/control/models/${encodeURIComponent(registeredModelId)}`,
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        deleteFiles: true,
+      },
+    });
+
+    expect(deleteResponse.statusCode).toBe(200);
+    expect(deleteResponse.json()).toMatchObject({
+      accepted: true,
+      id: registeredModelId,
+      deletedFiles: true,
+      deletedPaths: expect.arrayContaining([artifactPath, mmprojPath]),
+    });
+
+    const desktopModels = await fixture.runtime.listDesktopModels();
+    expect(desktopModels.map((model) => model.id)).not.toContain(registeredModelId);
+    expect(existsSync(artifactPath)).toBe(false);
+    expect(existsSync(mmprojPath)).toBe(false);
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("auto-cleans missing model registrations on startup", async () => {
+    const fixture = await createStage2Fixture();
+    const supportRoot = fixture.appPaths.supportRoot;
+    const missingArtifactPath = fixture.artifactPaths[fixtureModelArtifact.id];
+
+    await rm(missingArtifactPath, { force: true });
+    await fixture.runtime.stop();
+
+    const restartedRuntime = createRepositoryGatewayRuntime({
+      cwd: process.cwd(),
+      defaultModelTtlMs: 1_000,
+      env: {
+        ...process.env,
+        LOCAL_LLM_HUB_ENV: "test",
+      },
+      fakeWorkerStartupDelayMs: 25,
+      preferFakeWorker: true,
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      telemetryIntervalMs: 50,
+    });
+    await restartedRuntime.start();
+
+    fixture.runtime = restartedRuntime;
+    fixture.cleanup = async () => {
+      await restartedRuntime.stop();
+      await rm(supportRoot, { recursive: true, force: true });
+    };
+
+    const desktopModels = await restartedRuntime.listDesktopModels();
+    expect(desktopModels.map((model) => model.id)).not.toContain(fixtureModelArtifact.id);
+    expect(desktopModels.map((model) => model.id)).toEqual(
+      expect.arrayContaining([embeddingsModelArtifact.id, rerankModelArtifact.id]),
+    );
+  });
+
+  it("removes superseded llama.cpp release installs during startup cleanup", async () => {
+    const fixture = await createStage2Fixture();
+    const supportRoot = fixture.appPaths.supportRoot;
+    const currentPaths = resolveEngineSupportPaths(supportRoot, "llama.cpp");
+    const legacySupportRoot = path.join(path.dirname(supportRoot), "legacy-support");
+    const oldVersionTag = "release-b8663-darwin-arm64";
+    const newVersionTag = "release-b8840-darwin-arm64";
+    const currentOldInstallRoot = path.join(currentPaths.versionsRoot, oldVersionTag);
+    const currentNewInstallRoot = path.join(currentPaths.versionsRoot, newVersionTag);
+    const currentOldBinaryPath = path.join(currentOldInstallRoot, "llama-b8663", "llama-server");
+    const currentNewBinaryPath = path.join(currentNewInstallRoot, "llama-b8840", "llama-server");
+    const legacyOldInstallRoot = path.join(
+      legacySupportRoot,
+      "engines",
+      "llama.cpp",
+      "versions",
+      oldVersionTag,
+    );
+    const legacyOldBinaryPath = path.join(legacyOldInstallRoot, "llama-b8663", "llama-server");
+
+    await fixture.runtime.stop();
+    await mkdir(path.dirname(currentOldBinaryPath), { recursive: true });
+    await mkdir(path.dirname(currentNewBinaryPath), { recursive: true });
+    await mkdir(path.dirname(legacyOldBinaryPath), { recursive: true });
+    await writeFile(currentOldBinaryPath, "#!/bin/sh\nexit 0\n");
+    await writeFile(currentNewBinaryPath, "#!/bin/sh\nexit 0\n");
+    await writeFile(legacyOldBinaryPath, "#!/bin/sh\nexit 0\n");
+
+    writeEngineVersionRegistry(currentPaths.registryFile, {
+      engineType: "llama.cpp",
+      activeVersionTag: newVersionTag,
+      versions: [
+        {
+          versionTag: oldVersionTag,
+          installPath: currentOldInstallRoot,
+          binaryPath: currentOldBinaryPath,
+          source: "release",
+          channel: "stable",
+          managedBy: "binary",
+          installedAt: "2026-04-18T12:00:00.000Z",
+          notes: ["Downloaded llama.cpp release b8663."],
+        },
+        {
+          versionTag: newVersionTag,
+          installPath: currentNewInstallRoot,
+          binaryPath: currentNewBinaryPath,
+          source: "release",
+          channel: "stable",
+          managedBy: "binary",
+          installedAt: "2026-04-19T12:00:00.000Z",
+          notes: ["Downloaded llama.cpp release b8840."],
+        },
+      ],
+      updatedAt: "2026-04-19T12:00:00.000Z",
+    });
+
+    const seeded = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const engines = new EngineVersionsRepository(seeded.database);
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_old_current",
+      versionTag: oldVersionTag,
+      binaryPath: currentOldBinaryPath,
+      isActive: false,
+      installedAt: "2026-04-18T12:00:00.000Z",
+    });
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_old_legacy",
+      versionTag: oldVersionTag,
+      binaryPath: legacyOldBinaryPath,
+      isActive: false,
+      installedAt: "2026-04-08T12:00:00.000Z",
+    });
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_new_current",
+      versionTag: newVersionTag,
+      binaryPath: currentNewBinaryPath,
+      isActive: true,
+      installedAt: "2026-04-19T12:00:00.000Z",
+    });
+    seeded.database.close();
+
+    const restartedRuntime = createRepositoryGatewayRuntime({
+      cwd: process.cwd(),
+      defaultModelTtlMs: 1_000,
+      env: {
+        ...process.env,
+        LOCAL_LLM_HUB_ENV: "test",
+      },
+      fakeWorkerStartupDelayMs: 25,
+      preferFakeWorker: true,
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      telemetryIntervalMs: 50,
+    });
+    await restartedRuntime.start();
+
+    fixture.runtime = restartedRuntime;
+    fixture.cleanup = async () => {
+      await restartedRuntime.stop();
+      await rm(supportRoot, { recursive: true, force: true });
+      await rm(legacySupportRoot, { recursive: true, force: true });
+    };
+
+    const registry = readEngineVersionRegistry(currentPaths.registryFile, "llama.cpp");
+    const reopened = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const storedEngines = new EngineVersionsRepository(reopened.database).list();
+    reopened.database.close();
+
+    expect(registry.activeVersionTag).toBe(newVersionTag);
+    expect(registry.versions).toEqual([
+      expect.objectContaining({
+        versionTag: newVersionTag,
+        binaryPath: currentNewBinaryPath,
+      }),
+    ]);
+    expect(storedEngines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          versionTag: newVersionTag,
+          binaryPath: currentNewBinaryPath,
+          isActive: true,
+        }),
+      ]),
+    );
+    expect(storedEngines.find((record) => record.versionTag === oldVersionTag)).toBeUndefined();
+    expect(restartedRuntime.listEngines().find((record) => record.version === oldVersionTag)).toBeUndefined();
+    expect(existsSync(currentOldInstallRoot)).toBe(false);
+    expect(existsSync(legacyOldInstallRoot)).toBe(false);
+    expect(existsSync(currentNewInstallRoot)).toBe(true);
+  });
+
+  it("refreshes stored GGUF metadata from companion sidecars on startup", async () => {
+    const fixture = await createStage2Fixture();
+    const supportRoot = fixture.appPaths.supportRoot;
+    const artifactPath = fixture.artifactPaths[fixtureModelArtifact.id];
+    const artifactDirectory = path.dirname(artifactPath);
+
+    await writeFile(
+      path.join(artifactDirectory, "config.json"),
+      `${JSON.stringify(
+        {
+          _name_or_path: "Qwen3.5-35B-A3B",
+          model_type: "qwen3_moe",
+          max_position_embeddings: 262144,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      path.join(artifactDirectory, "tokenizer_config.json"),
+      `${JSON.stringify(
+        {
+          tokenizer_class: "Qwen2TokenizerFast",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await fixture.runtime.stop();
+
+    const restartedRuntime = createRepositoryGatewayRuntime({
+      cwd: process.cwd(),
+      defaultModelTtlMs: 1_000,
+      env: {
+        ...process.env,
+        LOCAL_LLM_HUB_ENV: "test",
+      },
+      fakeWorkerStartupDelayMs: 25,
+      preferFakeWorker: true,
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      telemetryIntervalMs: 50,
+    });
+    await restartedRuntime.start();
+
+    fixture.runtime = restartedRuntime;
+    fixture.cleanup = async () => {
+      await restartedRuntime.stop();
+      await rm(supportRoot, { recursive: true, force: true });
+    };
+
+    const refreshed = (await restartedRuntime.listDesktopModels()).find(
+      (model) => model.id === fixtureModelArtifact.id,
+    );
+
+    expect(refreshed).toMatchObject({
+      id: fixtureModelArtifact.id,
+      architecture: "qwen3_moe",
+      contextLength: 262144,
+      parameterCount: 35_000_000_000,
+      tokenizer: "Qwen2TokenizerFast",
+    });
+  });
+
+  it.runIf(supportsMlxTests)(
+    "fails preload before worker startup when a registered MLX directory is incomplete",
+    async () => {
+      const fixture = await createStage2Fixture();
+      const gateway = await buildGateway({
+        config: createTestConfig(),
+        runtime: fixture.runtime,
+      });
+      const artifactPath = path.join(
+        fixture.appPaths.supportRoot,
+        "models",
+        "missing-mlx-files-after-register",
+      );
+
+      await writeSampleMlxModelDirectory(artifactPath);
+      await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+      const registerResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/models/register-local",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          filePath: artifactPath,
+          displayName: "Missing MLX Files After Register",
+        },
+      });
+
+      expect(registerResponse.statusCode).toBe(201);
+      const registeredModelId = registerResponse.json().model.id as string;
+
+      await rm(path.join(artifactPath, "config.json"), { force: true });
+
+      const preloadResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/models/preload",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          modelId: registeredModelId,
+        },
+      });
+
+      expect(preloadResponse.statusCode).toBe(409);
+      expect(preloadResponse.json()).toMatchObject({
+        error: "model_load_failed",
+        message: `MLX model directory is incomplete at ${artifactPath}. Re-download the MLX bundle to restore missing files.`,
+      });
+
+      const desktopModels = await fixture.runtime.listDesktopModels();
+      expect(desktopModels).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: registeredModelId,
+            artifactStatus: "missing",
+            loaded: false,
+          }),
+        ]),
+      );
+
+      await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+    },
+  );
 
   it("emits shared lifecycle events in load and evict order", async () => {
     const fixture = await createStage2Fixture();
@@ -1722,6 +2200,106 @@ describe("gateway stage 2 runtime", () => {
         }),
       ],
     });
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("serves rerank through the public api for rerank-capable models", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/rerank",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: rerankModelArtifact.id,
+        query: "Which section explains interconnect responsibilities?",
+        documents: [
+          "Snoop transactions use the snoop address, snoop response, and snoop data channels.",
+          "The interconnect receives transactions, issues snoop transactions, and generates the response for the initiating master.",
+          "ReadNoSnoop is used in a region of memory that is not Shareable with other masters.",
+        ],
+        top_n: 2,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      object: "list",
+      model: rerankModelArtifact.id,
+      results: [
+        expect.objectContaining({
+          index: 1,
+          relevance_score: expect.any(Number),
+        }),
+        expect.objectContaining({
+          relevance_score: expect.any(Number),
+        }),
+      ],
+    });
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("accepts the public embedding model name and persists api logs against the canonical model id", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/embeddings",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: embeddingsModelProfile.displayName,
+        input: "hello world",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      object: "list",
+      model: embeddingsModelProfile.displayName,
+      data: [
+        expect.objectContaining({
+          object: "embedding",
+          index: 0,
+          embedding: expect.any(Array),
+        }),
+      ],
+    });
+
+    const reopened = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const chat = new ChatRepository(reopened.database);
+    const logs = chat.listRecentApiLogs();
+    reopened.database.close();
+
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endpoint: "/v1/embeddings",
+          modelId: embeddingsModelArtifact.id,
+          statusCode: 200,
+        }),
+      ]),
+    );
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });

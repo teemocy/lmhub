@@ -525,6 +525,85 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     expect(modelsRepository.list()).toHaveLength(0);
   }, 15_000);
 
+  it("retries a failed download and completes after a transient provider error", async () => {
+    const supportRoot = await createSupportRoot();
+    const payload = createSampleGgufBuffer("Flaky Tiny Chat");
+    const checksumSha256 = createSha256(payload);
+    let shouldFail = true;
+    let requestCount = 0;
+    const server = createServer((request, response) => {
+      if (request.url === "/flaky.gguf") {
+        requestCount += 1;
+        if (shouldFail) {
+          shouldFail = false;
+          response.writeHead(503).end("temporary failure");
+          return;
+        }
+        handleArtifactRequest(request, response, payload);
+        return;
+      }
+
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => server.close());
+    const port = (server.address() as { port: number }).port;
+
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const modelsRepository = new ModelsRepository(database.database);
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+      }),
+      modelsRepository,
+      engineVersionsRepository: new EngineVersionsRepository(database.database),
+    });
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      downloadsRepository: new DownloadTasksRepository(database.database),
+      modelManager: manager,
+      providerSearch: new ProviderSearchService([
+        new FakeProvider({
+          provider: "huggingface",
+          artifactId: "flaky-stage3-tiny-chat-q4",
+          url: `http://127.0.0.1:${port}/flaky.gguf`,
+          headers: {},
+          fileName: "flaky-stage3-tiny-chat-q4.gguf",
+          checksum: {
+            algorithm: "sha256",
+            value: checksumSha256,
+            source: "provider",
+            status: "verified",
+          },
+          supportsRange: true,
+          estimatedSizeBytes: payload.length,
+        }),
+      ]),
+      chunkBytes: 128,
+    });
+
+    const started = await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/flaky-stage3-tiny-chat",
+      artifactId: "flaky-stage3-tiny-chat-q4",
+      displayName: "Flaky Tiny Chat",
+    });
+
+    const failed = await downloads.resumeDownload(started.id);
+    expect(failed.status).toBe("error");
+    expect(failed.errorMessage).toContain("status 503");
+
+    const retried = await downloads.resumeDownload(started.id);
+    expect(retried.status).toBe("completed");
+    expect(requestCount).toBeGreaterThanOrEqual(2);
+    expect(modelsRepository.list()).toHaveLength(1);
+  }, 15_000);
+
   it("downloads every shard in a bundle and registers only the primary shard once complete", async () => {
     const supportRoot = await createSupportRoot();
     const primaryPayload = createSampleGgufBuffer("Bundle Tiny Chat");
@@ -715,7 +794,7 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     );
   }, 15_000);
 
-  it("registers an MLX bundle once core files complete even if config.json fails", async () => {
+  it("waits for the primary MLX config file before auto-registering a bundle", async () => {
     const supportRoot = await createSupportRoot();
     const database = createTestDatabase();
     cleanups.push(database.cleanup);
@@ -831,12 +910,120 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
       registrationPath: "4bit",
     });
 
-    await waitFor(() => registrarCalls.length === 1);
+    await waitFor(() => downloads.listDownloads()[0]?.errorFileCount === 1);
 
     const tasks = downloads.listDownloads();
-    expect(registrarCalls).toEqual([path.join(supportRoot, "models", "acme-stage3-mlx", "4bit")]);
+    expect(registrarCalls).toEqual([]);
     expect(tasks[0]?.status).toBe("error");
     expect(tasks[0]?.files.find((file) => file.artifactId === "mlx-config")?.status).toBe("error");
+  }, 15_000);
+
+  it("sanitizes MLX registration paths before registering bundle models", async () => {
+    const supportRoot = await createSupportRoot();
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const tokenizerPayload = Buffer.from('{"model":"bpe"}\n', "utf8");
+    const shardPayload = Buffer.from("mlx shard payload", "utf8");
+    const registrarCalls: string[] = [];
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      downloadsRepository: new DownloadTasksRepository(database.database),
+      modelRegistrars: {
+        mlx: {
+          async registerLocalModel(options) {
+            registrarCalls.push(options.filePath);
+            return {
+              artifact: {
+                id: "model_stage3_mlx_sanitized",
+                sizeBytes: tokenizerPayload.length + shardPayload.length,
+              },
+              profile: {
+                displayName: "Stage3 MLX Sanitized",
+              },
+            };
+          },
+        },
+      },
+      providerSearch: new ProviderSearchService([
+        new FakeProvider([
+          {
+            provider: "huggingface",
+            artifactId: "mlx-tokenizer",
+            url: "https://example.invalid/mlx/tokenizer.json",
+            headers: {},
+            fileName: "Qwen3.5-0.8B-8bit(MLX)/tokenizer.json",
+            supportsRange: false,
+            estimatedSizeBytes: tokenizerPayload.length,
+          },
+          {
+            provider: "huggingface",
+            artifactId: "mlx-shard",
+            url: "https://example.invalid/mlx/model.safetensors",
+            headers: {},
+            fileName: "Qwen3.5-0.8B-8bit(MLX)/model.safetensors",
+            supportsRange: false,
+            estimatedSizeBytes: shardPayload.length,
+          },
+        ]),
+      ]),
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/tokenizer.json")) {
+          return new Response(tokenizerPayload, {
+            status: 200,
+            headers: {
+              "content-length": String(tokenizerPayload.length),
+            },
+          });
+        }
+        if (url.endsWith("/model.safetensors")) {
+          return new Response(shardPayload, {
+            status: 200,
+            headers: {
+              "content-length": String(shardPayload.length),
+            },
+          });
+        }
+
+        return new Response(null, { status: 404 });
+      },
+    });
+
+    const bundleId = "stage3-mlx-sanitized-path";
+    const providerModelId = "Qwen/Qwen3.5-0.8B-8bit(MLX)";
+    const registrationPath = "Qwen3.5-0.8B-8bit(MLX)";
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId,
+      artifactId: "mlx-tokenizer",
+      displayName: "Qwen3.5 0.8B 8bit MLX",
+      bundleId,
+      bundlePrimaryArtifactId: "mlx-tokenizer",
+      engineType: "mlx",
+      registrationPath,
+    });
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId,
+      artifactId: "mlx-shard",
+      displayName: "Qwen3.5 0.8B 8bit MLX",
+      bundleId,
+      bundlePrimaryArtifactId: "mlx-tokenizer",
+      engineType: "mlx",
+      registrationPath,
+    });
+
+    await waitFor(() => registrarCalls.length === 1);
+
+    expect(registrarCalls).toEqual([
+      path.join(
+        supportRoot,
+        "models",
+        "Qwen-Qwen3.5-0.8B-8bit-MLX",
+        "Qwen3.5-0.8B-8bit-MLX",
+      ),
+    ]);
   }, 15_000);
 
   it("repairs stale MLX bundle errors once the bundle exists on disk", async () => {

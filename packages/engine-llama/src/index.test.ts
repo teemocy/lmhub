@@ -280,6 +280,12 @@ describe("llama.cpp stage 1 scaffolding", () => {
     const profile = {
       ...LLAMA_CPP_FIXTURE_PROFILE,
       role: "embeddings" as const,
+      parameterOverrides: {
+        ...LLAMA_CPP_FIXTURE_PROFILE.parameterOverrides,
+        batchSize: 2048,
+        ubatchSize: 2048,
+        poolingMethod: "mean" as const,
+      },
     };
     const runtimeKey = {
       ...LLAMA_CPP_FIXTURE_RUNTIME_KEY,
@@ -296,7 +302,96 @@ describe("llama.cpp stage 1 scaffolding", () => {
 
     expect(command.command).toBe(fakeBinaryPath);
     expect(command.managedBy).toBe("binary");
-    expect(command.args).toEqual(expect.arrayContaining(["--embedding"]));
+    expect(command.args).toEqual(
+      expect.arrayContaining(["--embedding", "--ubatch-size", "2048", "--pooling", "mean"]),
+    );
+  });
+
+  it("emits --rerank for rerank runtimes when resolving a binary launch plan", async () => {
+    const supportRoot = await createSupportRoot();
+    const { adapter, fakeBinaryPath } = await createBinaryAdapter(supportRoot);
+
+    const artifact = {
+      ...LLAMA_CPP_FIXTURE_ARTIFACT,
+      capabilities: {
+        ...LLAMA_CPP_FIXTURE_ARTIFACT.capabilities,
+        chat: false,
+        embeddings: false,
+        rerank: true,
+      },
+    };
+    const profile = {
+      ...LLAMA_CPP_FIXTURE_PROFILE,
+      role: "rerank" as const,
+    };
+    const runtimeKey = {
+      ...LLAMA_CPP_FIXTURE_RUNTIME_KEY,
+      role: "rerank" as const,
+    };
+
+    await adapter.install("b3119-stage1");
+    const command = await adapter.resolveCommand({
+      artifact,
+      profile,
+      runtimeKey,
+      supportRoot,
+    });
+
+    expect(command.command).toBe(fakeBinaryPath);
+    expect(command.managedBy).toBe("binary");
+    expect(command.args).toEqual(expect.arrayContaining(["--rerank", "--batch-size", "512"]));
+    expect(command.args).toEqual(expect.arrayContaining(["--ubatch-size", "512"]));
+    expect(command.args).toEqual(expect.arrayContaining(["--parallel", "1"]));
+    expect(command.args).toEqual(expect.arrayContaining(["--pooling", "rank"]));
+    expect(command.args).toEqual(
+      expect.arrayContaining(["--override-kv", "qwen2.pooling_type=int:4"]),
+    );
+  });
+
+  it("does not inject a rerank pooling override when the GGUF already declares one", async () => {
+    const supportRoot = await createSupportRoot();
+    const { adapter } = await createBinaryAdapter(supportRoot);
+
+    const artifact = {
+      ...LLAMA_CPP_FIXTURE_ARTIFACT,
+      architecture: "qwen3",
+      metadata: {
+        ...LLAMA_CPP_FIXTURE_ARTIFACT.metadata,
+        architecture: "qwen3",
+        metadata: {
+          ...LLAMA_CPP_FIXTURE_ARTIFACT.metadata.metadata,
+          "qwen3.pooling_type": 4,
+        },
+      },
+      capabilities: {
+        ...LLAMA_CPP_FIXTURE_ARTIFACT.capabilities,
+        chat: false,
+        embeddings: false,
+        rerank: true,
+      },
+    };
+    const profile = {
+      ...LLAMA_CPP_FIXTURE_PROFILE,
+      role: "rerank" as const,
+    };
+    const runtimeKey = {
+      ...LLAMA_CPP_FIXTURE_RUNTIME_KEY,
+      role: "rerank" as const,
+    };
+
+    await adapter.install("b3119-stage1");
+    const command = await adapter.resolveCommand({
+      artifact,
+      profile,
+      runtimeKey,
+      supportRoot,
+    });
+
+    expect(command.args).toEqual(expect.arrayContaining(["--pooling", "rank"]));
+    expect(command.args).toEqual(expect.arrayContaining(["--parallel", "1"]));
+    expect(command.args).not.toEqual(
+      expect.arrayContaining(["--override-kv", "qwen3.pooling_type=int:4"]),
+    );
   });
 
   it("emits --mmproj for vision-capable runtimes when the sidecar is registered", async () => {

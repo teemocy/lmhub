@@ -5,6 +5,7 @@ export const preloadBridgeContract = {
     "gateway:subscribe-events",
     "gateway:list-model-library",
     "gateway:register-local-model",
+    "gateway:delete-registered-model",
     "gateway:update-model-config",
     "gateway:preload-model",
     "gateway:evict-model",
