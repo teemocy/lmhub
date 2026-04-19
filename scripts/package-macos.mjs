@@ -1,14 +1,17 @@
+import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const desktopDir = path.join(repoRoot, "apps", "desktop");
+const desktopAssetsDir = path.join(desktopDir, "assets");
 const gatewayDir = path.join(repoRoot, "services", "gateway");
 const packagesDir = path.join(repoRoot, "packages");
 const pnpmStoreDir = path.join(repoRoot, "node_modules", ".pnpm");
 const releaseRoot = path.join(repoRoot, "release", "macos");
 const appName = "LM Hub";
+const bundleIconFileName = "app-icon.icns";
 const electronAppTemplate = path.join(
   desktopDir,
   "node_modules",
@@ -18,6 +21,7 @@ const electronAppTemplate = path.join(
 );
 const appBundlePath = path.join(releaseRoot, `${appName}.app`);
 const contentsRoot = path.join(appBundlePath, "Contents");
+const infoPlistPath = path.join(contentsRoot, "Info.plist");
 const resourcesDir = path.join(contentsRoot, "Resources");
 const appPayloadDir = path.join(resourcesDir, "app");
 const packagedGatewayDir = path.join(resourcesDir, "services", "gateway");
@@ -35,6 +39,10 @@ function copyIntoBundle(sourcePath, destinationPath) {
   cpSync(sourcePath, destinationPath, {
     recursive: true,
   });
+}
+
+function updateInfoPlist(command) {
+  execFileSync("/usr/libexec/PlistBuddy", ["-c", command, infoPlistPath]);
 }
 
 if (process.platform !== "darwin") {
@@ -70,6 +78,12 @@ for (const relativePath of ["dist", "node_modules", "package.json"]) {
 
 copyIntoBundle(packagesDir, packagedPackagesDir);
 copyIntoBundle(pnpmStoreDir, path.join(packagedNodeModulesDir, ".pnpm"));
+copyIntoBundle(desktopAssetsDir, path.join(appPayloadDir, "assets"));
+copyIntoBundle(path.join(desktopAssetsDir, bundleIconFileName), path.join(resourcesDir, bundleIconFileName));
+
+updateInfoPlist(`Set :CFBundleDisplayName "${appName}"`);
+updateInfoPlist(`Set :CFBundleName "${appName}"`);
+updateInfoPlist(`Set :CFBundleIconFile "${bundleIconFileName}"`);
 
 writeFileSync(
   path.join(releaseRoot, "manifest.json"),
@@ -82,10 +96,12 @@ writeFileSync(
         "Resources/app/dist",
         "Resources/app/dist-electron",
         "Resources/app/node_modules",
+        "Resources/app/assets",
         "Resources/services/gateway/dist",
         "Resources/services/gateway/node_modules",
         "Resources/packages",
         "Resources/node_modules/.pnpm",
+        `Resources/${bundleIconFileName}`,
       ],
       signingIdentity: process.env.APPLE_SIGNING_IDENTITY ?? null,
       notarizationConfigured: Boolean(process.env.APPLE_ID && process.env.APPLE_TEAM_ID),

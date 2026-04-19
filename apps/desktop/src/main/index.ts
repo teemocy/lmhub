@@ -32,6 +32,7 @@ let tray: Tray | null = null;
 let quitting = false;
 const APP_NAME = "LM Hub";
 const ENGINE_UPDATE_CACHE_TTL_MS = 5 * 60_000;
+const APP_ICON_FILE = "app-icon.png";
 
 const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
 const runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
@@ -79,7 +80,32 @@ gatewayManager.on("chatStream", (event) => {
   relayToWindows(IPC_CHANNELS.gatewayChatStream, event);
 });
 
-const createTrayIcon = () =>
+const resolveDesktopAssetPath = (fileName: string): string | undefined => {
+  const candidatePaths = [
+    path.join(workspaceRoot, "apps", "desktop", "assets", fileName),
+    path.join(process.resourcesPath, "app", "assets", fileName),
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    if (existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return undefined;
+};
+
+const loadDesktopAssetImage = (fileName: string) => {
+  const assetPath = resolveDesktopAssetPath(fileName);
+  if (!assetPath) {
+    return undefined;
+  }
+
+  const image = nativeImage.createFromPath(assetPath);
+  return image.isEmpty() ? undefined : image;
+};
+
+const createFallbackTrayIcon = () =>
   nativeImage.createFromDataURL(
     `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -89,6 +115,25 @@ const createTrayIcon = () =>
       </svg>
     `)}`,
   );
+
+const createTrayIcon = () => {
+  const appIcon = loadDesktopAssetImage(APP_ICON_FILE);
+  if (!appIcon) {
+    return createFallbackTrayIcon();
+  }
+
+  const traySize = process.platform === "darwin" ? 18 : 32;
+  const trayIcon = appIcon.resize({
+    width: traySize,
+    height: traySize,
+  });
+
+  if (process.platform === "darwin") {
+    trayIcon.setTemplateImage(true);
+  }
+
+  return trayIcon;
+};
 
 const showWindow = (): void => {
   if (!mainWindow) {
@@ -428,12 +473,14 @@ const reloadDesktopConfig = (): void => {
 };
 
 const createWindow = async (): Promise<void> => {
+  const appIcon = loadDesktopAssetImage(APP_ICON_FILE);
   mainWindow = new BrowserWindow({
     width: 1460,
     height: 920,
     minWidth: 1180,
     minHeight: 760,
     backgroundColor: "#f4efe6",
+    ...(appIcon ? { icon: appIcon } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -776,6 +823,10 @@ const bootstrap = async (): Promise<void> => {
   });
 
   await app.whenReady();
+  const appIcon = loadDesktopAssetImage(APP_ICON_FILE);
+  if (process.platform === "darwin" && appIcon) {
+    app.dock?.setIcon(appIcon);
+  }
   Menu.setApplicationMenu(null);
   registerIpcHandlers();
   await createWindow();
